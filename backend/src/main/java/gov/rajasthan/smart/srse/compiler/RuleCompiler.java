@@ -38,11 +38,15 @@ public class RuleCompiler {
     }
 
     private String emit(Ast.Node node, List<Object> params) {
-        // Java 17 pattern-matching switch over the sealed Node hierarchy.
-        return switch (node) {
-            case Ast.GroupNode g -> emitGroup(g, params);
-            case Ast.PredicateNode p -> emitPredicate(p, params);
-        };
+        // Java 17: if/instanceof pattern matching (JEP 394). Type-pattern
+        // switch expressions require Java 21 and are not used here.
+        if (node instanceof Ast.GroupNode g) {
+            return emitGroup(g, params);
+        }
+        if (node instanceof Ast.PredicateNode p) {
+            return emitPredicate(p, params);
+        }
+        throw new IllegalStateException("Unexpected node: " + node);
     }
 
     private String emitGroup(Ast.GroupNode g, List<Object> params) {

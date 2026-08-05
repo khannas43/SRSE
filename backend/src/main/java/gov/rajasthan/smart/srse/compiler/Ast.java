@@ -57,6 +57,11 @@ public final class Ast {
                 throw new IllegalArgumentException("PredicateNode requires an operator");
             }
         }
+
+        /** Convenience for value-less unary operators (IS_TRUE, IS_FALSE, IS_NULL, NOT_NULL). */
+        public PredicateNode(String fieldKey, Operator operator) {
+            this(fieldKey, operator, null);
+        }
     }
 
     /** Root wrapper for a full ruleset specification. */
