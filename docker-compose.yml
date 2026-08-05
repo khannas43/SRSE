@@ -1,0 +1,123 @@
+# SRSE local development stack.
+# One command:  docker compose up   ->  frontend at http://localhost:3000
+#
+# Brings up: two app containers (frontend, backend) + the local lakehouse
+# stand-in (Presto + Hive metastore + MinIO) + DB2 operational store + a
+# one-shot synthetic-data seed job.
+#
+# DATA_MODE=synthetic here. In the client Dev environment use the 'live'
+# profile / overrides so the backend points at on-prem Presto + DB2 and the
+# presto/metastore/minio/seed services are NOT started.
+
+services:
+
+  # ---------- App: frontend (Next.js 16 / React 19) ----------
+  srse-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_BASE=http://localhost:8080
+      - NEXT_PUBLIC_AUTH_MODE=mock
+    depends_on:
+      - srse-backend
+    restart: unless-stopped
+
+  # ---------- App: backend (Java 17 / Spring Boot 3.x fat-JAR) ----------
+  srse-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=local
+      - DATA_MODE=synthetic
+      # Operational plane (DB2 / JPA)
+      - SRSE_DB2_URL=jdbc:db2://db2:50000/SRSEDB
+      - SRSE_DB2_USER=db2inst1
+      - SRSE_DB2_PASSWORD=srse_local_pw
+      # Analytical plane (PrestoDB / JDBC)
+      - SRSE_PRESTO_URL=jdbc:presto://presto:8080/iceberg/srse
+      - SRSE_PRESTO_USER=srse
+      # Auth
+      - SRSE_AUTH_MODE=mock
+      # Guardrails
+      - SRSE_COHORT_CAP=1000
+      - SRSE_QUERY_TIMEOUT_SECONDS=30
+    depends_on:
+      db2:
+        condition: service_started
+      presto:
+        condition: service_started
+    restart: unless-stopped
+
+  # ---------- Operational store: DB2 ----------
+  db2:
+    image: icr.io/db2_community/db2:11.5.8.0
+    privileged: true
+    ports:
+      - "50000:50000"
+    environment:
+      - LICENSE=accept
+      - DB2INST1_PASSWORD=srse_local_pw
+      - DBNAME=SRSEDB
+      - ARCHIVE_LOGS=false
+    volumes:
+      - db2data:/database
+    # NOTE: DB2 community image is heavy and slow to first-boot (minutes).
+    # If laptop resources are tight, a lighter operational store can be
+    # substituted for local dev ONLY (keep DB2 for parity in client Dev).
+
+  # ---------- Lakehouse stand-in: MinIO (object storage) ----------
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - miniodata:/data
+
+  # ---------- Lakehouse stand-in: Hive metastore (for Iceberg) ----------
+  metastore:
+    image: apache/hive:3.1.3
+    command: hive --service metastore
+    ports:
+      - "9083:9083"
+    environment:
+      - SERVICE_NAME=metastore
+    depends_on:
+      - minio
+
+  # ---------- Lakehouse stand-in: PrestoDB 0.297 ----------
+  presto:
+    image: prestodb/presto:0.297
+    ports:
+      - "8081:8080"   # host 8081 -> presto 8080 (backend uses internal 8080)
+    volumes:
+      - ./docker/presto/catalog:/opt/presto-server/etc/catalog:ro
+    depends_on:
+      - metastore
+      - minio
+
+  # ---------- One-shot: generate synthetic data as Iceberg tables ----------
+  seed:
+    build:
+      context: ./docker/seed
+      dockerfile: Dockerfile
+    environment:
+      - PRESTO_URL=jdbc:presto://presto:8080/iceberg/srse
+      - ROWS=200000
+    depends_on:
+      - presto
+    restart: "no"
+
+volumes:
+  db2data:
+  miniodata:

@@ -1,0 +1,44 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: srse-backend
+  # NOTE: two datasources are defined in code (Operational/Analytical
+  # DataSourceConfig). Spring Boot auto-datasource is bypassed intentionally.
+
+# ---- Operational plane: DB2 (JPA) ----
+srse:
+  datasource:
+    operational:
+      jdbc-url: ${SRSE_DB2_URL:jdbc:db2://localhost:50000/SRSEDB}
+      username: ${SRSE_DB2_USER:db2inst1}
+      password: ${SRSE_DB2_PASSWORD:srse_local_pw}
+      driver-class-name: com.ibm.db2.jcc.DB2Driver
+    # ---- Analytical plane: PrestoDB (JDBC) ----
+    analytical:
+      jdbc-url: ${SRSE_PRESTO_URL:jdbc:presto://localhost:8081/iceberg/srse}
+      username: ${SRSE_PRESTO_USER:srse}
+      driver-class-name: com.facebook.presto.jdbc.PrestoDriver
+  data-mode: ${DATA_MODE:synthetic}
+  auth-mode: ${SRSE_AUTH_MODE:mock}
+  guardrails:
+    cohort-cap: ${SRSE_COHORT_CAP:1000}
+    query-timeout-seconds: ${SRSE_QUERY_TIMEOUT_SECONDS:30}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  jpa:
+    hibernate:
+      ddl-auto: update      # local convenience only; use migrations in Dev
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.DB2Dialect
+    show-sql: false

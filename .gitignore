@@ -1,0 +1,24 @@
+# Secrets / env
+.env
+*.env.local
+backend/src/main/resources/application-secret*.yml
+
+# Java / Maven
+backend/target/
+*.class
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+npm-debug.log*
+
+# Docker volumes / local data
+**/data/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.DS_Store
