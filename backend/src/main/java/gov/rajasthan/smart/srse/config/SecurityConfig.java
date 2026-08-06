@@ -13,11 +13,12 @@ import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 /**
- * Minimal placeholder so the proof-of-life health check is actually reachable.
- * spring-boot-starter-security auto-locks every endpoint behind a login form
- * when no SecurityFilterChain is defined; this permit-list opens /api/health/**
- * (and springdoc) and keeps everything else authenticated as a safe default.
- * Replaced later by real RajSewadwar SSO / JWT auth.
+ * Minimal placeholder so the proof-of-life health check and decision seam are
+ * actually reachable. spring-boot-starter-security auto-locks every endpoint
+ * behind a login form when no SecurityFilterChain is defined; this permit-list
+ * opens /api/health/**, /api/decision/** (and springdoc) and keeps everything
+ * else authenticated as a safe default. Temporary until real RajSewadwar SSO /
+ * JWT auth replaces this.
  */
 @Configuration
 @EnableWebSecurity
@@ -44,6 +45,7 @@ public class SecurityConfig {
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/health/**").permitAll()
+                .requestMatchers("/api/decision/**").permitAll()
                 .requestMatchers("/swagger-ui/**", "/v3/api-docs/**").permitAll()
                 .anyRequest().authenticated()
             );

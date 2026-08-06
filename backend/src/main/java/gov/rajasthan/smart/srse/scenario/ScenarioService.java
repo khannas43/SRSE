@@ -78,6 +78,13 @@ public class ScenarioService {
     }
 
     /**
+     * Deserialize and return the breakdown stored on a scenario (empty if none).
+     */
+    public List<BreakdownRow> loadBreakdown(Long scenarioId) {
+        return readBreakdown(getScenario(scenarioId));
+    }
+
+    /**
      * Load a scenario by id, or throw if absent.
      */
     public Scenario getScenario(Long scenarioId) {
