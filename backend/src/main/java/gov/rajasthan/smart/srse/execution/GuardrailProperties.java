@@ -1,7 +1,6 @@
 package gov.rajasthan.smart.srse.execution;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.stereotype.Component;
 
 /**
  * Execution guardrails bound from {@code srse.guardrails.*}.
@@ -16,6 +15,5 @@ import org.springframework.stereotype.Component;
  * from application.yml. Record constructor binding is the Spring Boot 3.3
  * idiomatic form (no setters, no {@code @ConstructorBinding} needed).
  */
-@Component
 @ConfigurationProperties(prefix = "srse.guardrails")
 public record GuardrailProperties(int cohortCap, int queryTimeoutSeconds) {}

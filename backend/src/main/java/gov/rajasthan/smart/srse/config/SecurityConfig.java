@@ -47,6 +47,8 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.GET, "/api/health/**").permitAll()
                 .requestMatchers("/api/decision/**").permitAll()
                 .requestMatchers("/swagger-ui/**", "/v3/api-docs/**").permitAll()
+                // Without this, Spring Boot's internal error-dispatch to /error gets blocked by security too, masking the real HTTP status/error body behind a generic 403.
+                .requestMatchers("/error").permitAll()
                 .anyRequest().authenticated()
             );
         return http.build();
