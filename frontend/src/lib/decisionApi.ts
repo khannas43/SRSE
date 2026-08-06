@@ -1,53 +1,135 @@
-// Typed client for the SRSE decision-service seam (design doc §8.1).
-// This mirrors the backend REST contract exactly. The contract is shaped like
-// an ODM decision-service call so it can later be fulfilled by CP4BA/ODM with
-// no change to this caller.
+// Typed client for the SRSE decision-service seam (design doc §8.1 / CLAUDE.md #6).
+// Full-ruleset evaluate model — caller sends the complete PredicateSpec on every call.
+// Shaped like an ODM decision-service call so CP4BA/ODM can later fulfil it without
+// changing this caller.
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 
 export type Operator =
-  | "EQ" | "NE" | "LT" | "LTE" | "GT" | "GTE"
-  | "IN" | "NOT_IN" | "BETWEEN"
-  | "IS_TRUE" | "IS_FALSE" | "IS_NULL" | "NOT_NULL";
+  | "EQ"
+  | "NE"
+  | "LT"
+  | "LTE"
+  | "GT"
+  | "GTE"
+  | "IN"
+  | "NOT_IN"
+  | "BETWEEN"
+  | "IS_TRUE"
+  | "IS_FALSE"
+  | "IS_NULL"
+  | "NOT_NULL";
 
-export interface PredicateParam {
+export type PredicateNode = {
+  type: "PREDICATE";
   fieldKey: string;
   operator: Operator;
   value: unknown;
-}
+};
 
-export interface EvaluateRequest {
-  schemeId: string;
-  rulesetVersion: string;           // or "draft"
-  parameters: PredicateParam[];      // officer overrides
-  options: {
-    includeBreakdown: boolean;
-    includeCohort: boolean;
-    cohortLimit: number;
-  };
-}
+export type GroupNode = {
+  type: "GROUP";
+  op: "AND" | "OR";
+  children: Node[];
+};
 
-export interface BreakdownRow {
+export type Node = GroupNode | PredicateNode;
+
+export type PredicateSpec = { root: Node };
+
+export type BreakdownRow = {
   district: string;
   gender: string;
   ageBand: string;
-  n: number;
-}
+  count: number;
+};
 
-export interface EvaluateResponse {
+export type BreakdownDelta = {
+  district: string;
+  gender: string;
+  ageBand: string;
+  countA: number;
+  countB: number;
+  delta: number;
+};
+
+export type EvaluateRequest = {
+  schemeId: string;
+  name: string;
+  ruleset: PredicateSpec;
+  includeBreakdown: boolean;
+};
+
+export type EvaluateResponse = {
+  scenarioId: number;
   totalCount: number;
   breakdown: BreakdownRow[];
-  cohortSample?: Record<string, unknown>[];
-  dataFreshness: { lastRefreshedAt: string };
-}
+};
+
+export type ScenarioSummary = {
+  id: number;
+  name: string;
+  schemeId: string;
+  totalCount: number | null;
+  createdAt: string;
+};
+
+export type ScenarioDetail = {
+  id: number;
+  name: string;
+  schemeId: string;
+  ruleset: PredicateSpec;
+  totalCount: number | null;
+  breakdown: BreakdownRow[];
+  createdAt: string;
+};
+
+export type CompareResponse = {
+  scenarioA: ScenarioSummary;
+  scenarioB: ScenarioSummary;
+  totalCountDelta: number;
+  breakdownDeltas: BreakdownDelta[];
+};
 
 export async function evaluate(req: EvaluateRequest): Promise<EvaluateResponse> {
   const res = await fetch(`${API_BASE}/api/decision/evaluate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    credentials: "include", // cookie-based JWT
+    credentials: "include",
     body: JSON.stringify(req),
   });
+  if (!res.ok) {
+    throw new Error(`Decision service error ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
+}
+
+export async function listScenarios(schemeId: string): Promise<ScenarioSummary[]> {
+  const res = await fetch(
+    `${API_BASE}/api/decision/scenarios?schemeId=${encodeURIComponent(schemeId)}`,
+    { credentials: "include" },
+  );
+  if (!res.ok) {
+    throw new Error(`Decision service error ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
+}
+
+export async function getScenario(id: number): Promise<ScenarioDetail> {
+  const res = await fetch(`${API_BASE}/api/decision/scenarios/${id}`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Decision service error ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
+}
+
+export async function compare(a: number, b: number): Promise<CompareResponse> {
+  const res = await fetch(
+    `${API_BASE}/api/decision/compare?a=${encodeURIComponent(String(a))}&b=${encodeURIComponent(String(b))}`,
+    { credentials: "include" },
+  );
   if (!res.ok) {
     throw new Error(`Decision service error ${res.status}: ${await res.text()}`);
   }

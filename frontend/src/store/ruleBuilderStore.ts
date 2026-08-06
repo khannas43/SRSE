@@ -1,17 +1,17 @@
-// Rule-builder state (Zustand). Holds the ruleset the officer is composing,
-// including threshold overrides. Kept deliberately minimal in the skeleton;
-// AND/OR grouping and validation are the first UI build task (design doc §8.4).
+// Rule-builder state (Zustand). Holds the ruleset the officer is composing.
+// Kept deliberately minimal in the skeleton; the Ekal Naari page builds its
+// PredicateSpec inline. AND/OR grouping UI is a later polish task.
 
 import { create } from "zustand";
-import type { PredicateParam } from "@/lib/decisionApi";
+import type { PredicateNode } from "@/lib/decisionApi";
 
 interface RuleBuilderState {
   schemeId: string | null;
-  rulesetVersion: string;              // "draft" until saved
-  predicates: PredicateParam[];
+  rulesetVersion: string; // "draft" until saved
+  predicates: PredicateNode[];
   setScheme: (schemeId: string) => void;
-  addPredicate: (p: PredicateParam) => void;
-  updatePredicate: (index: number, p: Partial<PredicateParam>) => void;
+  addPredicate: (p: PredicateNode) => void;
+  updatePredicate: (index: number, p: Partial<PredicateNode>) => void;
   removePredicate: (index: number) => void;
   reset: () => void;
 }
