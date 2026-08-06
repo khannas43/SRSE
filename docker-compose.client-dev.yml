@@ -1,0 +1,32 @@
+# Client Dev override — on-prem Presto + DB2; no local lakehouse/seed stack.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.client-dev.yml up srse-backend srse-frontend
+#
+# Supply CLIENT_* vars via .env or the environment (see .env.client-dev.example).
+# Real hostnames/credentials are pending Lovadeep/Arvind (CLAUDE.md open items).
+#
+# db2 / presto / minio / metastore / seed remain defined in the base compose file
+# but are deliberately NOT started — they run on-prem in this environment.
+
+services:
+
+  srse-backend:
+    # !reset required: Compose merges depends_on lists; plain [] does not clear base deps.
+    depends_on: !reset []
+    environment:
+      - SPRING_PROFILES_ACTIVE=local
+      - DATA_MODE=live
+      - SRSE_DB2_URL=${CLIENT_DB2_URL}
+      - SRSE_DB2_USER=${CLIENT_DB2_USER}
+      - SRSE_DB2_PASSWORD=${CLIENT_DB2_PASSWORD}
+      - SRSE_PRESTO_URL=${CLIENT_PRESTO_URL}
+      - SRSE_PRESTO_USER=${CLIENT_PRESTO_USER}
+      - SRSE_AUTH_MODE=rajsewadwar
+      - SRSE_COHORT_CAP=1000
+      - SRSE_QUERY_TIMEOUT_SECONDS=30
+
+  srse-frontend:
+    environment:
+      - NEXT_PUBLIC_API_BASE=http://localhost:8080
+      - NEXT_PUBLIC_AUTH_MODE=rajsewadwar

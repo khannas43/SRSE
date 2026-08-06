@@ -1,15 +1,18 @@
 """
 Synthetic beneficiary data seed for local SRSE development.
 
-BUILD TASK (Sprint 2, design doc §6.3/§7.1): flesh this out to generate
-realistic Jan-Aadhaar-shaped rows and write them as an Iceberg table via Presto.
-This skeleton establishes the shape and the target schema only.
+Generates Jan-Aadhaar-shaped rows and writes them as an Iceberg table via Presto.
+Schema matches FieldResolver column names + age_band for ExecutionService.breakdown().
 """
 import os
 import random
+import sys
+
+import prestodb
 
 PRESTO_URL = os.environ.get("PRESTO_URL", "jdbc:presto://presto:8080/iceberg/srse")
 ROWS = int(os.environ.get("ROWS", "200000"))
+BATCH_SIZE = 1000
 
 DISTRICTS = ["Jaipur", "Jodhpur", "Udaipur", "Kota", "Ajmer", "Bikaner", "Alwar"]
 COMMUNITIES = ["GENERAL", "SAHARIYA", "KATHODI", "KHAIRWA"]
@@ -36,6 +39,24 @@ CREATE TABLE IF NOT EXISTS beneficiary (
 )
 """
 
+COLUMNS = [
+    "id",
+    "age_years",
+    "gender",
+    "district",
+    "annual_income_total",
+    "marital_status",
+    "is_domicile_holder",
+    "ration_card_category",
+    "community",
+    "disability_pct",
+    "is_enrolled_in_school",
+    "is_girl_child_of_hof",
+    "age_band",
+    "last_refreshed_at",
+]
+
+
 def make_row(i: int):
     age = random.randint(0, 90)
     gender = random.choice(["MALE", "FEMALE"])
@@ -56,18 +77,100 @@ def make_row(i: int):
         "last_refreshed_at": "2026-01-01",
     }
 
+
 def _band(age: int) -> str:
     if age < 18: return "0-17"
     if age < 35: return "18-34"
     if age < 55: return "35-54"
     return "55+"
 
+
+def parse_presto_url(url: str):
+    """Parse jdbc:presto://host:port/catalog/schema into components."""
+    prefix = "jdbc:presto://"
+    if not url.startswith(prefix):
+        raise ValueError(f"PRESTO_URL must start with {prefix!r}, got: {url!r}")
+    rest = url[len(prefix):]
+    # host:port/catalog/schema
+    slash = rest.find("/")
+    if slash < 0:
+        raise ValueError(f"PRESTO_URL missing catalog/schema path: {url!r}")
+    host_port = rest[:slash]
+    path = rest[slash + 1:]
+    parts = path.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"PRESTO_URL must be jdbc:presto://host:port/catalog/schema, got: {url!r}")
+    catalog, schema = parts
+    if ":" in host_port:
+        host, port_str = host_port.rsplit(":", 1)
+        port = int(port_str)
+    else:
+        host = host_port
+        port = 8080
+    if not host:
+        raise ValueError(f"PRESTO_URL missing host: {url!r}")
+    return host, port, catalog, schema
+
+
+def _sql_literal(value):
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    # VARCHAR — escape single quotes
+    s = str(value).replace("'", "''")
+    return f"'{s}'"
+
+
+def _values_clause(row: dict) -> str:
+    return "(" + ", ".join(_sql_literal(row[c]) for c in COLUMNS) + ")"
+
+
+def _execute(cursor, sql: str):
+    cursor.execute(sql)
+    # Drain results so Presto's Python client actually completes the statement.
+    cursor.fetchall()
+
+
 def main():
-    print(f"[seed] target={PRESTO_URL} rows={ROWS}")
-    print("[seed] TODO: connect via presto client, run CREATE_TABLE, batch-insert make_row().")
-    print("[seed] Skeleton only — implement in Sprint 2.")
-    # Example of the shape (not executed):
-    _ = [make_row(i) for i in range(3)]
+    try:
+        print(f"[seed] target={PRESTO_URL} rows={ROWS}")
+        host, port, catalog, schema = parse_presto_url(PRESTO_URL)
+        print(f"[seed] connecting host={host} port={port} catalog={catalog} schema={schema}")
+
+        conn = prestodb.dbapi.connect(
+            host=host,
+            port=port,
+            user=os.environ.get("PRESTO_USER", "seed"),
+            catalog=catalog,
+            schema=schema,
+        )
+        cursor = conn.cursor()
+
+        _execute(cursor, f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
+        print(f"[seed] schema {catalog}.{schema} ready")
+
+        _execute(cursor, CREATE_TABLE)
+        print("[seed] table beneficiary ready")
+
+        for start in range(0, ROWS, BATCH_SIZE):
+            end = min(start + BATCH_SIZE, ROWS)
+            rows = [make_row(i) for i in range(start, end)]
+            values = ", ".join(_values_clause(r) for r in rows)
+            _execute(cursor, f"INSERT INTO beneficiary VALUES {values}")
+            print(f"[seed] inserted {end}/{ROWS} rows")
+
+        print(f"[seed] done — {ROWS} rows inserted into {catalog}.{schema}.beneficiary")
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"[seed] ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

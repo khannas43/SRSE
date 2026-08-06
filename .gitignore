@@ -17,6 +17,10 @@ npm-debug.log*
 **/data/
 *.log
 
+# Python
+__pycache__/
+*.pyc
+
 # IDE
 .idea/
 .vscode/
