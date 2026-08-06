@@ -42,3 +42,14 @@ spring:
       hibernate:
         dialect: org.hibernate.dialect.DB2Dialect
     show-sql: false
+
+# Local dev without live DB2/Presto — allow Hikari pools to start even if DBs are down,
+# and fail connection attempts fast (3s) instead of Hikari's 30s default.
+srse:
+  datasource:
+    operational:
+      initialization-fail-timeout: -1
+      connection-timeout: 3000
+    analytical:
+      initialization-fail-timeout: -1
+      connection-timeout: 3000
