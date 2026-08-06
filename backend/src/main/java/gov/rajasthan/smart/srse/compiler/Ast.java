@@ -1,5 +1,8 @@
 package gov.rajasthan.smart.srse.compiler;
 
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
+
 import java.util.List;
 
 /**
@@ -29,6 +32,11 @@ public final class Ast {
     }
 
     /** A node is either a group (AND/OR of children) or a leaf predicate. */
+    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+    @JsonSubTypes({
+            @JsonSubTypes.Type(value = GroupNode.class, name = "GROUP"),
+            @JsonSubTypes.Type(value = PredicateNode.class, name = "PREDICATE")
+    })
     public sealed interface Node permits GroupNode, PredicateNode {}
 
     /** AND / OR over child nodes. */

@@ -1,0 +1,105 @@
+package gov.rajasthan.smart.srse.scenario;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Lob;
+import jakarta.persistence.Table;
+
+import java.time.Instant;
+
+/**
+ * Persisted scenario: a saved ruleset (Ast.PredicateSpec serialized as JSON) plus its most recent computed results, if evaluated.
+ */
+@Entity
+@Table(name = "scenario")
+public class Scenario {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String name;
+
+    @Column(name = "scheme_id", nullable = false)
+    private String schemeId;
+
+    @Lob
+    @Column(name = "ruleset_json", nullable = false)
+    private String rulesetJson;
+
+    /** Null until the scenario has been evaluated. */
+    @Column(name = "total_count")
+    private Long totalCount;
+
+    @Lob
+    @Column(name = "breakdown_json")
+    private String breakdownJson;
+
+    @Column(name = "created_at", nullable = false)
+    private Instant createdAt;
+
+    /** Nullable — real SSO identity arrives in a later build stage. */
+    @Column(name = "created_by")
+    private String createdBy;
+
+    protected Scenario() {
+    }
+
+    public Scenario(Long id, String name, String schemeId, String rulesetJson,
+                    Long totalCount, String breakdownJson,
+                    Instant createdAt, String createdBy) {
+        this.id = id;
+        this.name = name;
+        this.schemeId = schemeId;
+        this.rulesetJson = rulesetJson;
+        this.totalCount = totalCount;
+        this.breakdownJson = breakdownJson;
+        this.createdAt = createdAt;
+        this.createdBy = createdBy;
+    }
+
+    /**
+     * Controlled mutation for persisting evaluation results.
+     * JPA entities need mutability for persistence-context updates;
+     * open setters are intentionally avoided.
+     */
+    public void applyResults(Long totalCount, String breakdownJson) {
+        this.totalCount = totalCount;
+        this.breakdownJson = breakdownJson;
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public String getSchemeId() {
+        return schemeId;
+    }
+
+    public String getRulesetJson() {
+        return rulesetJson;
+    }
+
+    public Long getTotalCount() {
+        return totalCount;
+    }
+
+    public String getBreakdownJson() {
+        return breakdownJson;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public String getCreatedBy() {
+        return createdBy;
+    }
+}
