@@ -57,6 +57,9 @@ services:
   # ---------- Operational store: DB2 ----------
   db2:
     image: icr.io/db2_community/db2:11.5.8.0
+    # Required for Apple Silicon local dev (image has no arm64 build; QEMU).
+    # First-boot under emulation may be considerably slower than the note below.
+    platform: linux/amd64
     privileged: true
     ports:
       - "50000:50000"

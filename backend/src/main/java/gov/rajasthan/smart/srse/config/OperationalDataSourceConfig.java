@@ -47,9 +47,14 @@ public class OperationalDataSourceConfig {
     @Bean
     @Primary
     public LocalContainerEntityManagerFactoryBean operationalEmf(
-            EntityManagerFactoryBuilder builder) {
+            EntityManagerFactoryBuilder builder,
+            @org.springframework.beans.factory.annotation.Value("${spring.jpa.hibernate.ddl-auto:none}")
+            String ddlAuto) {
         Map<String, Object> props = new HashMap<>();
-        // DB2 dialect; ddl-auto handled per-profile in application yml.
+        // Manually-constructed EMF via EntityManagerFactoryBuilder does not inherit
+        // spring.jpa.hibernate.ddl-auto the way Boot's auto-configured EMF would —
+        // read and set hibernate.hbm2ddl.auto explicitly (default "none" = safe).
+        props.put("hibernate.hbm2ddl.auto", ddlAuto);
         return builder
                 .dataSource(operationalDataSource())
                 .packages(
