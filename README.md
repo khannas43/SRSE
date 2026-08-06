@@ -58,7 +58,20 @@ driver coordinates with Lovadeep before the first live connection.
 See `CLAUDE.md` → "Build order". In short:
 1. Skeleton + two datasources + health check (this scaffold). ✔
 2. **Rule AST + compiler** — the hard core, do first. (Scaffolded; unit-tested against Ekal Naari.)
-3. Execution + guardrails → 4. Metadata/mapping → 5. Scenario store → 6. Officer UI → 7. Packaging.
+3. Execution + guardrails ✔ → 4. Metadata/mapping → 5. Scenario store → 6. Officer UI → 7. Packaging.
+
+## Running backend tests locally
+
+If multiple JDKs are installed and `JAVA_HOME` is unset, `mvn` may pick a JDK
+newer than 17 (e.g. via Homebrew) for its own JVM. Mockito's inline mock maker
+(used by `ExecutionServiceTest`) fails to instrument classes there — so
+`JAVA_HOME` must be pinned explicitly:
+
+```bash
+cd backend && JAVA_HOME=$(/usr/libexec/java_home -v 17) mvn test
+```
+
+`mvn compile` and `mvn spring-boot:run` are unaffected; only test runs hit this.
 
 ## The compiler is already testable
 
