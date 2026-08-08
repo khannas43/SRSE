@@ -7,4 +7,6 @@ import java.util.Optional;
 public interface FieldCatalogRepository extends JpaRepository<FieldCatalogEntry, Long> {
 
     Optional<FieldCatalogEntry> findByFieldKeyAndActiveTrue(String fieldKey);
+
+    Optional<FieldCatalogEntry> findByFieldKey(String fieldKey);
 }

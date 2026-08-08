@@ -6,6 +6,7 @@ import gov.rajasthan.smart.srse.execution.ExecutionService;
 import gov.rajasthan.smart.srse.scenario.Scenario;
 import gov.rajasthan.smart.srse.scenario.ScenarioNotFoundException;
 import gov.rajasthan.smart.srse.scenario.ScenarioService;
+import gov.rajasthan.smart.srse.security.MockJwtService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -48,6 +49,12 @@ class DecisionControllerTest {
 
     @MockBean
     private ScenarioService scenarioService;
+
+    // MockJwtAuthenticationFilter is auto-detected by @WebMvcTest (it scans Filter
+    // beans regardless of @Import) and needs this to construct; addFilters = false
+    // means it's never actually invoked in these tests.
+    @MockBean
+    private MockJwtService mockJwtService;
 
     @Test
     void evaluateWithBreakdownReturns200AndCorrectShape() throws Exception {

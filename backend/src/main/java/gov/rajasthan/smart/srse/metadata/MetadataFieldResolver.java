@@ -2,12 +2,15 @@ package gov.rajasthan.smart.srse.metadata;
 
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.cache.annotation.Cacheable;
-import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 /**
- * JPA-backed {@link FieldResolver} for non-local profiles.
+ * JPA-backed {@link FieldResolver}, active whenever DATA_MODE=live — regardless
+ * of Spring profile, so any environment (including client-dev) pointed at real
+ * on-prem Presto/DB2 gets real Golden Layer bindings from {@link FieldColumnMapping}
+ * rather than {@link StubFieldResolver}'s hardcoded synthetic column names.
  *
  * CONTRACT (do not violate):
  *  - Allow-list gate: only catalogued + active + mapped-for-this-environment
@@ -18,7 +21,7 @@ import org.springframework.stereotype.Component;
  *    every rule compile (CLAUDE.md: Metadata / mapping service, JPA + Caffeine).
  */
 @Component
-@Profile("!local")
+@ConditionalOnProperty(name = "srse.data-mode", havingValue = "live")
 public class MetadataFieldResolver implements FieldResolver {
 
     private final FieldCatalogRepository catalogRepository;

@@ -16,6 +16,10 @@ npm-debug.log*
 # Docker volumes / local data
 **/data/
 *.log
+logs/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
 
 # Python
 __pycache__/

@@ -15,7 +15,12 @@ services:
     # !reset required: Compose merges depends_on lists; plain [] does not clear base deps.
     depends_on: !reset []
     environment:
-      - SPRING_PROFILES_ACTIVE=local
+      # NOT 'local': the 'local' profile's ddl-auto=update + 3s Hikari
+      # fail-fast timeout are dev-container conveniences that would be
+      # dangerous pointed at a real on-prem DB2 schema. Resolver selection
+      # (Stub vs Metadata) is keyed off DATA_MODE, not Spring profile, so
+      # this still gets the real Golden Layer field resolver.
+      - SPRING_PROFILES_ACTIVE=client-dev
       - DATA_MODE=live
       - SRSE_DB2_URL=${CLIENT_DB2_URL}
       - SRSE_DB2_USER=${CLIENT_DB2_USER}

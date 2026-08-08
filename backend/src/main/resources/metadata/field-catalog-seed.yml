@@ -1,0 +1,80 @@
+# Bootstrap data for field_catalog / field_column_mapping (DB2, operational plane).
+#
+# Loaded on every boot by FieldCatalogSeedRunner (upsert by fieldKey). The
+# `synthetic` physical expressions match StubFieldResolver's hardcoded map
+# exactly. The `live` physical expressions are CHANGE_ME placeholders pending
+# Lovadeep's Golden Layer column names (CLAUDE.md open items) — swap them here
+# once confirmed; no Java code or SQL needs to change.
+#
+# NOTE: this only inserts rows into field_catalog/field_column_mapping — it
+# does not create those tables. In client-dev (ddl-auto is NOT active there,
+# see docker-compose.client-dev.yml), the DBA must create them first.
+fields:
+  - fieldKey: age_years
+    displayLabel: Age
+    tier: TIER_1
+    dataType: NUMBER
+    synthetic: beneficiary.age_years
+    live: CHANGE_ME.age_years
+  - fieldKey: gender
+    displayLabel: Gender
+    tier: TIER_1
+    dataType: STRING
+    synthetic: beneficiary.gender
+    live: CHANGE_ME.gender
+  - fieldKey: district
+    displayLabel: District
+    tier: TIER_1
+    dataType: STRING
+    synthetic: beneficiary.district
+    live: CHANGE_ME.district
+  - fieldKey: annual_income_total
+    displayLabel: Annual income
+    tier: TIER_1
+    dataType: NUMBER
+    synthetic: beneficiary.annual_income_total
+    live: CHANGE_ME.annual_income_total
+  - fieldKey: marital_status
+    displayLabel: Marital status
+    tier: TIER_1
+    dataType: STRING
+    synthetic: beneficiary.marital_status
+    live: CHANGE_ME.marital_status
+  - fieldKey: is_domicile_holder
+    displayLabel: Domicile holder
+    tier: TIER_1
+    dataType: BOOLEAN
+    synthetic: beneficiary.is_domicile_holder
+    live: CHANGE_ME.is_domicile_holder
+  - fieldKey: ration_card_category
+    displayLabel: Ration card category
+    tier: TIER_1
+    dataType: STRING
+    synthetic: beneficiary.ration_card_category
+    live: CHANGE_ME.ration_card_category
+  - fieldKey: community
+    displayLabel: Community
+    tier: TIER_1
+    dataType: STRING
+    synthetic: beneficiary.community
+    live: CHANGE_ME.community
+  - fieldKey: disability_pct
+    displayLabel: Disability %
+    tier: TIER_1
+    dataType: NUMBER
+    synthetic: beneficiary.disability_pct
+    live: CHANGE_ME.disability_pct
+  - fieldKey: is_enrolled_in_school
+    displayLabel: Enrolled in school
+    tier: TIER_1
+    dataType: BOOLEAN
+    synthetic: beneficiary.is_enrolled_in_school
+    live: CHANGE_ME.is_enrolled_in_school
+  - fieldKey: is_girl_child_of_hof
+    displayLabel: Girl child of HoF
+    # Tier 3 per CLAUDE.md's own worked example: cross-table/relationship,
+    # pre-materialised upstream by Spark ETL / REL-01 before it lands here.
+    tier: TIER_3
+    dataType: BOOLEAN
+    synthetic: beneficiary.is_girl_child_of_hof
+    live: CHANGE_ME.is_girl_child_of_hof

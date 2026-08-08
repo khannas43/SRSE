@@ -5,6 +5,37 @@
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 
+// /api/decision/** now requires a STATE_OFFICER-scoped bearer token (backend
+// SecurityConfig). RajSewadwar SSO isn't wired up yet, so this fetches a mock
+// token once per page load and caches it — see MockJwtIssuer on the backend.
+let cachedToken: Promise<string> | null = null;
+
+async function getAuthToken(): Promise<string> {
+  if (!cachedToken) {
+    cachedToken = fetch(`${API_BASE}/api/auth/mock-login`, { method: "POST" })
+      .then(async (res) => {
+        if (!res.ok) {
+          throw new Error(`Mock login failed ${res.status}: ${await res.text()}`);
+        }
+        const body = (await res.json()) as { token: string };
+        return body.token;
+      })
+      .catch((err) => {
+        cachedToken = null; // let the next call retry instead of caching the failure
+        throw err;
+      });
+  }
+  return cachedToken;
+}
+
+async function authorizedFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const token = await getAuthToken();
+  return fetch(input, {
+    ...init,
+    headers: { ...init.headers, Authorization: `Bearer ${token}` },
+  });
+}
+
 export type Operator =
   | "EQ"
   | "NE"
@@ -92,7 +123,7 @@ export type CompareResponse = {
 };
 
 export async function evaluate(req: EvaluateRequest): Promise<EvaluateResponse> {
-  const res = await fetch(`${API_BASE}/api/decision/evaluate`, {
+  const res = await authorizedFetch(`${API_BASE}/api/decision/evaluate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
@@ -105,7 +136,7 @@ export async function evaluate(req: EvaluateRequest): Promise<EvaluateResponse> 
 }
 
 export async function listScenarios(schemeId: string): Promise<ScenarioSummary[]> {
-  const res = await fetch(
+  const res = await authorizedFetch(
     `${API_BASE}/api/decision/scenarios?schemeId=${encodeURIComponent(schemeId)}`,
     { credentials: "include" },
   );
@@ -116,7 +147,7 @@ export async function listScenarios(schemeId: string): Promise<ScenarioSummary[]
 }
 
 export async function getScenario(id: number): Promise<ScenarioDetail> {
-  const res = await fetch(`${API_BASE}/api/decision/scenarios/${id}`, {
+  const res = await authorizedFetch(`${API_BASE}/api/decision/scenarios/${id}`, {
     credentials: "include",
   });
   if (!res.ok) {
@@ -126,7 +157,7 @@ export async function getScenario(id: number): Promise<ScenarioDetail> {
 }
 
 export async function compare(a: number, b: number): Promise<CompareResponse> {
-  const res = await fetch(
+  const res = await authorizedFetch(
     `${API_BASE}/api/decision/compare?a=${encodeURIComponent(String(a))}&b=${encodeURIComponent(String(b))}`,
     { credentials: "include" },
   );

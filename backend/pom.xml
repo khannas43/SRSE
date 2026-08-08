@@ -128,6 +128,28 @@
                     </excludes>
                 </configuration>
             </plugin>
+            <plugin>
+                <!-- Fails fast with a clear message when the wrong JDK runs the build
+                     (e.g. a Homebrew JDK 25 shadowing Temurin 17 on PATH), instead of
+                     letting Mockito fail cryptically on final classes like JdbcTemplate. -->
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>enforce-java-17</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireJavaVersion>
+                                    <version>[17,18)</version>
+                                </requireJavaVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 </project>
