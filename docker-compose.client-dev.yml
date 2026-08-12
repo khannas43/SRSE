@@ -33,5 +33,9 @@ services:
 
   srse-frontend:
     environment:
-      - NEXT_PUBLIC_API_BASE=http://localhost:8080
+      # Inherits build.args from the base compose file — set
+      # NEXT_PUBLIC_API_BASE in .env (not here) and rebuild; this line just
+      # has to stay consistent with the base file's substitution, not
+      # re-hardcode localhost and silently override it back.
+      - NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
       - NEXT_PUBLIC_AUTH_MODE=rajsewadwar
