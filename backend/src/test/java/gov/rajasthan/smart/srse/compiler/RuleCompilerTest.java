@@ -20,7 +20,8 @@ class RuleCompilerTest {
         // allow-list: only known keys resolve
         return switch (fieldKey) {
             case "marital_status", "gender", "age_years", "is_domicile_holder",
-                 "annual_income_total", "ration_card_category", "community"
+                 "annual_income_total", "ration_card_category", "community",
+                 "father_name", "mother_name"
                     -> "beneficiary." + fieldKey;
             default -> throw new FieldResolver.UnknownFieldException(fieldKey);
         };
@@ -82,6 +83,44 @@ class RuleCompilerTest {
         var root = new Ast.GroupNode(Ast.BoolOp.AND, List.of(
                 new Ast.PredicateNode("secret_backdoor", Ast.Operator.EQ, "x")));
         assertThrows(FieldResolver.UnknownFieldException.class,
+                () -> compiler.compile(new Ast.PredicateSpec(root)));
+    }
+
+    @Test
+    void compilesFuzzyMatchWithNormalizedLevenshteinSimilarity() {
+        var root = new Ast.GroupNode(Ast.BoolOp.AND, List.of(
+                new Ast.PredicateNode("father_name", Ast.Operator.FUZZY_MATCH, List.of("Ramesh", 70))));
+
+        CompiledQuery q = compiler.compile(new Ast.PredicateSpec(root));
+
+        assertTrue(q.predicateSql().contains("levenshtein_distance(lower(beneficiary.father_name), lower(?))"));
+        assertTrue(q.predicateSql().contains("GREATEST(length(beneficiary.father_name), length(?), 1)"));
+        assertTrue(q.predicateSql().contains(">= ?"));
+        // name bound twice (appears twice in the expression), then threshold as a 0..1 fraction.
+        assertEquals(List.of("Ramesh", "Ramesh", 0.7), q.params());
+    }
+
+    @Test
+    void fuzzyMatchRejectsThresholdOutOfRange() {
+        var root = new Ast.GroupNode(Ast.BoolOp.AND, List.of(
+                new Ast.PredicateNode("father_name", Ast.Operator.FUZZY_MATCH, List.of("Ramesh", 150))));
+        assertThrows(IllegalArgumentException.class,
+                () -> compiler.compile(new Ast.PredicateSpec(root)));
+    }
+
+    @Test
+    void fuzzyMatchRejectsBlankName() {
+        var root = new Ast.GroupNode(Ast.BoolOp.AND, List.of(
+                new Ast.PredicateNode("father_name", Ast.Operator.FUZZY_MATCH, List.of("  ", 80))));
+        assertThrows(IllegalArgumentException.class,
+                () -> compiler.compile(new Ast.PredicateSpec(root)));
+    }
+
+    @Test
+    void fuzzyMatchRejectsWrongValueShape() {
+        var root = new Ast.GroupNode(Ast.BoolOp.AND, List.of(
+                new Ast.PredicateNode("father_name", Ast.Operator.FUZZY_MATCH, List.of("Ramesh"))));
+        assertThrows(IllegalArgumentException.class,
                 () -> compiler.compile(new Ast.PredicateSpec(root)));
     }
 }

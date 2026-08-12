@@ -12,6 +12,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -48,7 +49,7 @@ class ScenarioServiceTest {
             return new Scenario(
                     idSeq.getAndIncrement(),
                     s.getName(),
-                    s.getSchemeId(),
+                    s.getSchemeIds(),
                     s.getRulesetJson(),
                     s.getTotalCount(),
                     s.getBreakdownJson(),
@@ -81,7 +82,7 @@ class ScenarioServiceTest {
     void createScenarioThenLoadRulesetRoundTripsAst() {
         Ast.PredicateSpec original = ekalNaariSpec();
 
-        Scenario saved = service.createScenario("Ekal baseline", "EKAL_NAARI", original);
+        Scenario saved = service.createScenario("Ekal baseline", Set.of(1L), original);
         when(repository.findById(saved.getId())).thenReturn(Optional.of(saved));
 
         Ast.PredicateSpec loaded = service.loadRuleset(saved.getId());
@@ -182,7 +183,7 @@ class ScenarioServiceTest {
     }
 
     private Scenario unevaluated(Long id, String name) {
-        return new Scenario(id, name, "SCHEME", "{\"root\":null}",
+        return new Scenario(id, name, Set.of(1L), "{\"root\":null}",
                 null, null, Instant.parse("2026-01-01T00:00:00Z"), null);
     }
 
@@ -190,7 +191,7 @@ class ScenarioServiceTest {
                                List<BreakdownRow> breakdown) {
         try {
             String json = objectMapper.writeValueAsString(breakdown);
-            return new Scenario(id, name, "SCHEME", "{\"root\":null}",
+            return new Scenario(id, name, Set.of(1L), "{\"root\":null}",
                     totalCount, json, Instant.parse("2026-01-01T00:00:00Z"), null);
         } catch (Exception e) {
             throw new IllegalStateException(e);

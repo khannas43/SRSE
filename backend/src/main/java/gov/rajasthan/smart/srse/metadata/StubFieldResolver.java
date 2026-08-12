@@ -28,10 +28,27 @@ public class StubFieldResolver implements FieldResolver {
             Map.entry("marital_status", "beneficiary.marital_status"),
             Map.entry("is_domicile_holder", "beneficiary.is_domicile_holder"),
             Map.entry("ration_card_category", "beneficiary.ration_card_category"),
+            Map.entry("census_category", "beneficiary.census_category"),
             Map.entry("community", "beneficiary.community"),
             Map.entry("disability_pct", "beneficiary.disability_pct"),
-            Map.entry("is_enrolled_in_school", "beneficiary.is_enrolled_in_school"),
-            Map.entry("is_girl_child_of_hof", "beneficiary.is_girl_child_of_hof")
+            Map.entry("tsp_classification", "beneficiary.tsp_classification"),
+            Map.entry("class_passed", "beneficiary.class_passed"),
+            Map.entry("is_girl_child_of_hof", "beneficiary.is_girl_child_of_hof"),
+            Map.entry("has_vehicle", "beneficiary.has_vehicle"),
+            Map.entry("land_holding_sqyd", "beneficiary.land_holding_sqyd"),
+            Map.entry("relationship_to_hof", "beneficiary.relationship_to_hof"),
+            Map.entry("father_name", "beneficiary.father_name"),
+            Map.entry("mother_name", "beneficiary.mother_name"),
+            Map.entry("annual_income_fy2627", "beneficiary.annual_income_fy2627"),
+            Map.entry("annual_income_fy2526", "beneficiary.annual_income_fy2526"),
+            Map.entry("annual_income_fy2425", "beneficiary.annual_income_fy2425"),
+            Map.entry("annual_income_fy2324", "beneficiary.annual_income_fy2324"),
+            Map.entry("annual_income_fy2223", "beneficiary.annual_income_fy2223"),
+            Map.entry("annual_income_fy2122", "beneficiary.annual_income_fy2122"),
+            Map.entry("annual_income_fy2021", "beneficiary.annual_income_fy2021"),
+            Map.entry("annual_income_fy1920", "beneficiary.annual_income_fy1920"),
+            Map.entry("annual_income_fy1819", "beneficiary.annual_income_fy1819"),
+            Map.entry("annual_income_fy1718", "beneficiary.annual_income_fy1718")
     );
 
     @Override

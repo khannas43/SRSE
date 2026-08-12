@@ -30,7 +30,8 @@ import java.util.Map;
 @EnableJpaRepositories(
         basePackages = {
                 "gov.rajasthan.smart.srse.metadata",
-                "gov.rajasthan.smart.srse.scenario"
+                "gov.rajasthan.smart.srse.scenario",
+                "gov.rajasthan.smart.srse.scheme"
         },
         entityManagerFactoryRef = "operationalEmf",
         transactionManagerRef = "operationalTx"
@@ -59,7 +60,8 @@ public class OperationalDataSourceConfig {
                 .dataSource(operationalDataSource())
                 .packages(
                         "gov.rajasthan.smart.srse.metadata",
-                        "gov.rajasthan.smart.srse.scenario")
+                        "gov.rajasthan.smart.srse.scenario",
+                        "gov.rajasthan.smart.srse.scheme")
                 .persistenceUnit("operational")
                 .properties(props)
                 .build();

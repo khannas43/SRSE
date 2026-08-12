@@ -38,7 +38,7 @@ class MetadataFieldResolverTest {
     void resolvesActiveCatalogEntryWithSyntheticMapping() {
         String fieldKey = "age_years";
         FieldCatalogEntry entry = new FieldCatalogEntry(
-                1L, fieldKey, "Age (years)", FieldTier.TIER_1, FieldDataType.NUMBER, true);
+                1L, fieldKey, "Age (years)", FieldTier.TIER_1, FieldDataType.NUMBER, "Demographic", null, true);
         FieldColumnMapping mapping = new FieldColumnMapping(
                 10L, fieldKey, DataMode.SYNTHETIC, "beneficiary.age_years");
 
@@ -71,7 +71,7 @@ class MetadataFieldResolverTest {
     void activeCatalogButNoMappingForDataModeThrowsUnknownField() {
         String fieldKey = "age_years";
         FieldCatalogEntry entry = new FieldCatalogEntry(
-                1L, fieldKey, "Age (years)", FieldTier.TIER_1, FieldDataType.NUMBER, true);
+                1L, fieldKey, "Age (years)", FieldTier.TIER_1, FieldDataType.NUMBER, "Demographic", null, true);
 
         when(catalogRepository.findByFieldKeyAndActiveTrue(fieldKey))
                 .thenReturn(Optional.of(entry));

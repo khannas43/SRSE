@@ -23,6 +23,17 @@ public class DecisionExceptionHandler {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ex.getMessage());
     }
 
+    /**
+     * Malformed predicate values (e.g. BETWEEN with != 2 bounds, a
+     * FUZZY_MATCH threshold outside 0..100) — compiler-level validation
+     * errors, not server bugs. Previously unmapped and fell through to a
+     * generic 500; found via live testing of the FUZZY_MATCH threshold guard.
+     */
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<String> badRequest(IllegalArgumentException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ex.getMessage());
+    }
+
     @ExceptionHandler(IllegalStateException.class)
     public ResponseEntity<String> conflict(IllegalStateException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(ex.getMessage());

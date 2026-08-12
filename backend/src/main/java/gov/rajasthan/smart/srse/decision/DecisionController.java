@@ -13,7 +13,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * REST decision-service seam (CLAUDE.md locked decision #6) — DMN-shaped rules
@@ -33,20 +35,37 @@ public class DecisionController {
         this.scenarioService = scenarioService;
     }
 
-    @PostMapping("/evaluate")
-    public EvaluateResponse evaluate(@RequestBody EvaluateRequest req) {
-        Scenario scenario = scenarioService.createScenario(
-                req.name(), req.schemeId(), req.ruleset());
+    /**
+     * Live preview — compile + count + (optionally) break down a ruleset with
+     * NO persistence, so the rule builder can re-run on every parameter tweak.
+     */
+    @PostMapping("/preview")
+    public PreviewResponse preview(@RequestBody PreviewRequest req) {
+        long totalCount = executionService.count(req.ruleset());
+        List<BreakdownRow> breakdown = req.includeBreakdown()
+                ? executionService.breakdown(req.ruleset())
+                : List.of();
+        return new PreviewResponse(totalCount, breakdown);
+    }
+
+    /**
+     * Explicit save — persists the ruleset tagged to one or more schemes and
+     * evaluates once to snapshot results.
+     */
+    @PostMapping("/scenarios")
+    public SaveScenarioResponse saveScenario(@RequestBody SaveScenarioRequest req) {
+        Set<Long> schemeIds = new LinkedHashSet<>(req.schemeIds());
+        Scenario scenario = scenarioService.createScenario(req.name(), schemeIds, req.ruleset());
         long totalCount = executionService.count(req.ruleset());
         List<BreakdownRow> breakdown = req.includeBreakdown()
                 ? executionService.breakdown(req.ruleset())
                 : List.of();
         scenarioService.recordResults(scenario.getId(), totalCount, breakdown);
-        return new EvaluateResponse(scenario.getId(), totalCount, breakdown);
+        return new SaveScenarioResponse(scenario.getId(), totalCount, breakdown);
     }
 
     @GetMapping("/scenarios")
-    public List<ScenarioSummary> listScenarios(@RequestParam String schemeId) {
+    public List<ScenarioSummary> listScenarios(@RequestParam Long schemeId) {
         return scenarioService.listByScheme(schemeId).stream()
                 .map(ScenarioSummary::from)
                 .toList();
@@ -58,7 +77,7 @@ public class DecisionController {
         return new ScenarioDetail(
                 scenario.getId(),
                 scenario.getName(),
-                scenario.getSchemeId(),
+                List.copyOf(scenario.getSchemeIds()),
                 scenarioService.loadRuleset(id),
                 scenario.getTotalCount(),
                 scenarioService.loadBreakdown(id),

@@ -5,10 +5,9 @@ import gov.rajasthan.smart.srse.execution.BreakdownRow;
 import java.util.List;
 
 /**
- * Result of an evaluate call: persisted scenario id plus computed aggregates.
+ * Result of a preview call: computed aggregates only, nothing persisted.
  */
-public record EvaluateResponse(
-        Long scenarioId,
+public record PreviewResponse(
         long totalCount,
         List<BreakdownRow> breakdown
 ) {}

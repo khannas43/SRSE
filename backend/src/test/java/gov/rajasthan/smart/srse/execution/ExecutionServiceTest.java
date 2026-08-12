@@ -39,7 +39,7 @@ class ExecutionServiceTest {
     private final RuleCompiler compiler = new RuleCompiler(resolver);
 
     /** cohortCap=1000, queryTimeoutSeconds=30 — constructed directly (no Spring). */
-    private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30);
+    private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30, 1000);
 
     @Mock
     private JdbcTemplate jdbc;

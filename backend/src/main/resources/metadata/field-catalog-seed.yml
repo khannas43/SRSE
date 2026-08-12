@@ -6,6 +6,11 @@
 # Lovadeep's Golden Layer column names (CLAUDE.md open items) — swap them here
 # once confirmed; no Java code or SQL needs to change.
 #
+# `groupName` drives the officer-facing rule-builder's parameter grouping.
+# `allowedValues` (STRING fields only) drives the multi-select option list —
+# leave unset for NUMBER/BOOLEAN fields, whose UI control is derived from
+# dataType instead (range / Any-Yes-No toggle).
+#
 # NOTE: this only inserts rows into field_catalog/field_column_mapping — it
 # does not create those tables. In client-dev (ddl-auto is NOT active there,
 # see docker-compose.client-dev.yml), the DBA must create them first.
@@ -14,67 +19,207 @@ fields:
     displayLabel: Age
     tier: TIER_1
     dataType: NUMBER
+    groupName: Demographic
     synthetic: beneficiary.age_years
     live: CHANGE_ME.age_years
   - fieldKey: gender
     displayLabel: Gender
     tier: TIER_1
     dataType: STRING
+    groupName: Demographic
+    allowedValues: [MALE, FEMALE]
     synthetic: beneficiary.gender
     live: CHANGE_ME.gender
   - fieldKey: district
     displayLabel: District
     tier: TIER_1
     dataType: STRING
+    groupName: Demographic
+    allowedValues: [Jaipur, Jodhpur, Udaipur, Kota, Ajmer, Bikaner, Alwar]
     synthetic: beneficiary.district
     live: CHANGE_ME.district
-  - fieldKey: annual_income_total
-    displayLabel: Annual income
-    tier: TIER_1
-    dataType: NUMBER
-    synthetic: beneficiary.annual_income_total
-    live: CHANGE_ME.annual_income_total
   - fieldKey: marital_status
     displayLabel: Marital status
     tier: TIER_1
     dataType: STRING
+    groupName: Demographic
+    allowedValues: [SINGLE, MARRIED, DIVORCED, WIDOWED]
     synthetic: beneficiary.marital_status
     live: CHANGE_ME.marital_status
-  - fieldKey: is_domicile_holder
-    displayLabel: Domicile holder
+  - fieldKey: annual_income_total
+    displayLabel: Annual income
     tier: TIER_1
-    dataType: BOOLEAN
-    synthetic: beneficiary.is_domicile_holder
-    live: CHANGE_ME.is_domicile_holder
+    dataType: NUMBER
+    groupName: Economic
+    synthetic: beneficiary.annual_income_total
+    live: CHANGE_ME.annual_income_total
   - fieldKey: ration_card_category
     displayLabel: Ration card category
     tier: TIER_1
     dataType: STRING
+    groupName: Economic
+    allowedValues: [NONE, BPL, ANTYODAYA]
     synthetic: beneficiary.ration_card_category
     live: CHANGE_ME.ration_card_category
-  - fieldKey: community
-    displayLabel: Community
+  - fieldKey: census_category
+    displayLabel: Census Data
     tier: TIER_1
     dataType: STRING
+    groupName: Economic
+    allowedValues: [APL, BPL, EWS]
+    synthetic: beneficiary.census_category
+    live: CHANGE_ME.census_category
+  - fieldKey: is_domicile_holder
+    displayLabel: Domicile holder
+    tier: TIER_1
+    dataType: BOOLEAN
+    groupName: Economic
+    synthetic: beneficiary.is_domicile_holder
+    live: CHANGE_ME.is_domicile_holder
+  - fieldKey: community
+    displayLabel: Caste
+    tier: TIER_1
+    dataType: STRING
+    groupName: Social Category
+    allowedValues: [GENERAL, SAHARIYA, KATHODI, KHAIRWA]
     synthetic: beneficiary.community
     live: CHANGE_ME.community
   - fieldKey: disability_pct
     displayLabel: Disability %
     tier: TIER_1
     dataType: NUMBER
+    groupName: Social Category
     synthetic: beneficiary.disability_pct
     live: CHANGE_ME.disability_pct
-  - fieldKey: is_enrolled_in_school
-    displayLabel: Enrolled in school
+  - fieldKey: tsp_classification
+    displayLabel: TSP / Non-TSP
+    tier: TIER_1
+    dataType: STRING
+    groupName: Social Category
+    allowedValues: [TSP, NON_TSP]
+    synthetic: beneficiary.tsp_classification
+    live: CHANGE_ME.tsp_classification
+  - fieldKey: class_passed
+    displayLabel: Highest Class Passed
+    tier: TIER_1
+    dataType: STRING
+    groupName: Education
+    allowedValues: [NURSERY, KG, "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", GRADUATE]
+    synthetic: beneficiary.class_passed
+    live: CHANGE_ME.class_passed
+  - fieldKey: has_vehicle
+    displayLabel: Owns a vehicle
     tier: TIER_1
     dataType: BOOLEAN
-    synthetic: beneficiary.is_enrolled_in_school
-    live: CHANGE_ME.is_enrolled_in_school
+    groupName: Assets
+    synthetic: beneficiary.has_vehicle
+    live: CHANGE_ME.has_vehicle
+  - fieldKey: land_holding_sqyd
+    displayLabel: Land holding (sq. yd)
+    tier: TIER_1
+    dataType: NUMBER
+    groupName: Assets
+    synthetic: beneficiary.land_holding_sqyd
+    live: CHANGE_ME.land_holding_sqyd
   - fieldKey: is_girl_child_of_hof
     displayLabel: Girl child of HoF
     # Tier 3 per CLAUDE.md's own worked example: cross-table/relationship,
     # pre-materialised upstream by Spark ETL / REL-01 before it lands here.
     tier: TIER_3
     dataType: BOOLEAN
+    groupName: Family & Relationship
     synthetic: beneficiary.is_girl_child_of_hof
     live: CHANGE_ME.is_girl_child_of_hof
+  - fieldKey: relationship_to_hof
+    displayLabel: Relationship to head of family
+    # Tier 3, relationship taxonomy per docs/R1.pdf (Jan Aadhaar Relationship
+    # Type) — pre-materialised upstream the same way as is_girl_child_of_hof.
+    tier: TIER_3
+    dataType: STRING
+    groupName: Family & Relationship
+    allowedValues: [SELF, SON, DAUGHTER, FATHER, MOTHER, SPOUSE, GRANDSON, GRANDDAUGHTER, BROTHER, SISTER, OTHER]
+    synthetic: beneficiary.relationship_to_hof
+    live: CHANGE_ME.relationship_to_hof
+  # father_name / mother_name intentionally NOT in the Rule Engine catalogue —
+  # their fuzzy-match UI now lives exclusively in the Analysis tab (schema-
+  # driven Source/Target picker over the live lakehouse, not this catalogue).
+  # Physical columns are untouched; only the officer-facing Rule Engine
+  # listing is affected.
+  # Income by financial year — TIER_3 like annual_income_3yr_avg in CLAUDE.md's
+  # own worked example: per-year income is a temporal/cross-table concern,
+  # pre-materialised upstream, CHANGE_ME pending Lovadeep's Golden Layer
+  # column names. groupName is deliberately its own group (not "Economic") so
+  # the rule builder renders these five as one FY-picker composite instead of
+  # five separate range rows.
+  - fieldKey: annual_income_fy2627
+    displayLabel: FY 2026-27
+    tier: TIER_3
+    dataType: NUMBER
+    groupName: Income by Financial Year
+    synthetic: beneficiary.annual_income_fy2627
+    live: CHANGE_ME.annual_income_fy2627
+  - fieldKey: annual_income_fy2526
+    displayLabel: FY 2025-26
+    tier: TIER_3
+    dataType: NUMBER
+    groupName: Income by Financial Year
+    synthetic: beneficiary.annual_income_fy2526
+    live: CHANGE_ME.annual_income_fy2526
+  - fieldKey: annual_income_fy2425
+    displayLabel: FY 2024-25
+    tier: TIER_3
+    dataType: NUMBER
+    groupName: Income by Financial Year
+    synthetic: beneficiary.annual_income_fy2425
+    live: CHANGE_ME.annual_income_fy2425
+  - fieldKey: annual_income_fy2324
+    displayLabel: FY 2023-24
+    tier: TIER_3
+    dataType: NUMBER
+    groupName: Income by Financial Year
+    synthetic: beneficiary.annual_income_fy2324
+    live: CHANGE_ME.annual_income_fy2324
+  - fieldKey: annual_income_fy2223
+    displayLabel: FY 2022-23
+    tier: TIER_3
+    dataType: NUMBER
+    groupName: Income by Financial Year
+    synthetic: beneficiary.annual_income_fy2223
+    live: CHANGE_ME.annual_income_fy2223
+  # Extended further back on request ("add option to add other FY also") —
+  # same shape as the 5 above, FyIncomeComposite picks these up automatically.
+  - fieldKey: annual_income_fy2122
+    displayLabel: FY 2021-22
+    tier: TIER_3
+    dataType: NUMBER
+    groupName: Income by Financial Year
+    synthetic: beneficiary.annual_income_fy2122
+    live: CHANGE_ME.annual_income_fy2122
+  - fieldKey: annual_income_fy2021
+    displayLabel: FY 2020-21
+    tier: TIER_3
+    dataType: NUMBER
+    groupName: Income by Financial Year
+    synthetic: beneficiary.annual_income_fy2021
+    live: CHANGE_ME.annual_income_fy2021
+  - fieldKey: annual_income_fy1920
+    displayLabel: FY 2019-20
+    tier: TIER_3
+    dataType: NUMBER
+    groupName: Income by Financial Year
+    synthetic: beneficiary.annual_income_fy1920
+    live: CHANGE_ME.annual_income_fy1920
+  - fieldKey: annual_income_fy1819
+    displayLabel: FY 2018-19
+    tier: TIER_3
+    dataType: NUMBER
+    groupName: Income by Financial Year
+    synthetic: beneficiary.annual_income_fy1819
+    live: CHANGE_ME.annual_income_fy1819
+  - fieldKey: annual_income_fy1718
+    displayLabel: FY 2017-18
+    tier: TIER_3
+    dataType: NUMBER
+    groupName: Income by Financial Year
+    synthetic: beneficiary.annual_income_fy1718
+    live: CHANGE_ME.annual_income_fy1718

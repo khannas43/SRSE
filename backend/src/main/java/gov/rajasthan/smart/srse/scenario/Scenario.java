@@ -1,17 +1,24 @@
 package gov.rajasthan.smart.srse.scenario;
 
+import jakarta.persistence.CollectionTable;
 import jakarta.persistence.Column;
+import jakarta.persistence.ElementCollection;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Lob;
 import jakarta.persistence.Table;
 
 import java.time.Instant;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 /**
  * Persisted scenario: a saved ruleset (Ast.PredicateSpec serialized as JSON) plus its most recent computed results, if evaluated.
+ * A scenario can be tagged to more than one scheme (e.g. a broadly-applicable
+ * eligibility combination reused across related pension schemes).
  */
 @Entity
 @Table(name = "scenario")
@@ -23,8 +30,10 @@ public class Scenario {
 
     private String name;
 
+    @ElementCollection
+    @CollectionTable(name = "scenario_scheme_tag", joinColumns = @JoinColumn(name = "scenario_id"))
     @Column(name = "scheme_id", nullable = false)
-    private String schemeId;
+    private Set<Long> schemeIds = new LinkedHashSet<>();
 
     @Lob
     @Column(name = "ruleset_json", nullable = false)
@@ -48,12 +57,12 @@ public class Scenario {
     protected Scenario() {
     }
 
-    public Scenario(Long id, String name, String schemeId, String rulesetJson,
+    public Scenario(Long id, String name, Set<Long> schemeIds, String rulesetJson,
                     Long totalCount, String breakdownJson,
                     Instant createdAt, String createdBy) {
         this.id = id;
         this.name = name;
-        this.schemeId = schemeId;
+        this.schemeIds = new LinkedHashSet<>(schemeIds);
         this.rulesetJson = rulesetJson;
         this.totalCount = totalCount;
         this.breakdownJson = breakdownJson;
@@ -79,8 +88,8 @@ public class Scenario {
         return name;
     }
 
-    public String getSchemeId() {
-        return schemeId;
+    public Set<Long> getSchemeIds() {
+        return schemeIds;
     }
 
     public String getRulesetJson() {

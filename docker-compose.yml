@@ -47,6 +47,12 @@ services:
       # Guardrails
       - SRSE_COHORT_CAP=1000
       - SRSE_QUERY_TIMEOUT_SECONDS=30
+      - SRSE_ANALYSIS_ROW_CAP=1000
+      # Admin-editable connection overrides (Tab 2) — persisted here so an
+      # admin edit survives container recreation, not just a restart.
+      - SRSE_CONNECTION_OVERRIDE_PATH=/app/config/connection-overrides.properties
+    volumes:
+      - connection-overrides:/app/config
     depends_on:
       db2:
         condition: service_started
@@ -79,8 +85,14 @@ services:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      # Host ports remapped off 9000/9001 to avoid clashing with other
+      # projects' MinIO containers on this machine; internal container-to-
+      # container traffic (Presto's hive.s3.endpoint=http://minio:9000 in
+      # docker/presto/catalog/iceberg.properties) is unaffected — that uses
+      # the container's own port 9000 over the docker network, not this
+      # host-side mapping.
+      - "9010:9000"
+      - "9011:9001"
     environment:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
@@ -105,6 +117,10 @@ services:
       - "8081:8080"   # host 8081 -> presto 8080 (backend uses internal 8080)
     volumes:
       - ./docker/presto/catalog:/opt/presto-server/etc/catalog:ro
+      # Image default is -Xmx1G, which OOMs on ordinary batch inserts/scans
+      # against this box's 19.5GB Docker allocation goes mostly unused —
+      # override to 4G so local seeding/querying doesn't crash mid-run.
+      - ./docker/presto/jvm.config:/opt/presto-server/etc/jvm.config:ro
     depends_on:
       - metastore
       - minio
@@ -124,3 +140,4 @@ services:
 volumes:
   db2data:
   miniodata:
+  connection-overrides:

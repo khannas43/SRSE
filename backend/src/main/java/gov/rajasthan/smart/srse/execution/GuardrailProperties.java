@@ -10,10 +10,14 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *    of the requested limit.
  *  - {@code queryTimeoutSeconds} is applied to every analytical query before
  *    execution.
+ *  - {@code analysisRowCap} hard-caps the Analysis tab's record-match result
+ *    grid, same contract as {@code cohortCap} but for that tab's own
+ *    execution path (see {@code analysis.RecordMatchService}).
  *
- * Relaxed binding maps {@code cohort-cap} / {@code query-timeout-seconds}
- * from application.yml. Record constructor binding is the Spring Boot 3.3
- * idiomatic form (no setters, no {@code @ConstructorBinding} needed).
+ * Relaxed binding maps {@code cohort-cap} / {@code query-timeout-seconds} /
+ * {@code analysis-row-cap} from application.yml. Record constructor binding
+ * is the Spring Boot 3.3 idiomatic form (no setters, no
+ * {@code @ConstructorBinding} needed).
  */
 @ConfigurationProperties(prefix = "srse.guardrails")
-public record GuardrailProperties(int cohortCap, int queryTimeoutSeconds) {}
+public record GuardrailProperties(int cohortCap, int queryTimeoutSeconds, int analysisRowCap) {}

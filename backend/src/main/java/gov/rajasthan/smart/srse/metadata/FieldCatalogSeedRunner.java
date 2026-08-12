@@ -13,17 +13,18 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Upserts {@code field_catalog} / {@code field_column_mapping} rows from
  * {@code metadata/field-catalog-seed.yml} on every boot, keyed by field key.
  *
  * <p>This is the operational fix for a real gap: before this ran, those two
- * JPA tables had no seed/migration path in any environment (no Flyway/Liquibase,
- * no admin API) — {@link MetadataFieldResolver} would find zero rows even when
- * DATA_MODE=live correctly activated it. LIVE-mode physical expressions are
- * CHANGE_ME placeholders pending Lovadeep's Golden Layer column names; swapping
- * them is a one-file YAML edit, not a code or SQL change.
+ * JPA tables had no seed/migration path in any environment (no Flyway/Liquibase) —
+ * {@link MetadataFieldResolver} would find zero rows even when DATA_MODE=live
+ * correctly activated it. LIVE-mode physical expressions default to CHANGE_ME
+ * placeholders in the checked-in YAML; an admin can now also override them at
+ * runtime via {@link FieldColumnMappingController} without a redeploy.
  *
  * <p>This only inserts rows into tables that already exist — it does not create
  * {@code field_catalog}/{@code field_column_mapping} themselves.
@@ -32,20 +33,20 @@ import java.util.List;
 public class FieldCatalogSeedRunner implements ApplicationRunner {
 
     private final FieldCatalogRepository catalogRepository;
-    private final FieldColumnMappingRepository mappingRepository;
+    private final FieldColumnMappingService mappingService;
 
     public FieldCatalogSeedRunner(FieldCatalogRepository catalogRepository,
-                                  FieldColumnMappingRepository mappingRepository) {
+                                  FieldColumnMappingService mappingService) {
         this.catalogRepository = catalogRepository;
-        this.mappingRepository = mappingRepository;
+        this.mappingService = mappingService;
     }
 
     @Override
     public void run(ApplicationArguments args) throws IOException {
         for (SeedEntry entry : loadSeed()) {
-            upsertCatalogEntry(entry);
-            upsertMapping(entry.fieldKey(), DataMode.SYNTHETIC, entry.synthetic());
-            upsertMapping(entry.fieldKey(), DataMode.LIVE, entry.live());
+            seedCatalogEntryIfAbsent(entry);
+            mappingService.seedIfAbsent(entry.fieldKey(), DataMode.SYNTHETIC, entry.synthetic());
+            mappingService.seedIfAbsent(entry.fieldKey(), DataMode.LIVE, entry.live());
         }
     }
 
@@ -59,22 +60,27 @@ public class FieldCatalogSeedRunner implements ApplicationRunner {
                 .orElseThrow(() -> new IllegalStateException("field-catalog-seed.yml has no 'fields' entries"));
     }
 
-    private void upsertCatalogEntry(SeedEntry entry) {
-        Long existingId = catalogRepository.findByFieldKey(entry.fieldKey())
-                .map(FieldCatalogEntry::getId)
+    /**
+     * Bootstrap-only insert: skips fields that already exist so an admin edit
+     * made via {@link FieldCatalogController} survives the next restart
+     * instead of being reverted to the checked-in YAML default.
+     */
+    private void seedCatalogEntryIfAbsent(SeedEntry entry) {
+        if (catalogRepository.findByFieldKey(entry.fieldKey()).isPresent()) {
+            return;
+        }
+        String allowedValues = Optional.ofNullable(entry.allowedValues())
+                .map(values -> String.join(",", values))
                 .orElse(null);
         catalogRepository.save(new FieldCatalogEntry(
-                existingId, entry.fieldKey(), entry.displayLabel(), entry.tier(), entry.dataType(), true));
+                null, entry.fieldKey(), entry.displayLabel(), entry.tier(), entry.dataType(),
+                entry.groupName(), allowedValues, true, Boolean.TRUE.equals(entry.fuzzyMatchable())));
     }
 
-    private void upsertMapping(String fieldKey, DataMode dataMode, String physicalExpression) {
-        Long existingId = mappingRepository.findByFieldKeyAndDataMode(fieldKey, dataMode)
-                .map(FieldColumnMapping::getId)
-                .orElse(null);
-        mappingRepository.save(new FieldColumnMapping(existingId, fieldKey, dataMode, physicalExpression));
-    }
-
+    // fuzzyMatchable is boxed (not primitive) so YAML entries that omit it bind to null,
+    // not a binder error — Boolean.TRUE.equals(...) above treats null as false.
     record SeedEntry(String fieldKey, String displayLabel, FieldTier tier, FieldDataType dataType,
+                      String groupName, List<String> allowedValues, Boolean fuzzyMatchable,
                       String synthetic, String live) {
     }
 }

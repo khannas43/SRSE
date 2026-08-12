@@ -34,9 +34,10 @@ public class ScenarioService {
     }
 
     /**
-     * Persist a new scenario with the given ruleset (unevaluated).
+     * Persist a new scenario with the given ruleset (unevaluated), tagged to
+     * one or more schemes.
      */
-    public Scenario createScenario(String name, String schemeId, Ast.PredicateSpec ruleset) {
+    public Scenario createScenario(String name, Set<Long> schemeIds, Ast.PredicateSpec ruleset) {
         String rulesetJson;
         try {
             rulesetJson = objectMapper.writeValueAsString(ruleset);
@@ -44,7 +45,7 @@ public class ScenarioService {
             throw new IllegalStateException("Failed to serialize ruleset", e);
         }
         Scenario scenario = new Scenario(
-                null, name, schemeId, rulesetJson,
+                null, name, schemeIds, rulesetJson,
                 null, null, Instant.now(), null);
         return repository.save(scenario);
     }
@@ -93,10 +94,10 @@ public class ScenarioService {
     }
 
     /**
-     * List scenarios for a scheme, newest first.
+     * List scenarios tagged to a scheme, newest first.
      */
-    public List<Scenario> listByScheme(String schemeId) {
-        return repository.findBySchemeIdOrderByCreatedAtDesc(schemeId);
+    public List<Scenario> listByScheme(Long schemeId) {
+        return repository.findBySchemeId(schemeId);
     }
 
     /**

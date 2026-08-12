@@ -46,7 +46,7 @@ class SecurityConfigTest {
         // Spring Security's default anonymous principal lacks STATE_OFFICER,
         // so hasAuthority(...) denies with 403 (not 401 — no custom
         // AuthenticationEntryPoint is configured).
-        mockMvc.perform(get("/api/decision/scenarios").param("schemeId", "EKAL_NAARI"))
+        mockMvc.perform(get("/api/decision/scenarios").param("schemeId", "1"))
                 .andExpect(status().isForbidden());
     }
 
@@ -58,7 +58,7 @@ class SecurityConfigTest {
         String token = objectMapper.readTree(body).get("token").asText();
 
         mockMvc.perform(get("/api/decision/scenarios")
-                        .param("schemeId", "EKAL_NAARI")
+                        .param("schemeId", "1")
                         .header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk());
     }

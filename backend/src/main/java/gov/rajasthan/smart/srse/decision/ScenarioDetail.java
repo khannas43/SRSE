@@ -12,7 +12,7 @@ import java.util.List;
 public record ScenarioDetail(
         Long id,
         String name,
-        String schemeId,
+        List<Long> schemeIds,
         Ast.PredicateSpec ruleset,
         Long totalCount,
         List<BreakdownRow> breakdown,

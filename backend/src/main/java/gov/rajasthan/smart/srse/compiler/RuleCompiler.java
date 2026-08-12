@@ -78,6 +78,8 @@ public class RuleCompiler {
             case NOT_IN -> emitIn(col, (List<Object>) p.value(), params, true);
 
             case BETWEEN -> emitBetween(col, (List<Object>) p.value(), params);
+
+            case FUZZY_MATCH -> emitFuzzyMatch(col, (List<Object>) p.value(), params);
         };
     }
 
@@ -106,5 +108,30 @@ public class RuleCompiler {
         params.add(bounds.get(0));
         params.add(bounds.get(1));
         return col + " BETWEEN ? AND ?";
+    }
+
+    /**
+     * Approximate name match — normalized Levenshtein similarity via
+     * PrestoDB's built-in {@code levenshtein_distance}, entirely in
+     * parameterised SQL: no join, no string concatenation. {@code value} is
+     * {@code [name, thresholdPercent]}; the name is bound twice (it appears
+     * twice in the expression) and the threshold once, as a 0..1 fraction.
+     */
+    private String emitFuzzyMatch(String col, List<Object> value, List<Object> params) {
+        if (value == null || value.size() != 2) {
+            throw new IllegalArgumentException("FUZZY_MATCH requires [name, thresholdPercent]");
+        }
+        Object nameObj = value.get(0);
+        if (!(nameObj instanceof String name) || name.isBlank()) {
+            throw new IllegalArgumentException("FUZZY_MATCH requires a non-blank name");
+        }
+        double thresholdPct = ((Number) value.get(1)).doubleValue();
+        if (thresholdPct < 0 || thresholdPct > 100) {
+            throw new IllegalArgumentException("FUZZY_MATCH threshold must be between 0 and 100");
+        }
+        params.add(name);
+        params.add(name);
+        params.add(thresholdPct / 100.0);
+        return FuzzyMatchSql.similarityExpr(col, "?") + " >= ?";
     }
 }

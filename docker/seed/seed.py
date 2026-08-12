@@ -17,7 +17,38 @@ BATCH_SIZE = 1000
 DISTRICTS = ["Jaipur", "Jodhpur", "Udaipur", "Kota", "Ajmer", "Bikaner", "Alwar"]
 COMMUNITIES = ["GENERAL", "SAHARIYA", "KATHODI", "KHAIRWA"]
 RATION = ["NONE", "BPL", "ANTYODAYA"]
+CENSUS_CATEGORIES = ["APL", "BPL", "EWS"]
+TSP_VALUES = ["TSP", "NON_TSP"]
 MARITAL = ["SINGLE", "MARRIED", "DIVORCED", "WIDOWED"]
+RELATIONSHIP_TO_HOF = [
+    "SELF", "SON", "DAUGHTER", "FATHER", "MOTHER", "SPOUSE",
+    "GRANDSON", "GRANDDAUGHTER", "BROTHER", "SISTER", "OTHER",
+]
+FATHER_NAMES = ["Ramesh", "Suresh", "Mahesh", "Rajesh", "Dinesh", "Ganesh", "Naresh", "Mukesh"]
+MOTHER_NAMES = ["Sunita", "Kavita", "Anita", "Rekha", "Meena", "Sita", "Geeta", "Lata"]
+CLASS_PASSED = ["NURSERY", "KG"] + [str(n) for n in range(1, 13)] + ["GRADUATE"]
+
+
+def _typo(name: str) -> str:
+    """Injects a single-character edit — simulates the cross-source spelling
+    variation (birth/marriage registration, ration card, etc.) that fuzzy
+    matching is meant to be tolerant of."""
+    if len(name) < 3:
+        return name
+    i = random.randint(1, len(name) - 2)
+    kind = random.choice(["swap", "drop", "dup"])
+    if kind == "swap":
+        chars = list(name)
+        chars[i], chars[i + 1] = chars[i + 1], chars[i]
+        return "".join(chars)
+    if kind == "drop":
+        return name[:i] + name[i + 1:]
+    return name[:i] + name[i] + name[i:]
+
+
+def _name_with_variation(pool):
+    name = random.choice(pool)
+    return _typo(name) if random.random() < 0.18 else name
 
 # Target Iceberg table matching the initial field catalogue (design doc §7.1).
 CREATE_TABLE = """
@@ -30,14 +61,44 @@ CREATE TABLE IF NOT EXISTS beneficiary (
     marital_status       VARCHAR,
     is_domicile_holder   BOOLEAN,
     ration_card_category VARCHAR,
+    census_category      VARCHAR,
     community            VARCHAR,
     disability_pct       INTEGER,
-    is_enrolled_in_school BOOLEAN,
+    tsp_classification   VARCHAR,
+    class_passed         VARCHAR,
     is_girl_child_of_hof  BOOLEAN,
+    has_vehicle          BOOLEAN,
+    land_holding_sqyd    DECIMAL(10,2),
+    relationship_to_hof  VARCHAR,
+    father_name          VARCHAR,
+    mother_name          VARCHAR,
+    annual_income_fy2627 DECIMAL(12,2),
+    annual_income_fy2526 DECIMAL(12,2),
+    annual_income_fy2425 DECIMAL(12,2),
+    annual_income_fy2324 DECIMAL(12,2),
+    annual_income_fy2223 DECIMAL(12,2),
+    annual_income_fy2122 DECIMAL(12,2),
+    annual_income_fy2021 DECIMAL(12,2),
+    annual_income_fy1920 DECIMAL(12,2),
+    annual_income_fy1819 DECIMAL(12,2),
+    annual_income_fy1718 DECIMAL(12,2),
     age_band             VARCHAR,
     last_refreshed_at    VARCHAR
 )
 """
+
+FY_INCOME_COLUMNS = [
+    "annual_income_fy2627",
+    "annual_income_fy2526",
+    "annual_income_fy2425",
+    "annual_income_fy2324",
+    "annual_income_fy2223",
+    "annual_income_fy2122",
+    "annual_income_fy2021",
+    "annual_income_fy1920",
+    "annual_income_fy1819",
+    "annual_income_fy1718",
+]
 
 COLUMNS = [
     "id",
@@ -48,34 +109,60 @@ COLUMNS = [
     "marital_status",
     "is_domicile_holder",
     "ration_card_category",
+    "census_category",
     "community",
     "disability_pct",
-    "is_enrolled_in_school",
+    "tsp_classification",
+    "class_passed",
     "is_girl_child_of_hof",
+    "has_vehicle",
+    "land_holding_sqyd",
+    "relationship_to_hof",
+    "father_name",
+    "mother_name",
+    *FY_INCOME_COLUMNS,
     "age_band",
     "last_refreshed_at",
 ]
 
 
+def _fy_income(base_income: float) -> float:
+    """Independent year-over-year variance around the flat income figure —
+    so FY-scoped ranges actually produce different counts, not a copy of
+    annual_income_total five times over."""
+    return round(base_income * random.uniform(0.7, 1.3), 2)
+
+
 def make_row(i: int):
     age = random.randint(0, 90)
     gender = random.choice(["MALE", "FEMALE"])
-    return {
+    annual_income_total = round(random.uniform(0, 300000), 2)
+    row = {
         "id": i,
         "age_years": age,
         "gender": gender,
         "district": random.choice(DISTRICTS),
-        "annual_income_total": round(random.uniform(0, 300000), 2),
+        "annual_income_total": annual_income_total,
         "marital_status": random.choice(MARITAL),
         "is_domicile_holder": random.random() < 0.9,
         "ration_card_category": random.choice(RATION),
+        "census_category": random.choice(CENSUS_CATEGORIES),
         "community": random.choice(COMMUNITIES),
         "disability_pct": random.choice([0, 0, 0, 40, 60, 80]),
-        "is_enrolled_in_school": age < 18 and random.random() < 0.8,
+        "tsp_classification": random.choice(TSP_VALUES),
+        "class_passed": random.choice(CLASS_PASSED),
         "is_girl_child_of_hof": gender == "FEMALE" and age < 18 and random.random() < 0.3,
+        "has_vehicle": random.random() < 0.35,
+        "land_holding_sqyd": round(random.uniform(0, 500), 2),
+        "relationship_to_hof": random.choice(RELATIONSHIP_TO_HOF),
+        "father_name": _name_with_variation(FATHER_NAMES),
+        "mother_name": _name_with_variation(MOTHER_NAMES),
         "age_band": _band(age),
         "last_refreshed_at": "2026-01-01",
     }
+    for col in FY_INCOME_COLUMNS:
+        row[col] = _fy_income(annual_income_total)
+    return row
 
 
 def _band(age: int) -> str:

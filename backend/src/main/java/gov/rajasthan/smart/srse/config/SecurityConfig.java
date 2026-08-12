@@ -22,8 +22,10 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 /**
  * spring-boot-starter-security auto-locks every endpoint behind a login form
  * when no SecurityFilterChain is defined; this opens /api/health/**,
- * /api/auth/mock-login and springdoc, and gates /api/decision/** behind
- * STATE_OFFICER — enforced by whichever of {@link MockJwtAuthenticationFilter}
+ * /api/auth/mock-login and springdoc, and gates /api/decision/**,
+ * /api/schemes/**, /api/metadata/**, /api/admin/** and /api/analysis/**
+ * behind STATE_OFFICER —
+ * enforced by whichever of {@link MockJwtAuthenticationFilter}
  * / {@link RajSewadwarAuthenticationFilter} is active for {@code srse.auth-mode}.
  * Real RajSewadwar SSO payload parsing is still a stub — see that filter's
  * TODO.
@@ -67,7 +69,9 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/health/**").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/auth/mock-login").permitAll()
-                .requestMatchers("/api/decision/**").hasAuthority(Authorities.STATE_OFFICER)
+                .requestMatchers("/api/decision/**", "/api/schemes/**", "/api/metadata/**", "/api/admin/**",
+                        "/api/analysis/**")
+                    .hasAuthority(Authorities.STATE_OFFICER)
                 .requestMatchers("/swagger-ui/**", "/v3/api-docs/**").permitAll()
                 // Without this, Spring Boot's internal error-dispatch to /error gets blocked by security too, masking the real HTTP status/error body behind a generic 403.
                 .requestMatchers("/error").permitAll()

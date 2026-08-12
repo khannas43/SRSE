@@ -28,7 +28,10 @@ public final class Ast {
         IN, NOT_IN,
         BETWEEN,
         IS_TRUE, IS_FALSE,
-        IS_NULL, NOT_NULL
+        IS_NULL, NOT_NULL,
+        /** Approximate string match: value = [name, thresholdPercent]. Only
+         * operator that isn't an exact comparison — see RuleCompiler. */
+        FUZZY_MATCH
     }
 
     /** A node is either a group (AND/OR of children) or a leaf predicate. */

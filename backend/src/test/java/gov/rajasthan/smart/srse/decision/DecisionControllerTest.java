@@ -18,12 +18,14 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -57,25 +59,62 @@ class DecisionControllerTest {
     private MockJwtService mockJwtService;
 
     @Test
-    void evaluateWithBreakdownReturns200AndCorrectShape() throws Exception {
-        Scenario created = new Scenario(
-                42L, "age-gte-18", "EKAL_NAARI",
-                "{\"root\":{}}", null, null,
-                Instant.parse("2026-01-15T10:00:00Z"), null);
+    void previewWithBreakdownReturns200AndDoesNotPersist() throws Exception {
         List<BreakdownRow> breakdown = List.of(
                 new BreakdownRow("JAIPUR", "F", "18-59", 100L));
 
-        when(scenarioService.createScenario(eq("age-gte-18"), eq("EKAL_NAARI"), any(Ast.PredicateSpec.class)))
-                .thenReturn(created);
         when(executionService.count(any(Ast.PredicateSpec.class))).thenReturn(100L);
         when(executionService.breakdown(any(Ast.PredicateSpec.class))).thenReturn(breakdown);
-        when(scenarioService.recordResults(eq(42L), eq(100L), eq(breakdown))).thenReturn(created);
 
         // Jackson-polymorphic AST: type discriminator on the Node proves end-to-end
         // HTTP→PredicateSpec deserialization (not just unit-level ObjectMapper).
         String body = """
                 {
-                  "schemeId": "EKAL_NAARI",
+                  "includeBreakdown": true,
+                  "ruleset": {
+                    "root": {
+                      "type": "PREDICATE",
+                      "fieldKey": "age_years",
+                      "operator": "GTE",
+                      "value": 18
+                    }
+                  }
+                }
+                """;
+
+        mockMvc.perform(post("/api/decision/preview")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalCount").value(100))
+                .andExpect(jsonPath("$.breakdown[0].district").value("JAIPUR"))
+                .andExpect(jsonPath("$.breakdown[0].gender").value("F"))
+                .andExpect(jsonPath("$.breakdown[0].ageBand").value("18-59"))
+                .andExpect(jsonPath("$.breakdown[0].count").value(100));
+
+        verify(executionService).count(any(Ast.PredicateSpec.class));
+        verify(executionService).breakdown(any(Ast.PredicateSpec.class));
+        verifyNoInteractions(scenarioService);
+    }
+
+    @Test
+    void saveScenarioTagsMultipleSchemesAndPersistsResults() throws Exception {
+        Scenario created = new Scenario(
+                42L, "age-gte-18", Set.of(1L, 2L),
+                "{\"root\":{}}", null, null,
+                Instant.parse("2026-01-15T10:00:00Z"), null);
+        List<BreakdownRow> breakdown = List.of(
+                new BreakdownRow("JAIPUR", "F", "18-59", 100L));
+
+        when(scenarioService.createScenario(eq("age-gte-18"), eq(Set.of(1L, 2L)), any(Ast.PredicateSpec.class)))
+                .thenReturn(created);
+        when(executionService.count(any(Ast.PredicateSpec.class))).thenReturn(100L);
+        when(executionService.breakdown(any(Ast.PredicateSpec.class))).thenReturn(breakdown);
+        when(scenarioService.recordResults(eq(42L), eq(100L), eq(breakdown))).thenReturn(created);
+
+        String body = """
+                {
+                  "schemeIds": [1, 2],
                   "name": "age-gte-18",
                   "includeBreakdown": true,
                   "ruleset": {
@@ -89,20 +128,15 @@ class DecisionControllerTest {
                 }
                 """;
 
-        mockMvc.perform(post("/api/decision/evaluate")
+        mockMvc.perform(post("/api/decision/scenarios")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.scenarioId").value(42))
                 .andExpect(jsonPath("$.totalCount").value(100))
-                .andExpect(jsonPath("$.breakdown[0].district").value("JAIPUR"))
-                .andExpect(jsonPath("$.breakdown[0].gender").value("F"))
-                .andExpect(jsonPath("$.breakdown[0].ageBand").value("18-59"))
-                .andExpect(jsonPath("$.breakdown[0].count").value(100));
+                .andExpect(jsonPath("$.breakdown[0].district").value("JAIPUR"));
 
-        verify(scenarioService).createScenario(eq("age-gte-18"), eq("EKAL_NAARI"), any(Ast.PredicateSpec.class));
-        verify(executionService).count(any(Ast.PredicateSpec.class));
-        verify(executionService).breakdown(any(Ast.PredicateSpec.class));
+        verify(scenarioService).createScenario(eq("age-gte-18"), eq(Set.of(1L, 2L)), any(Ast.PredicateSpec.class));
         verify(scenarioService).recordResults(eq(42L), eq(100L), eq(breakdown));
     }
 
@@ -114,6 +148,36 @@ class DecisionControllerTest {
         mockMvc.perform(get("/api/decision/scenarios/999"))
                 .andExpect(status().isNotFound())
                 .andExpect(content().string(containsString("Scenario not found: 999")));
+    }
+
+    @Test
+    void malformedPredicateValueReturns400NotRaw500() throws Exception {
+        // Regression: IllegalArgumentException (e.g. RuleCompiler's FUZZY_MATCH
+        // threshold-out-of-range / BETWEEN wrong-arity checks) was previously
+        // unmapped by DecisionExceptionHandler and fell through to a generic
+        // 500 — found via a live query against real Presto.
+        when(executionService.count(any(Ast.PredicateSpec.class)))
+                .thenThrow(new IllegalArgumentException("FUZZY_MATCH threshold must be between 0 and 100"));
+
+        String body = """
+                {
+                  "includeBreakdown": false,
+                  "ruleset": {
+                    "root": {
+                      "type": "PREDICATE",
+                      "fieldKey": "father_name",
+                      "operator": "FUZZY_MATCH",
+                      "value": ["Ramesh", 150]
+                    }
+                  }
+                }
+                """;
+
+        mockMvc.perform(post("/api/decision/preview")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().string(containsString("threshold must be between 0 and 100")));
     }
 
     @Test
