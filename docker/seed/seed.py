@@ -241,6 +241,10 @@ def main():
         _execute(cursor, f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
         print(f"[seed] schema {catalog}.{schema} ready")
 
+        # Drop first: a prior failed run can leave a metastore entry with no
+        # Iceberg metadata on object storage, and CREATE TABLE IF NOT EXISTS
+        # would then skip recreation while INSERT fails with NOT_FOUND.
+        _execute(cursor, "DROP TABLE IF EXISTS beneficiary")
         _execute(cursor, CREATE_TABLE)
         print("[seed] table beneficiary ready")
 
