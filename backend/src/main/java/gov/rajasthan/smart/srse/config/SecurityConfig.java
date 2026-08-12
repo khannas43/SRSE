@@ -1,5 +1,6 @@
 package gov.rajasthan.smart.srse.config;
 
+import java.util.Arrays;
 import java.util.List;
 
 import gov.rajasthan.smart.srse.security.AuthMode;
@@ -36,13 +37,19 @@ public class SecurityConfig {
 
     private final ObjectProvider<MockJwtAuthenticationFilter> mockJwtFilter;
     private final ObjectProvider<RajSewadwarAuthenticationFilter> rajSewadwarFilter;
+    private final List<String> allowedOrigins;
 
     public SecurityConfig(@Value("${srse.auth-mode}") String authModeConfig,
+                          @Value("${srse.frontend-origins}") String frontendOrigins,
                           ObjectProvider<MockJwtAuthenticationFilter> mockJwtFilter,
                           ObjectProvider<RajSewadwarAuthenticationFilter> rajSewadwarFilter) {
         // Fails fast on a typo'd SRSE_AUTH_MODE instead of silently running
         // with neither auth filter wired (see AuthMode).
         AuthMode.valueOf(authModeConfig.toUpperCase());
+        this.allowedOrigins = Arrays.stream(frontendOrigins.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .toList();
         this.mockJwtFilter = mockJwtFilter;
         this.rajSewadwarFilter = rajSewadwarFilter;
     }
@@ -50,7 +57,7 @@ public class SecurityConfig {
     @Bean
     CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(List.of("http://localhost:3000"));
+        configuration.setAllowedOrigins(allowedOrigins);
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("*"));
         configuration.setAllowCredentials(true);

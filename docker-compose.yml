@@ -16,10 +16,16 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # Baked into the client JS bundle at BUILD time (Next.js NEXT_PUBLIC_*
+        # semantics) — set this to the URL the BROWSER will use to reach the
+        # backend (not a Docker-internal hostname). Changing it requires a
+        # rebuild (`docker compose build srse-frontend`), not just a restart.
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_BASE=http://localhost:8080
+      - NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE:-http://localhost:8080}
       - NEXT_PUBLIC_AUTH_MODE=mock
     depends_on:
       - srse-backend
@@ -44,6 +50,9 @@ services:
       - SRSE_PRESTO_USER=srse
       # Auth
       - SRSE_AUTH_MODE=mock
+      # CORS — must match the URL the BROWSER loads the frontend from.
+      # Comma-separated if you need more than one (e.g. http + https).
+      - SRSE_FRONTEND_ORIGINS=${SRSE_FRONTEND_ORIGINS:-http://localhost:3000}
       # Guardrails
       - SRSE_COHORT_CAP=1000
       - SRSE_QUERY_TIMEOUT_SECONDS=30

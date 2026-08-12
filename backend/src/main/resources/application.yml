@@ -22,6 +22,10 @@ srse:
       driver-class-name: com.facebook.presto.jdbc.PrestoDriver
   data-mode: ${DATA_MODE:synthetic}
   auth-mode: ${SRSE_AUTH_MODE:mock}
+  # Comma-separated list of origins the browser loads the frontend from —
+  # CORS rejects everything else. Must match the ACTUAL URL the browser uses,
+  # not a Docker-internal hostname. See SecurityConfig#corsConfigurationSource.
+  frontend-origins: ${SRSE_FRONTEND_ORIGINS:http://localhost:3000}
   guardrails:
     cohort-cap: ${SRSE_COHORT_CAP:1000}
     query-timeout-seconds: ${SRSE_QUERY_TIMEOUT_SECONDS:30}

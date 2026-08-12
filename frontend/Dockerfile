@@ -1,6 +1,12 @@
 # ---- Build stage ----
 FROM node:20-alpine AS build
 WORKDIR /app
+# Next.js inlines NEXT_PUBLIC_* values into the client bundle at build time —
+# a runtime `environment:` var in docker-compose.yml has NO effect on them.
+# Must be passed as a build ARG (docker-compose.yml's build.args) to actually
+# change which backend URL the deployed app talks to.
+ARG NEXT_PUBLIC_API_BASE=http://localhost:8080
+ENV NEXT_PUBLIC_API_BASE=$NEXT_PUBLIC_API_BASE
 COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
