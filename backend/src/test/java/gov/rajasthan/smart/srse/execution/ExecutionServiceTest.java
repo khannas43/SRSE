@@ -24,13 +24,15 @@ import static org.mockito.Mockito.*;
  * ExecutionService unit tests — Mockito over JdbcTemplate; no live Presto.
  *
  * Predicate fixture mirrors RuleCompilerTest: age_years &gt;= 18 via a trivial
- * FieldResolver mapping keys to {@code beneficiary.<key>}.
+ * FieldResolver mapping keys to {@code beneficiary.<key>} — same resolver is
+ * now also used directly by ExecutionService (not just RuleCompiler) to
+ * derive the table/district/gender columns, so it must map those two keys too.
  */
 @ExtendWith(MockitoExtension.class)
 class ExecutionServiceTest {
 
     private final FieldResolver resolver = fieldKey -> {
-        if ("age_years".equals(fieldKey)) {
+        if ("age_years".equals(fieldKey) || "district".equals(fieldKey) || "gender".equals(fieldKey)) {
             return "beneficiary." + fieldKey;
         }
         throw new FieldResolver.UnknownFieldException(fieldKey);
@@ -53,7 +55,7 @@ class ExecutionServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new ExecutionService(compiler, jdbc, guardrails);
+        service = new ExecutionService(compiler, jdbc, guardrails, resolver, "age_band");
     }
 
     @Test
@@ -97,10 +99,13 @@ class ExecutionServiceTest {
                 paramsCap.capture());
 
         String sql = sqlCap.getValue();
-        assertTrue(sql.contains("SELECT district, gender, age_band, COUNT(*) AS n"), sql);
+        assertTrue(sql.contains(
+                "SELECT beneficiary.district AS district, beneficiary.gender AS gender, "
+                        + "beneficiary.age_band AS age_band, COUNT(*) AS n"), sql);
         assertTrue(sql.contains("FROM beneficiary"), sql);
         assertTrue(sql.contains("WHERE"), sql);
-        assertTrue(sql.contains("GROUP BY district, gender, age_band"), sql);
+        assertTrue(sql.contains(
+                "GROUP BY beneficiary.district, beneficiary.gender, beneficiary.age_band"), sql);
         assertTrue(sql.contains("beneficiary.age_years >= ?"), sql);
 
         assertArrayEquals(new Object[]{18}, paramsCap.getValue());
@@ -129,6 +134,29 @@ class ExecutionServiceTest {
 
         // predicate params first, effective (capped) limit last
         assertArrayEquals(new Object[]{18, 1000}, paramsCap.getValue());
+    }
+
+    @Test
+    void tableNameFollowsWhateverDistrictResolvesTo() {
+        // Proves the table is genuinely derived per environment, not hardcoded:
+        // a resolver pointing "district" at a differently-named table means
+        // ALL THREE query methods must follow, not just resolve the WHERE clause.
+        FieldResolver otherSchemaResolver = fieldKey -> switch (fieldKey) {
+            case "age_years" -> "otherschema.age_years";
+            case "district" -> "otherschema.district";
+            case "gender" -> "otherschema.gender";
+            default -> throw new FieldResolver.UnknownFieldException(fieldKey);
+        };
+        ExecutionService otherService = new ExecutionService(
+                new RuleCompiler(otherSchemaResolver), jdbc, guardrails, otherSchemaResolver, "age_band");
+
+        when(jdbc.queryForObject(anyString(), eq(Long.class), any(Object[].class))).thenReturn(0L);
+        otherService.count(ageGte18());
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).queryForObject(sqlCap.capture(), eq(Long.class), any(Object[].class));
+        assertTrue(sqlCap.getValue().contains("FROM otherschema"), sqlCap.getValue());
+        assertFalse(sqlCap.getValue().contains("beneficiary"), sqlCap.getValue());
     }
 
     @Test

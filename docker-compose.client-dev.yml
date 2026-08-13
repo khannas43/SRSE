@@ -37,6 +37,9 @@ services:
       - SRSE_AUTH_MODE=rajsewadwar
       - SRSE_COHORT_CAP=1000
       - SRSE_QUERY_TIMEOUT_SECONDS=30
+      # The real Golden Layer's age-band column almost certainly isn't named
+      # "age_band" — set CLIENT_AGE_BAND_COLUMN once Lovadeep confirms it.
+      - SRSE_AGE_BAND_COLUMN=${CLIENT_AGE_BAND_COLUMN:-age_band}
 
   srse-frontend:
     environment:

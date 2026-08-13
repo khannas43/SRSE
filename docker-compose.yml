@@ -61,6 +61,9 @@ services:
       - SRSE_COHORT_CAP=1000
       - SRSE_QUERY_TIMEOUT_SECONDS=30
       - SRSE_ANALYSIS_ROW_CAP=1000
+      # Breakdown's age-band dimension has no field-catalogue entry (never an
+      # officer-selectable rule filter) — physical column name set here instead.
+      - SRSE_AGE_BAND_COLUMN=${SRSE_AGE_BAND_COLUMN:-age_band}
       # Admin-editable connection overrides (Tab 2) — persisted here so an
       # admin edit survives container recreation, not just a restart.
       - SRSE_CONNECTION_OVERRIDE_PATH=/app/config/connection-overrides.properties

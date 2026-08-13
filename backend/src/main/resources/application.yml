@@ -43,6 +43,12 @@ srse:
     cohort-cap: ${SRSE_COHORT_CAP:1000}
     query-timeout-seconds: ${SRSE_QUERY_TIMEOUT_SECONDS:30}
     analysis-row-cap: ${SRSE_ANALYSIS_ROW_CAP:1000}
+  breakdown:
+    # age_band has no field-catalogue entry (never officer-selectable as a
+    # rule filter, only a fixed breakdown dimension per ExecutionService's
+    # contract) so it can't resolve through FieldResolver like district/gender
+    # do — this is the one physical column name left as a plain property.
+    age-band-column: ${SRSE_AGE_BAND_COLUMN:age_band}
 
 springdoc:
   swagger-ui:
