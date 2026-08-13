@@ -3,6 +3,7 @@ package gov.rajasthan.smart.srse.config;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.jdbc.DataSourceBuilder;
 import org.springframework.context.annotation.Bean;
@@ -28,6 +29,15 @@ import org.springframework.jdbc.core.JdbcTemplate;
 @Configuration
 public class AnalyticalDataSourceConfig {
 
+    @Value("${srse.datasource.analytical-ssl.enabled:false}")
+    private boolean sslEnabled;
+
+    @Value("${srse.datasource.analytical-ssl.trust-store-path:}")
+    private String sslTrustStorePath;
+
+    @Value("${srse.datasource.analytical-ssl.trust-store-password:}")
+    private String sslTrustStorePassword;
+
     @Bean
     @ConfigurationProperties("srse.datasource.analytical")
     public HikariDataSource analyticalHikariDataSource() {
@@ -35,7 +45,29 @@ public class AnalyticalDataSourceConfig {
         // Full property binding here (not just url/user/password/driver) so
         // local-profile resilience tuning (initialization-fail-timeout,
         // connection-timeout — see application.yml) keeps applying at boot.
-        return DataSourceBuilder.create().type(HikariDataSource.class).build();
+        HikariDataSource ds = DataSourceBuilder.create().type(HikariDataSource.class).build();
+        applySslProperties(ds);
+        return ds;
+    }
+
+    /**
+     * SSL/TrustStore are Presto-JDBC-specific connection properties, added
+     * only when actually enabled — the driver rejects SSLTrustStorePath as
+     * soon as it's present at all, even blank, so these can't just default
+     * to empty strings the way ordinary Hikari properties can (see
+     * application.yml's srse.datasource.analytical-ssl comment).
+     */
+    private void applySslProperties(HikariDataSource ds) {
+        if (!sslEnabled) {
+            return;
+        }
+        ds.addDataSourceProperty("SSL", "true");
+        if (!sslTrustStorePath.isBlank()) {
+            ds.addDataSourceProperty("SSLTrustStorePath", sslTrustStorePath);
+        }
+        if (!sslTrustStorePassword.isBlank()) {
+            ds.addDataSourceProperty("SSLTrustStorePassword", sslTrustStorePassword);
+        }
     }
 
     @Bean

@@ -48,6 +48,10 @@ services:
       # Analytical plane (PrestoDB / JDBC)
       - SRSE_PRESTO_URL=jdbc:presto://presto:8080/iceberg/srse
       - SRSE_PRESTO_USER=srse
+      - SRSE_PRESTO_PASSWORD=${SRSE_PRESTO_PASSWORD:-}
+      - SRSE_PRESTO_SSL=${SRSE_PRESTO_SSL:-false}
+      - SRSE_PRESTO_TRUSTSTORE_PATH=${SRSE_PRESTO_TRUSTSTORE_PATH:-}
+      - SRSE_PRESTO_TRUSTSTORE_PASSWORD=${SRSE_PRESTO_TRUSTSTORE_PASSWORD:-}
       # Auth
       - SRSE_AUTH_MODE=mock
       # CORS — must match the URL the BROWSER loads the frontend from.

@@ -27,6 +27,13 @@ services:
       - SRSE_DB2_PASSWORD=${CLIENT_DB2_PASSWORD}
       - SRSE_PRESTO_URL=${CLIENT_PRESTO_URL}
       - SRSE_PRESTO_USER=${CLIENT_PRESTO_USER}
+      - SRSE_PRESTO_PASSWORD=${CLIENT_PRESTO_PASSWORD:-}
+      # A real on-prem watsonx.data endpoint typically requires SSL — set
+      # CLIENT_PRESTO_SSL=true and the trust-store vars once Lovadeep confirms
+      # the endpoint's cert setup (CLAUDE.md open item).
+      - SRSE_PRESTO_SSL=${CLIENT_PRESTO_SSL:-true}
+      - SRSE_PRESTO_TRUSTSTORE_PATH=${CLIENT_PRESTO_TRUSTSTORE_PATH:-}
+      - SRSE_PRESTO_TRUSTSTORE_PASSWORD=${CLIENT_PRESTO_TRUSTSTORE_PASSWORD:-}
       - SRSE_AUTH_MODE=rajsewadwar
       - SRSE_COHORT_CAP=1000
       - SRSE_QUERY_TIMEOUT_SECONDS=30

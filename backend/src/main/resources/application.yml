@@ -19,7 +19,20 @@ srse:
     analytical:
       jdbc-url: ${SRSE_PRESTO_URL:jdbc:presto://localhost:8081/iceberg/srse}
       username: ${SRSE_PRESTO_USER:srse}
+      # Blank by default — local/synthetic Presto has no auth. A live
+      # watsonx.data endpoint with password auth needs SRSE_PRESTO_PASSWORD set.
+      password: ${SRSE_PRESTO_PASSWORD:}
       driver-class-name: com.facebook.presto.jdbc.PrestoDriver
+    # SSL is deliberately NOT bound through data-source-properties here — the
+    # Presto JDBC driver rejects SSLTrustStorePath as a connection property
+    # whenever it's present, even as an empty string (SQLException: "Connection
+    # property 'SSLTrustStorePath' is not allowed"), so it can't just default
+    # to blank like a normal Hikari property. AnalyticalDataSourceConfig reads
+    # these directly and only adds the driver properties when ssl.enabled=true.
+    analytical-ssl:
+      enabled: ${SRSE_PRESTO_SSL:false}
+      trust-store-path: ${SRSE_PRESTO_TRUSTSTORE_PATH:}
+      trust-store-password: ${SRSE_PRESTO_TRUSTSTORE_PASSWORD:}
   data-mode: ${DATA_MODE:synthetic}
   auth-mode: ${SRSE_AUTH_MODE:mock}
   # Comma-separated list of origins the browser loads the frontend from —
