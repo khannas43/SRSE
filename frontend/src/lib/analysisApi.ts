@@ -100,3 +100,40 @@ export async function runRecordMatch(req: RecordMatchRequest): Promise<RecordMat
   }
   return res.json();
 }
+
+// Admin-managed business name / fuzzy-matchable override per physical
+// table.column — see AnalysisColumnMetadata's javadoc on the backend for why
+// this is separate from the Rule Engine's field catalogue. Unregistered
+// columns fall back to an auto-derived label and a name-substring guess.
+export type ColumnMetadata = {
+  table: string;
+  column: string;
+  businessName: string | null;
+  fuzzyMatchable: boolean;
+};
+
+export async function listColumnMetadata(): Promise<ColumnMetadata[]> {
+  const res = await authorizedFetch(`${API_BASE}/api/analysis/column-metadata`, { credentials: "include" });
+  if (!res.ok) {
+    throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
+}
+
+export async function upsertColumnMetadata(
+  table: string,
+  column: string,
+  businessName: string | null,
+  fuzzyMatchable: boolean,
+): Promise<ColumnMetadata> {
+  const res = await authorizedFetch(`${API_BASE}/api/analysis/column-metadata`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ table, column, businessName, fuzzyMatchable }),
+  });
+  if (!res.ok) {
+    throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
+}

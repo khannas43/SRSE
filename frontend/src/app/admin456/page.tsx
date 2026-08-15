@@ -15,6 +15,14 @@ import {
   type FieldTier,
   type MappingRow,
 } from "@/lib/decisionApi";
+import {
+  listAnalysisColumns,
+  listAnalysisTables,
+  listColumnMetadata,
+  upsertColumnMetadata,
+  type ColumnInfo,
+  type ColumnMetadata,
+} from "@/lib/analysisApi";
 
 function StatusBadge({ status }: { status: string }) {
   const up = status === "up";
@@ -313,6 +321,22 @@ function AddFieldForm({ onCreated }: { onCreated: () => void }) {
   );
 }
 
+// Presto date_diff('year', dob, current_date) — the exact Tier-2 pattern
+// CLAUDE.md's own worked example uses for age. Built here so an admin only
+// ever has to know the DOB column name for THEIR environment, never Presto
+// syntax — the DOB column genuinely differs per environment (that's the
+// whole reason this exists instead of just typing the expression by hand).
+function buildDobAgeExpression(dobColumn: string): string {
+  return `date_diff('year', ${dobColumn}, current_date)`;
+}
+
+const DOB_AGE_EXPRESSION_RE = /^date_diff\('year',\s*(.+?),\s*current_date\)$/;
+
+function parseDobAgeExpression(expression: string): string | null {
+  const match = DOB_AGE_EXPRESSION_RE.exec(expression.trim());
+  return match ? match[1] : null;
+}
+
 function MappingRowEditor({
   row,
   dataMode,
@@ -322,17 +346,24 @@ function MappingRowEditor({
   dataMode: DataMode;
   onSaved: (physicalExpression: string) => void;
 }) {
+  const isAgeField = row.fieldKey === "age_years";
+  const existingDobColumn = isAgeField ? parseDobAgeExpression(row.physicalExpression ?? "") : null;
+
   const [value, setValue] = useState(row.physicalExpression ?? "");
+  const [dobMode, setDobMode] = useState(existingDobColumn !== null);
+  const [dobColumn, setDobColumn] = useState(existingDobColumn ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const dirty = value !== (row.physicalExpression ?? "");
+
+  const effectiveValue = dobMode ? buildDobAgeExpression(dobColumn) : value;
+  const dirty = effectiveValue !== (row.physicalExpression ?? "");
 
   async function onSave() {
     setSaving(true);
     setError(null);
     try {
-      await upsertMapping(row.fieldKey, dataMode, value);
-      onSaved(value);
+      await upsertMapping(row.fieldKey, dataMode, effectiveValue);
+      onSaved(effectiveValue);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -347,17 +378,56 @@ function MappingRowEditor({
         {row.fieldKey}
       </td>
       <td>
-        <input
-          value={value}
-          placeholder="e.g. beneficiary.age_years"
-          onChange={(e) => setValue(e.target.value)}
-          className="srse-input"
-          style={{ width: 280, fontFamily: "monospace" }}
-        />
+        {isAgeField && (
+          <label
+            className="srse-checkbox-label"
+            style={{ display: "flex", marginBottom: "0.4rem", fontSize: "0.78rem" }}
+            title="Computes age on the fly as of today, instead of storing a fixed number — no need to know Presto syntax, just the DOB column name for this environment"
+          >
+            <input
+              type="checkbox"
+              checked={dobMode}
+              onChange={(e) => setDobMode(e.target.checked)}
+            />
+            Compute from Date of Birth
+          </label>
+        )}
+        {isAgeField && dobMode ? (
+          <input
+            value={dobColumn}
+            placeholder="e.g. beneficiary.date_of_birth"
+            onChange={(e) => setDobColumn(e.target.value)}
+            className="srse-input"
+            style={{ width: 280, fontFamily: "monospace" }}
+          />
+        ) : (
+          <input
+            value={value}
+            placeholder="e.g. beneficiary.age_years"
+            onChange={(e) => setValue(e.target.value)}
+            className="srse-input"
+            style={{ width: 280, fontFamily: "monospace" }}
+          />
+        )}
+        {isAgeField && dobMode && (
+          <>
+            <div className="srse-text-muted" style={{ fontSize: "0.75rem", marginTop: "0.3rem", fontFamily: "monospace" }}>
+              → {buildDobAgeExpression(dobColumn || "…")}
+            </div>
+            <div className="srse-text-muted" style={{ fontSize: "0.72rem", marginTop: "0.2rem" }}>
+              Column must be DATE/TIMESTAMP-typed in the lakehouse.
+            </div>
+          </>
+        )}
       </td>
       <td>
         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-          <button type="button" className="srse-btn srse-btn-sm" disabled={!dirty || saving} onClick={onSave}>
+          <button
+            type="button"
+            className="srse-btn srse-btn-sm"
+            disabled={!dirty || saving || (dobMode && !dobColumn.trim())}
+            onClick={onSave}
+          >
             {saving ? "Saving…" : "Save"}
           </button>
           {error && <span className="srse-text-danger">{error}</span>}
@@ -434,6 +504,218 @@ function MappingsPanel() {
   );
 }
 
+function ColumnMetadataRowEditor({
+  row,
+  onSaved,
+}: {
+  row: ColumnMetadata;
+  onSaved: (updated: ColumnMetadata) => void;
+}) {
+  const [businessName, setBusinessName] = useState(row.businessName ?? "");
+  const [fuzzyMatchable, setFuzzyMatchable] = useState(row.fuzzyMatchable);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const dirty = businessName !== (row.businessName ?? "") || fuzzyMatchable !== row.fuzzyMatchable;
+
+  async function onSave() {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await upsertColumnMetadata(
+        row.table,
+        row.column,
+        businessName.trim() || null,
+        fuzzyMatchable,
+      );
+      onSaved(updated);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <tr>
+      <td className="srse-text-muted" style={{ fontSize: "0.8rem", fontFamily: "monospace" }}>
+        {row.table}
+      </td>
+      <td className="srse-text-muted" style={{ fontSize: "0.8rem", fontFamily: "monospace" }}>
+        {row.column}
+      </td>
+      <td>
+        <input
+          value={businessName}
+          placeholder="e.g. Father's Name"
+          onChange={(e) => setBusinessName(e.target.value)}
+          className="srse-input"
+          style={{ width: 220 }}
+        />
+      </td>
+      <td>
+        <label className="srse-checkbox-label" title="Offer approximate (Levenshtein) matching for this column in the Analysis tab">
+          <input
+            type="checkbox"
+            checked={fuzzyMatchable}
+            onChange={(e) => setFuzzyMatchable(e.target.checked)}
+          />
+          Fuzzy
+        </label>
+      </td>
+      <td>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+          <button type="button" className="srse-btn srse-btn-sm" disabled={!dirty || saving} onClick={onSave}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+          {error && <span className="srse-text-danger">{error}</span>}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function RegisterColumnMetadataForm({ onCreated }: { onCreated: () => void }) {
+  const [tables, setTables] = useState<string[]>([]);
+  const [table, setTable] = useState("");
+  const [columns, setColumns] = useState<ColumnInfo[]>([]);
+  const [column, setColumn] = useState("");
+  const [businessName, setBusinessName] = useState("");
+  const [fuzzyMatchable, setFuzzyMatchable] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listAnalysisTables()
+      .then(setTables)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  useEffect(() => {
+    setColumn("");
+    if (!table) {
+      setColumns([]);
+      return;
+    }
+    listAnalysisColumns(table)
+      .then(setColumns)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  }, [table]);
+
+  async function onSubmit() {
+    if (!table || !column) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await upsertColumnMetadata(table, column, businessName.trim() || null, fuzzyMatchable);
+      setBusinessName("");
+      setFuzzyMatchable(false);
+      onCreated();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+      <select value={table} onChange={(e) => setTable(e.target.value)} className="srse-select">
+        <option value="">— select table —</option>
+        {tables.map((t) => (
+          <option key={t} value={t}>
+            {t}
+          </option>
+        ))}
+      </select>
+      <select
+        value={column}
+        onChange={(e) => setColumn(e.target.value)}
+        className="srse-select"
+        disabled={!table}
+      >
+        <option value="">— select column —</option>
+        {columns.map((c) => (
+          <option key={c.name} value={c.name}>
+            {c.name}
+          </option>
+        ))}
+      </select>
+      <input
+        placeholder="Business name (e.g. Father's Name)"
+        value={businessName}
+        onChange={(e) => setBusinessName(e.target.value)}
+        className="srse-input"
+        style={{ width: 220 }}
+      />
+      <label className="srse-checkbox-label" title="Offer approximate (Levenshtein) matching for this column in the Analysis tab">
+        <input type="checkbox" checked={fuzzyMatchable} onChange={(e) => setFuzzyMatchable(e.target.checked)} />
+        Fuzzy matchable
+      </label>
+      <button type="button" className="srse-btn srse-btn-primary" disabled={saving || !table || !column} onClick={onSubmit}>
+        {saving ? "Adding…" : "+ Add"}
+      </button>
+      {error && (
+        <p className="srse-text-danger" style={{ width: "100%", margin: 0 }}>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function ColumnMetadataPanel() {
+  const [rows, setRows] = useState<ColumnMetadata[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    listColumnMetadata()
+      .then(setRows)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  }, [refreshKey]);
+
+  const refresh = () => setRefreshKey((k) => k + 1);
+
+  return (
+    <section className="srse-card">
+      <h2 className="srse-card-title">Analysis tab: column business names &amp; fuzzy matching</h2>
+      <p className="srse-page-description" style={{ maxWidth: "none", whiteSpace: "nowrap", marginTop: 0 }}>
+        Applies to the Analysis tab&apos;s Source/Target columns — unregistered columns fall back to an
+        auto-derived label and a name-substring guess for fuzzy matching.
+      </p>
+
+      {error && <p className="srse-text-danger">{error}</p>}
+
+      {rows.length > 0 && (
+        <div style={{ overflowX: "auto", marginBottom: "1.25rem" }}>
+          <table className="srse-table">
+            <thead>
+              <tr>
+                <th>Table</th>
+                <th>Column</th>
+                <th>Business name</th>
+                <th>Fuzzy matchable</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <ColumnMetadataRowEditor key={`${row.table}.${row.column}`} row={row} onSaved={refresh} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <h3 className="srse-subheading" style={{ fontSize: "0.95rem" }}>
+        Register column metadata
+      </h3>
+      <RegisterColumnMetadataForm onCreated={refresh} />
+    </section>
+  );
+}
+
 export default function AdminPage() {
   return (
     <main className="srse-page">
@@ -445,6 +727,7 @@ export default function AdminPage() {
 
       <ConnectionsPanel />
       <MappingsPanel />
+      <ColumnMetadataPanel />
     </main>
   );
 }

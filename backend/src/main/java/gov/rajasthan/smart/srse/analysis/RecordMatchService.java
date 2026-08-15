@@ -3,6 +3,8 @@ package gov.rajasthan.smart.srse.analysis;
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.compiler.FuzzyMatchSql;
 import gov.rajasthan.smart.srse.execution.GuardrailProperties;
+import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadata;
+import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadataRepository;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -11,6 +13,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -27,6 +30,9 @@ import java.util.Set;
  *    exception within an exception: the age filter DOES resolve through the
  *    catalogue's {@link FieldResolver} (the {@code age_years} field, same as
  *    the Rule Engine) — there's no ad hoc "age column" for arbitrary tables.
+ *  - Fuzzy-vs-exact per criterion pair is decided by {@link AnalysisColumnMetadataRepository}
+ *    (admin-registered override) first, falling back to a name-substring
+ *    guess when neither side is registered — see {@link #isFuzzyMatchable}.
  *  - Read-only. No write/DELETE capability. "Dedup" is view-only — it
  *    collapses duplicate rows in the returned grid, never touches the
  *    lakehouse.
@@ -51,15 +57,18 @@ public class RecordMatchService {
     private final AnalysisSchemaService schemaService;
     private final GuardrailProperties guardrails;
     private final FieldResolver fields;
+    private final AnalysisColumnMetadataRepository columnMetadata;
 
     public RecordMatchService(@Qualifier("prestoJdbcTemplate") JdbcTemplate jdbc,
                               AnalysisSchemaService schemaService,
                               GuardrailProperties guardrails,
-                              FieldResolver fields) {
+                              FieldResolver fields,
+                              AnalysisColumnMetadataRepository columnMetadata) {
         this.jdbc = jdbc;
         this.schemaService = schemaService;
         this.guardrails = guardrails;
         this.fields = fields;
+        this.columnMetadata = columnMetadata;
     }
 
     public RecordMatchResponse match(RecordMatchRequest req) {
@@ -98,8 +107,7 @@ public class RecordMatchService {
             MatchCriterion tc = req.targetCriteria().get(i);
             String srcCol = "src." + sc.column();
             String tgtCol = "tgt." + tc.column();
-            boolean isNameColumn = sc.column().toLowerCase().contains("name")
-                    || tc.column().toLowerCase().contains("name");
+            boolean isNameColumn = isFuzzyMatchable(sc, tc);
             if (where.length() > 0) {
                 where.append(" AND ");
             }
@@ -192,14 +200,33 @@ public class RecordMatchService {
     private String buildMatchScoreExpr(RecordMatchRequest req) {
         List<String> terms = new ArrayList<>();
         for (int i = 0; i < req.sourceCriteria().size(); i++) {
-            String srcCol = "src." + req.sourceCriteria().get(i).column();
-            String tgtCol = "tgt." + req.targetCriteria().get(i).column();
-            boolean isNameColumn = req.sourceCriteria().get(i).column().toLowerCase().contains("name")
-                    || req.targetCriteria().get(i).column().toLowerCase().contains("name");
-            terms.add(isNameColumn ? FuzzyMatchSql.similarityExpr(srcCol, tgtCol) : "1.0");
+            MatchCriterion sc = req.sourceCriteria().get(i);
+            MatchCriterion tc = req.targetCriteria().get(i);
+            String srcCol = "src." + sc.column();
+            String tgtCol = "tgt." + tc.column();
+            terms.add(isFuzzyMatchable(sc, tc) ? FuzzyMatchSql.similarityExpr(srcCol, tgtCol) : "1.0");
         }
         String sum = String.join(" + ", terms);
         return "ROUND((" + sum + ") / " + terms.size() + " * 100, 1)";
+    }
+
+    /**
+     * Admin-registered {@link AnalysisColumnMetadata} takes precedence over
+     * the name-substring guess, on either side — this MUST stay in sync with
+     * the frontend's own fuzzy-eligibility check (analysis/page.tsx), or the
+     * officer could see a Fuzzy % control that the backend then silently
+     * ignores (or vice versa: a submitted threshold the backend never uses).
+     */
+    private boolean isFuzzyMatchable(MatchCriterion sc, MatchCriterion tc) {
+        Optional<AnalysisColumnMetadata> srcMeta = columnMetadata.findByTableNameAndColumnName(sc.table(), sc.column());
+        if (srcMeta.isPresent()) {
+            return srcMeta.get().isFuzzyMatchable();
+        }
+        Optional<AnalysisColumnMetadata> tgtMeta = columnMetadata.findByTableNameAndColumnName(tc.table(), tc.column());
+        if (tgtMeta.isPresent()) {
+            return tgtMeta.get().isFuzzyMatchable();
+        }
+        return sc.column().toLowerCase().contains("name") || tc.column().toLowerCase().contains("name");
     }
 
     private void appendSelect(StringBuilder select, Set<String> outerColumns,

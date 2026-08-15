@@ -32,9 +32,9 @@ function csvEscape(value: unknown): string {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-function downloadCsv(rows: Row[], visibleIds: string[]) {
+function downloadCsv(rows: Row[], visibleIds: string[], labelFor: (id: string) => string) {
   const lines = [
-    visibleIds.map((id) => csvEscape(prettify(id))).join(","),
+    visibleIds.map((id) => csvEscape(labelFor(id))).join(","),
     ...rows.map((row) => visibleIds.map((id) => csvEscape(row[id])).join(",")),
   ];
   const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
@@ -68,6 +68,7 @@ export function AnalysisResultsGrid({
   dedupAvailable,
   dedupEnabled,
   onDedupToggle,
+  columnLabels,
 }: {
   columns: string[];
   rows: Row[];
@@ -77,7 +78,9 @@ export function AnalysisResultsGrid({
   dedupAvailable: boolean;
   dedupEnabled: boolean;
   onDedupToggle: (enabled: boolean) => void;
+  columnLabels?: Record<string, string>;
 }) {
+  const labelFor = (id: string) => columnLabels?.[id] ?? prettify(id);
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [visibleColumnIds, setVisibleColumnIds] = useState<string[]>([]);
@@ -94,7 +97,7 @@ export function AnalysisResultsGrid({
       columns.map((id) =>
         columnHelper.accessor((row) => row[id], {
           id,
-          header: prettify(id),
+          header: labelFor(id),
           filterFn: (row, columnId, filterValue) => {
             if (!filterValue) return true;
             return String(row.getValue(columnId) ?? "")
@@ -103,7 +106,7 @@ export function AnalysisResultsGrid({
           },
         }),
       ),
-    [columns, columnHelper],
+    [columns, columnHelper, columnLabels],
   );
 
   const table = useReactTable({
@@ -162,7 +165,7 @@ export function AnalysisResultsGrid({
               </label>
             )}
             <MultiSelectDropdown
-              options={columns.map((c) => ({ value: c, label: prettify(c) }))}
+              options={columns.map((c) => ({ value: c, label: labelFor(c) }))}
               selected={visibleColumnIds}
               onChange={setVisibleColumnIds}
               allLabel="All columns"
@@ -171,7 +174,7 @@ export function AnalysisResultsGrid({
             <button
               type="button"
               className="srse-btn srse-btn-sm"
-              onClick={() => downloadCsv(filteredSortedRows, [...effectiveVisibleIds])}
+              onClick={() => downloadCsv(filteredSortedRows, [...effectiveVisibleIds], labelFor)}
             >
               ⬇ Download CSV
             </button>
@@ -338,7 +341,7 @@ export function AnalysisResultsGrid({
       <div style={{ marginTop: "1.5rem" }}>
         <ChartsSection
           rows={rows}
-          dimensions={columns.map((c) => ({ key: c, label: prettify(c) }))}
+          dimensions={columns.map((c) => ({ key: c, label: labelFor(c) }))}
           getValue={(row, key) => String(row[key] ?? "")}
           getCount={() => 1}
         />

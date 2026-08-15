@@ -6,7 +6,6 @@ import { usePathname } from "next/navigation";
 const TABS = [
   { href: "/rules", label: "Rule Engine" },
   { href: "/analysis", label: "Analysis" },
-  { href: "/admin", label: "Admin" },
 ];
 
 export function AppHeader() {

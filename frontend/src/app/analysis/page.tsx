@@ -4,9 +4,11 @@ import { useEffect, useState } from "react";
 import {
   listAnalysisColumns,
   listAnalysisTables,
+  listColumnMetadata,
   runRecordMatch,
   type AgeUnit,
   type ColumnInfo,
+  type ColumnMetadata,
   type RecordMatchRequest,
   type RecordMatchResponse,
 } from "@/lib/analysisApi";
@@ -23,6 +25,10 @@ type CriterionRow = {
 
 function emptyRow(): CriterionRow {
   return { table: "", column: "", columns: [], fuzzyThresholdPercent: 80 };
+}
+
+function metadataKey(table: string, column: string): string {
+  return `${table}.${column}`;
 }
 
 function isNameColumn(column: string): boolean {
@@ -44,6 +50,7 @@ function detectLastUpdatedColumn(columns: ColumnInfo[]): string | null {
 export default function AnalysisPage() {
   const [tables, setTables] = useState<string[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [columnMetadata, setColumnMetadata] = useState<Map<string, ColumnMetadata>>(new Map());
 
   const [highlightDuplicates, setHighlightDuplicates] = useState(false);
 
@@ -66,7 +73,22 @@ export default function AnalysisPage() {
     listAnalysisTables()
       .then(setTables)
       .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
+    listColumnMetadata()
+      .then((entries) => setColumnMetadata(new Map(entries.map((e) => [metadataKey(e.table, e.column), e]))))
+      .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
   }, []);
+
+  // Admin-registered override takes precedence, on either side of the pair
+  // it's used for — same fallback order as the backend (RecordMatchService),
+  // so the UI's Fuzzy % control and the actual query never disagree.
+  function isFuzzyMatchable(table: string, column: string): boolean {
+    const entry = columnMetadata.get(metadataKey(table, column));
+    return entry ? entry.fuzzyMatchable : isNameColumn(column);
+  }
+
+  function businessNameFor(table: string, column: string): string | null {
+    return columnMetadata.get(metadataKey(table, column))?.businessName ?? null;
+  }
 
   async function setRowTable(
     setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>,
@@ -101,10 +123,13 @@ export default function AnalysisPage() {
     const n = Math.min(filledSource.length, filledTarget.length);
     if (n === 0) return null;
     return {
-      sourceCriteria: filledSource.slice(0, n).map((r) => ({
+      sourceCriteria: filledSource.slice(0, n).map((r, i) => ({
         table: r.table,
         column: r.column,
-        fuzzyThresholdPercent: isNameColumn(r.column) ? r.fuzzyThresholdPercent : null,
+        fuzzyThresholdPercent:
+          isFuzzyMatchable(r.table, r.column) || isFuzzyMatchable(filledTarget[i].table, filledTarget[i].column)
+            ? r.fuzzyThresholdPercent
+            : null,
       })),
       targetCriteria: filledTarget.slice(0, n).map((r) => ({
         table: r.table,
@@ -117,6 +142,19 @@ export default function AnalysisPage() {
         : null,
       ageFilter: ageFilterEnabled ? { minAge, maxAge, unit: ageUnit } : null,
     };
+  }
+
+  function buildColumnLabels(): Record<string, string> {
+    const labels: Record<string, string> = {};
+    for (const r of sourceRows) {
+      const bn = r.table && r.column ? businessNameFor(r.table, r.column) : null;
+      if (bn) labels[`source_${r.column}`] = `Source: ${bn}`;
+    }
+    for (const r of targetRows) {
+      const bn = r.table && r.column ? businessNameFor(r.table, r.column) : null;
+      if (bn) labels[`target_${r.column}`] = `Target: ${bn}`;
+    }
+    return labels;
   }
 
   async function runMatch(withDedup: boolean) {
@@ -142,6 +180,7 @@ export default function AnalysisPage() {
     rows: CriterionRow[],
     setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>,
     showFuzzy: boolean,
+    pairedRows?: CriterionRow[],
   ) {
     return (
       <section className="srse-card" style={{ flex: "1 1 380px" }}>
@@ -195,12 +234,14 @@ export default function AnalysisPage() {
                 <option value="">— select —</option>
                 {row.columns.map((c) => (
                   <option key={c.name} value={c.name}>
-                    {c.name}
+                    {businessNameFor(row.table, c.name) ?? c.name}
                   </option>
                 ))}
               </select>
             </div>
-            {showFuzzy && isNameColumn(row.column) && (
+            {showFuzzy &&
+              (isFuzzyMatchable(row.table, row.column) ||
+                (pairedRows?.[index] && isFuzzyMatchable(pairedRows[index].table, pairedRows[index].column))) && (
               <div style={{ flex: "0 1 100px" }}>
                 <label className="srse-text-muted" style={fieldLabelStyle}>
                   Fuzzy %
@@ -264,13 +305,14 @@ export default function AnalysisPage() {
       </label>
 
       <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", width: "100%" }}>
-        {renderCriterionBox("Select Source", sourceRows, setSourceRows, true)}
+        {renderCriterionBox("Select Source", sourceRows, setSourceRows, true, targetRows)}
         {renderCriterionBox("Select Target", targetRows, setTargetRows, false)}
       </div>
 
       <p className="srse-text-muted" style={{ fontSize: "0.78rem", marginTop: "0.5rem" }}>
-        Fuzzy % applies automatically when a column name contains &quot;name&quot;; other pairs match exactly.
-        Source and Target rows pair up in order — add a matching row on both sides.
+        Fuzzy % applies to columns marked fuzzy-matchable in Admin, or (if unmapped) when a column
+        name contains &quot;name&quot;; other pairs match exactly. Source and Target rows pair up in
+        order — add a matching row on both sides.
       </p>
 
       <section className="srse-card" style={{ width: "100%", marginTop: "1rem" }}>
@@ -361,6 +403,7 @@ export default function AnalysisPage() {
             highlightDuplicates={highlightDuplicates}
             dedupAvailable={!!dedupColumn}
             dedupEnabled={dedupEnabled}
+            columnLabels={buildColumnLabels()}
             onDedupToggle={(enabled) => {
               setDedupEnabled(enabled);
               runMatch(enabled);

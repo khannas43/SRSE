@@ -2,6 +2,8 @@ package gov.rajasthan.smart.srse.analysis;
 
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.execution.GuardrailProperties;
+import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadata;
+import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadataRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -12,6 +14,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -20,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -31,6 +35,9 @@ class RecordMatchServiceTest {
 
     @Mock
     private AnalysisSchemaService schemaService;
+
+    @Mock
+    private AnalysisColumnMetadataRepository columnMetadata;
 
     /** Mirrors StubFieldResolver's real mapping for age_years, used by the age filter. */
     private final FieldResolver fieldResolver = fieldKey -> {
@@ -47,7 +54,11 @@ class RecordMatchServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new RecordMatchService(jdbc, schemaService, guardrails, fieldResolver);
+        // Default: no admin override registered — every existing test below
+        // relies on falling back to the name-substring guess, unchanged.
+        lenient().when(columnMetadata.findByTableNameAndColumnName(anyString(), anyString()))
+                .thenReturn(Optional.empty());
+        service = new RecordMatchService(jdbc, schemaService, guardrails, fieldResolver, columnMetadata);
     }
 
     private static MatchCriterion exact(String table, String column) {
@@ -97,6 +108,45 @@ class RecordMatchServiceTest {
         String sql = sqlCap.getValue();
         assertTrue(sql.contains("levenshtein_distance(lower(src.father_name), lower(tgt.father_name))"), sql);
         assertArrayEquals(new Object[]{0.75}, paramsCap.getValue());
+    }
+
+    @Test
+    void registeredFuzzyOverrideAppliesToNonNameColumn() {
+        // "guardian" has no "name" substring — substring guess alone would
+        // treat this as exact. A registered fuzzy=true entry must override it.
+        when(columnMetadata.findByTableNameAndColumnName("beneficiary", "guardian"))
+                .thenReturn(Optional.of(new AnalysisColumnMetadata(1L, "beneficiary", "guardian", "Guardian", true)));
+        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
+
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(fuzzy("beneficiary", "guardian", 70.0)),
+                List.of(exact("beneficiary", "guardian")),
+                false, null, null);
+        service.match(req);
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).queryForList(sqlCap.capture(), any(Object[].class));
+        assertTrue(sqlCap.getValue().contains("levenshtein_distance"), sqlCap.getValue());
+    }
+
+    @Test
+    void registeredNonFuzzyOverrideAppliesToNameColumn() {
+        // "scheme_name" contains "name" — substring guess alone would fuzzy-
+        // match it. A registered fuzzy=false entry must override that too.
+        when(columnMetadata.findByTableNameAndColumnName("beneficiary", "scheme_name"))
+                .thenReturn(Optional.of(new AnalysisColumnMetadata(1L, "beneficiary", "scheme_name", "Scheme", false)));
+        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
+
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "scheme_name")),
+                List.of(exact("beneficiary", "scheme_name")),
+                false, null, null);
+        service.match(req);
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).queryForList(sqlCap.capture(), any(Object[].class));
+        assertTrue(sqlCap.getValue().contains("src.scheme_name = tgt.scheme_name"), sqlCap.getValue());
+        assertFalse(sqlCap.getValue().contains("levenshtein_distance"), sqlCap.getValue());
     }
 
     @Test
