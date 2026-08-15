@@ -73,14 +73,14 @@ export function RuleGroupEditor({
   targetPath,
   onSetTarget,
   depth = 0,
-}: {
+}: Readonly<{
   node: GroupNode;
   path: NodePath;
   fields: FieldCatalogEntry[];
   targetPath: NodePath;
   onSetTarget: (path: NodePath) => void;
   depth?: number;
-}) {
+}>) {
   const setGroupOp = useRuleBuilder((s) => s.setGroupOp);
   const addSubGroup = useRuleBuilder((s) => s.addSubGroup);
   const removeNode = useRuleBuilder((s) => s.removeNode);
@@ -139,28 +139,30 @@ export function RuleGroupEditor({
       )}
 
       <div>
-        {node.children.map((child, index) =>
-          child.type === "PREDICATE" ? (
+        {node.children.map((child, index) => {
+          const childPath = [...path, index];
+          const childKey = childPath.join("-");
+          return child.type === "PREDICATE" ? (
             <PredicateChip
-              key={index}
+              key={childKey}
               predicate={child}
-              path={[...path, index]}
+              path={childPath}
               fields={fields}
               siblingCount={node.children.length}
               indexInParent={index}
             />
           ) : (
             <RuleGroupEditor
-              key={index}
+              key={childKey}
               node={child}
-              path={[...path, index]}
+              path={childPath}
               fields={fields}
               targetPath={targetPath}
               onSetTarget={onSetTarget}
               depth={depth + 1}
             />
-          ),
-        )}
+          );
+        })}
       </div>
     </div>
   );
@@ -172,13 +174,13 @@ function PredicateChip({
   fields,
   siblingCount,
   indexInParent,
-}: {
+}: Readonly<{
   predicate: PredicateNode;
   path: NodePath;
   fields: FieldCatalogEntry[];
   siblingCount: number;
   indexInParent: number;
-}) {
+}>) {
   const removeNode = useRuleBuilder((s) => s.removeNode);
   const moveNode = useRuleBuilder((s) => s.moveNode);
 

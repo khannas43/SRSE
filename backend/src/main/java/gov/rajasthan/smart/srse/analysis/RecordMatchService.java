@@ -105,6 +105,12 @@ public class RecordMatchService {
     }
 
     public StreamingResponseBody match(RecordMatchRequest req) {
+        validateRequest(req);
+        MatchQuery query = buildMatchQuery(req);
+        return streamResults(query);
+    }
+
+    private void validateRequest(RecordMatchRequest req) {
         String sourceTable = validateSide(req.sourceCriteria(), "sourceCriteria");
         String targetTable = validateSide(req.targetCriteria(), "targetCriteria");
         if (req.sourceCriteria().size() != req.targetCriteria().size()) {
@@ -115,125 +121,168 @@ public class RecordMatchService {
             schemaService.validateColumn(req.dedup().table(), req.dedup().column());
         }
         if (req.ageFilter() != null) {
-            if (!AGE_UNITS.contains(req.ageFilter().unit())) {
-                throw new IllegalArgumentException("ageFilter.unit must be one of " + AGE_UNITS);
-            }
-            if (req.ageFilter().minAge() > req.ageFilter().maxAge()) {
-                throw new IllegalArgumentException("ageFilter minAge must be <= maxAge");
-            }
+            validateAgeFilter(req.ageFilter());
         }
+    }
 
+    private static void validateAgeFilter(AgeFilterSpec ageFilter) {
+        if (!AGE_UNITS.contains(ageFilter.unit())) {
+            throw new IllegalArgumentException("ageFilter.unit must be one of " + AGE_UNITS);
+        }
+        if (ageFilter.minAge() > ageFilter.maxAge()) {
+            throw new IllegalArgumentException("ageFilter minAge must be <= maxAge");
+        }
+    }
+
+    private MatchQuery buildMatchQuery(RecordMatchRequest req) {
         List<Object> params = new ArrayList<>();
         Set<String> outerColumns = new LinkedHashSet<>();
         StringBuilder select = new StringBuilder();
         StringBuilder onClause = new StringBuilder();
         StringBuilder where = new StringBuilder();
 
+        appendCriteriaSelects(select, outerColumns, req);
+        appendJoinConditions(onClause, where, params, req);
+
+        String dedupAlias = appendDedupSelect(select, outerColumns, req);
+        appendMatchScoreSelect(select, outerColumns, req);
+        appendAgeFilter(where, params, req);
+
+        if (where.length() == 0) {
+            where.append("TRUE");
+        }
+
+        String sourceTable = req.sourceCriteria().get(0).table();
+        String targetTable = req.targetCriteria().get(0).table();
+        String baseSql = "SELECT " + select + " FROM " + sourceTable + " src JOIN " + targetTable
+                + " tgt ON " + onClause + " WHERE " + where;
+
+        String finalSql = wrapWithDedup(baseSql, req, dedupAlias);
+        return new MatchQuery(finalSql, params, List.copyOf(outerColumns));
+    }
+
+    private void appendCriteriaSelects(StringBuilder select, Set<String> outerColumns, RecordMatchRequest req) {
         for (MatchCriterion c : req.sourceCriteria()) {
             appendSelect(select, outerColumns, "src", c.column(), "source_" + c.column());
         }
         for (MatchCriterion c : req.targetCriteria()) {
             appendSelect(select, outerColumns, "tgt", c.column(), "target_" + c.column());
         }
+    }
 
+    private void appendJoinConditions(StringBuilder onClause, StringBuilder where, List<Object> params,
+                                      RecordMatchRequest req) {
         for (int i = 0; i < req.sourceCriteria().size(); i++) {
             MatchCriterion sc = req.sourceCriteria().get(i);
             MatchCriterion tc = req.targetCriteria().get(i);
-            String srcCol = "src." + sc.column();
-            String tgtCol = "tgt." + tc.column();
-            boolean isNameColumn = isFuzzyMatchable(sc, tc);
-            if (onClause.length() > 0) {
-                onClause.append(" AND ");
-            }
-            if (isNameColumn) {
-                if (sc.fuzzyThresholdPercent() == null) {
-                    throw new IllegalArgumentException(
-                            "sourceCriteria[" + i + "].fuzzyThresholdPercent is required for a name column");
-                }
-                double threshold = sc.fuzzyThresholdPercent();
-                if (threshold < 0 || threshold > 100) {
-                    throw new IllegalArgumentException("fuzzyThresholdPercent must be between 0 and 100");
-                }
-                onClause.append(blockingKeyExpr(srcCol)).append(" = ").append(blockingKeyExpr(tgtCol));
-                if (where.length() > 0) {
-                    where.append(" AND ");
-                }
-                where.append(FuzzyMatchSql.similarityExpr(srcCol, tgtCol)).append(" >= ?");
-                params.add(threshold / 100.0);
-            } else {
-                onClause.append(srcCol).append(" = ").append(tgtCol);
-            }
+            appendCriterionJoin(onClause, where, params, i, sc, tc);
         }
-        if (where.length() == 0) {
-            where.append("TRUE");
+    }
+
+    private void appendCriterionJoin(StringBuilder onClause, StringBuilder where, List<Object> params,
+                                     int index, MatchCriterion sc, MatchCriterion tc) {
+        String srcCol = "src." + sc.column();
+        String tgtCol = "tgt." + tc.column();
+        if (onClause.length() > 0) {
+            onClause.append(" AND ");
         }
-
-        String dedupAlias = null;
-        if (req.dedup() != null) {
-            String side = req.dedup().table().equals(sourceTable) ? "src" : "tgt";
-            dedupAlias = "dedup_last_updated";
-            appendSelect(select, outerColumns, side, req.dedup().column(), dedupAlias);
-        }
-
-        if (req.highlightDuplicates()) {
-            String scoreExpr = buildMatchScoreExpr(req);
-            select.append(", ").append(scoreExpr).append(" AS \"match_score_pct\"");
-            outerColumns.add("match_score_pct");
-        }
-
-        if (req.ageFilter() != null) {
-            // The catalogue's registered "age_years" field, resolved via the SAME
-            // admin-mapped FieldResolver the Rule Engine uses — the one deliberate
-            // exception to this service's "never touch the field catalogue" rule,
-            // since there is no ad hoc "the age column" on an arbitrary lakehouse
-            // table for this tab's own schema-introspection allow-list to offer.
-            // Assumes a plain table.column mapping (true for age_years today);
-            // a same-table Tier-2 expression would need different handling.
-            String resolved = fields.resolveColumn("age_years");
-            int lastDot = resolved.lastIndexOf('.');
-            String ageColumn = lastDot >= 0 ? resolved.substring(lastDot + 1) : resolved;
-
-            double divisor = switch (req.ageFilter().unit()) {
-                case "DAYS" -> 365.0;
-                case "MONTHS" -> 12.0;
-                default -> 1.0;
-            };
-            double minYears = req.ageFilter().minAge() / divisor;
-            double maxYears = req.ageFilter().maxAge() / divisor;
-
-            where.append(" AND src.").append(ageColumn).append(" BETWEEN ? AND ?");
-            where.append(" AND tgt.").append(ageColumn).append(" BETWEEN ? AND ?");
-            params.add(minYears);
-            params.add(maxYears);
-            params.add(minYears);
-            params.add(maxYears);
-        }
-
-        String baseSql = "SELECT " + select + " FROM " + sourceTable + " src JOIN " + targetTable
-                + " tgt ON " + onClause + " WHERE " + where;
-
-        String finalSql;
-        if (req.dedup() != null) {
-            String partitionCols = req.sourceCriteria().stream()
-                    .map(c -> "\"source_" + c.column() + "\"")
-                    .reduce((a, b) -> a + ", " + b).orElseThrow();
-            finalSql = "SELECT * FROM (SELECT base.*, ROW_NUMBER() OVER ("
-                    + "PARTITION BY " + partitionCols + " ORDER BY \"" + dedupAlias + "\" DESC) AS rn "
-                    + "FROM (" + baseSql + ") base) ranked WHERE rn = 1";
+        if (isFuzzyMatchable(sc, tc)) {
+            appendFuzzyJoin(onClause, where, params, index, sc, srcCol, tgtCol);
         } else {
-            finalSql = baseSql;
+            onClause.append(srcCol).append(" = ").append(tgtCol);
         }
+    }
 
-        List<String> columns = List.copyOf(outerColumns);
-        String displaySql = renderForDisplay(finalSql, params);
+    private static void appendFuzzyJoin(StringBuilder onClause, StringBuilder where, List<Object> params,
+                                      int index, MatchCriterion sc, String srcCol, String tgtCol) {
+        if (sc.fuzzyThresholdPercent() == null) {
+            throw new IllegalArgumentException(
+                    "sourceCriteria[" + index + "].fuzzyThresholdPercent is required for a name column");
+        }
+        double threshold = sc.fuzzyThresholdPercent();
+        if (threshold < 0 || threshold > 100) {
+            throw new IllegalArgumentException("fuzzyThresholdPercent must be between 0 and 100");
+        }
+        onClause.append(blockingKeyExpr(srcCol)).append(" = ").append(blockingKeyExpr(tgtCol));
+        if (where.length() > 0) {
+            where.append(" AND ");
+        }
+        where.append(FuzzyMatchSql.similarityExpr(srcCol, tgtCol)).append(" >= ?");
+        params.add(threshold / 100.0);
+    }
 
+    private String appendDedupSelect(StringBuilder select, Set<String> outerColumns, RecordMatchRequest req) {
+        if (req.dedup() == null) {
+            return null;
+        }
+        String sourceTable = req.sourceCriteria().get(0).table();
+        String side = req.dedup().table().equals(sourceTable) ? "src" : "tgt";
+        String dedupAlias = "dedup_last_updated";
+        appendSelect(select, outerColumns, side, req.dedup().column(), dedupAlias);
+        return dedupAlias;
+    }
+
+    private void appendMatchScoreSelect(StringBuilder select, Set<String> outerColumns, RecordMatchRequest req) {
+        if (!req.highlightDuplicates()) {
+            return;
+        }
+        String scoreExpr = buildMatchScoreExpr(req);
+        select.append(", ").append(scoreExpr).append(" AS \"match_score_pct\"");
+        outerColumns.add("match_score_pct");
+    }
+
+    private void appendAgeFilter(StringBuilder where, List<Object> params, RecordMatchRequest req) {
+        if (req.ageFilter() == null) {
+            return;
+        }
+        String ageColumn = resolveAgeColumnName();
+        double divisor = ageDivisor(req.ageFilter().unit());
+        double minYears = req.ageFilter().minAge() / divisor;
+        double maxYears = req.ageFilter().maxAge() / divisor;
+
+        where.append(" AND src.").append(ageColumn).append(" BETWEEN ? AND ?");
+        where.append(" AND tgt.").append(ageColumn).append(" BETWEEN ? AND ?");
+        params.add(minYears);
+        params.add(maxYears);
+        params.add(minYears);
+        params.add(maxYears);
+    }
+
+    private String resolveAgeColumnName() {
+        String resolved = fields.resolveColumn("age_years");
+        int lastDot = resolved.lastIndexOf('.');
+        return lastDot >= 0 ? resolved.substring(lastDot + 1) : resolved;
+    }
+
+    private static double ageDivisor(String unit) {
+        return switch (unit) {
+            case "DAYS" -> 365.0;
+            case "MONTHS" -> 12.0;
+            default -> 1.0;
+        };
+    }
+
+    private static String wrapWithDedup(String baseSql, RecordMatchRequest req, String dedupAlias) {
+        if (req.dedup() == null) {
+            return baseSql;
+        }
+        String partitionCols = req.sourceCriteria().stream()
+                .map(c -> "\"source_" + c.column() + "\"")
+                .reduce((a, b) -> a + ", " + b).orElseThrow();
+        return "SELECT * FROM (SELECT base.*, ROW_NUMBER() OVER ("
+                + "PARTITION BY " + partitionCols + " ORDER BY \"" + dedupAlias + "\" DESC) AS rn "
+                + "FROM (" + baseSql + ") base) ranked WHERE rn = 1";
+    }
+
+    private StreamingResponseBody streamResults(MatchQuery query) {
+        String displaySql = renderForDisplay(query.sql(), query.params());
         return outputStream -> {
-            writeLine(outputStream, Map.of("type", "meta", "columns", columns, "sql", displaySql));
+            writeLine(outputStream, Map.of("type", "meta", "columns", query.columns(), "sql", displaySql));
             try {
                 jdbc.setQueryTimeout(guardrails.queryTimeoutSeconds());
                 ColumnMapRowMapper rowMapper = new ColumnMapRowMapper();
                 long[] totalRows = {0};
-                jdbc.query(finalSql, params.toArray(), (RowCallbackHandler) rs -> {
+                jdbc.query(query.sql(), query.params().toArray(), (RowCallbackHandler) rs -> {
                     Map<String, Object> row = rowMapper.mapRow(rs, 0);
                     try {
                         writeLine(outputStream, Map.of("type", "row", "data", row));
@@ -250,6 +299,9 @@ public class RecordMatchService {
                 writeLine(outputStream, Map.of("type", "error", "message", message));
             }
         };
+    }
+
+    private record MatchQuery(String sql, List<Object> params, List<String> columns) {
     }
 
     private void writeLine(java.io.OutputStream out, Map<String, Object> payload) throws IOException {

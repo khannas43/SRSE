@@ -33,6 +33,8 @@ import java.util.Map;
 @Service
 public class ExecutionService {
 
+    private static final String BREAKDOWN_DISTRICT = "district";
+
     private final RuleCompiler compiler;
     private final JdbcTemplate jdbc;
     private final GuardrailProperties guardrails;
@@ -70,7 +72,7 @@ public class ExecutionService {
     public List<BreakdownRow> breakdown(Ast.PredicateSpec spec) {
         CompiledQuery q = compiler.compile(spec);
         String table = resolveTable();
-        String districtExpr = fields.resolveColumn("district");
+        String districtExpr = fields.resolveColumn(BREAKDOWN_DISTRICT);
         String genderExpr = fields.resolveColumn("gender");
         String ageBandExpr = table + "." + ageBandColumn;
         String sql = ("SELECT " + districtExpr + " AS district, " + genderExpr + " AS gender, "
@@ -81,7 +83,7 @@ public class ExecutionService {
                 .formatted(q.predicateSql());
         applyTimeout();
         return jdbc.query(sql, (rs, rowNum) -> new BreakdownRow(
-                rs.getString("district"),
+                rs.getString(BREAKDOWN_DISTRICT),
                 rs.getString("gender"),
                 rs.getString("age_band"),
                 rs.getLong("n")
@@ -114,11 +116,11 @@ public class ExecutionService {
      * admin-editable live, with no restart, via FieldColumnMappingController.
      */
     private String resolveTable() {
-        String resolved = fields.resolveColumn("district");
+        String resolved = fields.resolveColumn(BREAKDOWN_DISTRICT);
         int lastDot = resolved.lastIndexOf('.');
         if (lastDot < 0) {
             throw new IllegalStateException(
-                    "Expected a table-qualified column for 'district', got: " + resolved);
+                    "Expected a table-qualified column for '" + BREAKDOWN_DISTRICT + "', got: " + resolved);
         }
         return resolved.substring(0, lastDot);
     }

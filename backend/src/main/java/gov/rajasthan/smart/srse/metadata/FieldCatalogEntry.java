@@ -54,25 +54,41 @@ public class FieldCatalogEntry {
     protected FieldCatalogEntry() {
     }
 
-    /** Back-compat overload for existing call sites — defaults fuzzyMatchable to false. */
-    public FieldCatalogEntry(Long id, String fieldKey, String displayLabel,
-                             FieldTier tier, FieldDataType dataType, String groupName,
-                             String allowedValues, boolean active) {
-        this(id, fieldKey, displayLabel, tier, dataType, groupName, allowedValues, active, false);
+    public FieldCatalogEntry(FieldCatalogEntryData data) {
+        this.id = data.id();
+        this.fieldKey = data.fieldKey();
+        this.displayLabel = data.displayLabel();
+        this.tier = data.tier();
+        this.dataType = data.dataType();
+        this.groupName = data.groupName();
+        this.allowedValues = data.allowedValues();
+        this.active = data.active();
+        this.fuzzyMatchable = data.fuzzyMatchable();
     }
 
-    public FieldCatalogEntry(Long id, String fieldKey, String displayLabel,
-                             FieldTier tier, FieldDataType dataType, String groupName,
-                             String allowedValues, boolean active, boolean fuzzyMatchable) {
-        this.id = id;
-        this.fieldKey = fieldKey;
-        this.displayLabel = displayLabel;
-        this.tier = tier;
-        this.dataType = dataType;
-        this.groupName = groupName;
-        this.allowedValues = allowedValues;
-        this.active = active;
-        this.fuzzyMatchable = fuzzyMatchable;
+    public record FieldCatalogEntryData(
+            Long id,
+            String fieldKey,
+            String displayLabel,
+            FieldTier tier,
+            FieldDataType dataType,
+            String groupName,
+            String allowedValues,
+            boolean active,
+            boolean fuzzyMatchable
+    ) {
+        public static FieldCatalogEntryData of(
+                Long id,
+                String fieldKey,
+                String displayLabel,
+                FieldTier tier,
+                FieldDataType dataType,
+                String groupName,
+                String allowedValues,
+                boolean active) {
+            return new FieldCatalogEntryData(
+                    id, fieldKey, displayLabel, tier, dataType, groupName, allowedValues, active, false);
+        }
     }
 
     public Long getId() {

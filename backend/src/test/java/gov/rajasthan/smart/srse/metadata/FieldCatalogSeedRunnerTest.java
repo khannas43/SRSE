@@ -96,8 +96,8 @@ class FieldCatalogSeedRunnerTest {
 
     @Test
     void existingCatalogEntryIsLeftUntouchedOnRerun() throws Exception {
-        FieldCatalogEntry existingCatalog = new FieldCatalogEntry(
-                99L, "age_years", "stale label", FieldTier.TIER_1, FieldDataType.NUMBER, "Demographic", null, false);
+        FieldCatalogEntry existingCatalog = new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
+                99L, "age_years", "stale label", FieldTier.TIER_1, FieldDataType.NUMBER, "Demographic", null, false, false));
         when(catalogRepository.findByFieldKey("age_years")).thenReturn(Optional.of(existingCatalog));
 
         runner.run(null);

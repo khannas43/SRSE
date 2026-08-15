@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Optional pre-push hook: run SonarQube scan before allowing git push.
+# Enable with: git config core.hooksPath .githooks
+#
+# Disable temporarily: git push --no-verify
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+echo "[pre-push] Running SonarQube scan..."
+"$ROOT/scripts/sonar-scan.sh"

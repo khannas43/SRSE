@@ -55,7 +55,7 @@ function parentAndIndex(path: NodePath): { parentPath: NodePath; index: number }
   if (path.length === 0) {
     throw new Error("Root node has no parent");
   }
-  return { parentPath: path.slice(0, -1), index: path[path.length - 1] };
+  return { parentPath: path.slice(0, -1), index: path.at(-1)! };
 }
 
 interface RuleBuilderState {

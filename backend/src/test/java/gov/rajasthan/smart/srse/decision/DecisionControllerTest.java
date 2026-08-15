@@ -99,10 +99,9 @@ class DecisionControllerTest {
 
     @Test
     void saveScenarioTagsMultipleSchemesAndPersistsResults() throws Exception {
-        Scenario created = new Scenario(
-                42L, "age-gte-18", Set.of(1L, 2L),
-                "{\"root\":{}}", null, null,
-                Instant.parse("2026-01-15T10:00:00Z"), null);
+        Scenario created = new Scenario(new Scenario.ScenarioData(
+                42L, "age-gte-18", Set.of(1L, 2L), "{\"root\":{}}", null, null,
+                Instant.parse("2026-01-15T10:00:00Z"), null));
         List<BreakdownRow> breakdown = List.of(
                 new BreakdownRow("JAIPUR", "F", "18-59", 100L));
 

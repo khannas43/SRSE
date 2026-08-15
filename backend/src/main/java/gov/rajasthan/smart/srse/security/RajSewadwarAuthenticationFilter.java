@@ -13,7 +13,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 
 /**
- * TODO(Arvind, CLAUDE.md open items): real RajSewadwar SSO/JWT payload parsing.
+ * Pending (Arvind, CLAUDE.md open items): real RajSewadwar SSO/JWT payload parsing.
  * The payload shape is not yet known, so this deliberately authenticates no
  * one — fail-closed rather than inventing a format. Every request under
  * srse.auth-mode=rajsewadwar is rejected by the downstream hasAuthority(...)

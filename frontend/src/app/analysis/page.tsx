@@ -16,14 +16,15 @@ import { AnalysisResultsGrid } from "@/components/AnalysisResultsGrid";
 const fieldLabelStyle = { display: "block", marginBottom: "0.3rem", fontSize: "0.82rem" } as const;
 
 type CriterionRow = {
+  id: string;
   table: string;
   column: string;
   columns: ColumnInfo[];
   fuzzyThresholdPercent: number;
 };
 
-function emptyRow(): CriterionRow {
-  return { table: "", column: "", columns: [], fuzzyThresholdPercent: 80 };
+function createEmptyRow(): CriterionRow {
+  return { id: crypto.randomUUID(), table: "", column: "", columns: [], fuzzyThresholdPercent: 80 };
 }
 
 function metadataKey(table: string, column: string): string {
@@ -46,6 +47,155 @@ function detectLastUpdatedColumn(columns: ColumnInfo[]): string | null {
   return null;
 }
 
+const MAX_DISPLAYED_ROWS = 20000;
+const MAX_ROWS_TO_PARSE = 200000;
+
+function updateRowById(rows: CriterionRow[], id: string, patch: Partial<CriterionRow>): CriterionRow[] {
+  return rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
+}
+
+function removeRowById(rows: CriterionRow[], id: string): CriterionRow[] {
+  return rows.length <= 1 ? rows : rows.filter((r) => r.id !== id);
+}
+
+type CriterionBoxProps = Readonly<{
+  title: string;
+  boxId: string;
+  rows: CriterionRow[];
+  tables: string[];
+  showFuzzy: boolean;
+  pairedRows?: CriterionRow[];
+  isFuzzyMatchable: (table: string, column: string) => boolean;
+  businessNameFor: (table: string, column: string) => string | null;
+  onTableChange: (rowId: string, table: string) => void;
+  onColumnChange: (rowId: string, column: string) => void;
+  onFuzzyChange: (rowId: string, value: number) => void;
+  onRemove: (rowId: string) => void;
+  onAdd: () => void;
+}>;
+
+function rowShowsFuzzy(
+  row: CriterionRow,
+  index: number,
+  pairedRows: CriterionRow[] | undefined,
+  isFuzzyMatchable: (table: string, column: string) => boolean,
+): boolean {
+  if (isFuzzyMatchable(row.table, row.column)) return true;
+  const paired = pairedRows?.[index];
+  return paired ? isFuzzyMatchable(paired.table, paired.column) : false;
+}
+
+function CriterionBox({
+  title,
+  boxId,
+  rows,
+  tables,
+  showFuzzy,
+  pairedRows,
+  isFuzzyMatchable,
+  businessNameFor,
+  onTableChange,
+  onColumnChange,
+  onFuzzyChange,
+  onRemove,
+  onAdd,
+}: CriterionBoxProps) {
+  return (
+    <section className="srse-card" style={{ flex: "1 1 380px" }}>
+      <h2 className="srse-card-title">{title}</h2>
+      <p className="srse-text-muted" style={{ fontSize: "0.82rem", marginTop: 0 }}>
+        Based on schema of Lakehouse
+      </p>
+
+      {rows.map((row, index) => (
+        <div
+          key={row.id}
+          style={{
+            display: "flex",
+            gap: "0.6rem",
+            alignItems: "flex-end",
+            flexWrap: "wrap",
+            marginBottom: "0.6rem",
+            paddingBottom: "0.6rem",
+            borderBottom: index === rows.length - 1 ? "none" : "1px solid var(--srse-border)",
+          }}
+        >
+          <div style={{ flex: "1 1 150px" }}>
+            <label htmlFor={`${boxId}-table-${row.id}`} className="srse-text-muted" style={fieldLabelStyle}>
+              Table
+            </label>
+            <select
+              id={`${boxId}-table-${row.id}`}
+              className="srse-select"
+              style={{ width: "100%" }}
+              value={row.table}
+              onChange={(e) => onTableChange(row.id, e.target.value)}
+            >
+              <option value="">— select —</option>
+              {tables.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div style={{ flex: "1 1 150px" }}>
+            <label htmlFor={`${boxId}-column-${row.id}`} className="srse-text-muted" style={fieldLabelStyle}>
+              Column
+            </label>
+            <select
+              id={`${boxId}-column-${row.id}`}
+              className="srse-select"
+              style={{ width: "100%" }}
+              value={row.column}
+              onChange={(e) => onColumnChange(row.id, e.target.value)}
+              disabled={!row.table}
+            >
+              <option value="">— select —</option>
+              {row.columns.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {businessNameFor(row.table, c.name) ?? c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          {showFuzzy && rowShowsFuzzy(row, index, pairedRows, isFuzzyMatchable) && (
+            <div style={{ flex: "0 1 100px" }}>
+              <label htmlFor={`${boxId}-fuzzy-${row.id}`} className="srse-text-muted" style={fieldLabelStyle}>
+                Fuzzy %
+              </label>
+              <input
+                id={`${boxId}-fuzzy-${row.id}`}
+                type="number"
+                className="srse-input"
+                style={{ width: "100%" }}
+                min={0}
+                max={100}
+                value={row.fuzzyThresholdPercent}
+                onChange={(e) => onFuzzyChange(row.id, Number(e.target.value))}
+              />
+            </div>
+          )}
+          {rows.length > 1 && (
+            <button
+              type="button"
+              className="srse-btn srse-btn-ghost srse-btn-sm"
+              onClick={() => onRemove(row.id)}
+              title="Remove this row"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      ))}
+
+      <button type="button" className="srse-btn srse-btn-ghost srse-btn-sm" onClick={onAdd}>
+        + Add more
+      </button>
+    </section>
+  );
+}
+
 export default function AnalysisPage() {
   const [tables, setTables] = useState<string[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -53,8 +203,8 @@ export default function AnalysisPage() {
 
   const [highlightDuplicates, setHighlightDuplicates] = useState(false);
 
-  const [sourceRows, setSourceRows] = useState<CriterionRow[]>([emptyRow()]);
-  const [targetRows, setTargetRows] = useState<CriterionRow[]>([emptyRow()]);
+  const [sourceRows, setSourceRows] = useState<CriterionRow[]>([createEmptyRow()]);
+  const [targetRows, setTargetRows] = useState<CriterionRow[]>([createEmptyRow()]);
 
   const [dedupEnabled, setDedupEnabled] = useState(false);
   const dedupColumn = detectLastUpdatedColumn(targetRows[0]?.columns ?? []);
@@ -76,12 +226,6 @@ export default function AnalysisPage() {
   // could safely render). These are a display-side safety limit, not a
   // reintroduction of that backend guardrail: the true total is still
   // counted and shown even when not every row is rendered.
-  const MAX_DISPLAYED_ROWS = 20000;
-  // Beyond this many rows, stop reading the stream entirely rather than keep
-  // parsing JSON that will never be shown — for a pathologically large match
-  // (a poorly-selective blocking key), even parsing (not rendering) millions
-  // of NDJSON lines can hang the tab on its own.
-  const MAX_ROWS_TO_PARSE = 200000;
   const [matchTotalRows, setMatchTotalRows] = useState<number | null>(null);
   // True when we stopped reading before the stream finished naturally, so
   // matchTotalRows (if set at all) is a lower bound, not an exact count.
@@ -91,9 +235,6 @@ export default function AnalysisPage() {
   // and disables CSV/column-visibility until the result is actually complete.
   const matchStreaming = matchStatus === "loading";
 
-  // Rows arrive one at a time over the stream; appending each straight into
-  // React state would mean an O(n) array copy per row (O(n^2) overall for a
-  // large match). Buffer them here and flush in batches on a timer instead.
   const pendingRowsRef = useRef<Record<string, unknown>[]>([]);
   const flushIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const rowsSeenRef = useRef(0);
@@ -119,31 +260,39 @@ export default function AnalysisPage() {
     return columnMetadata.get(metadataKey(table, column))?.businessName ?? null;
   }
 
-  async function setRowTable(
+  async function handleTableChange(
     setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>,
-    index: number,
+    rowId: string,
     table: string,
   ) {
-    setRows((rows) => rows.map((r, i) => (i === index ? { ...r, table, column: "", columns: [] } : r)));
+    setRows((rows) => updateRowById(rows, rowId, { table, column: "", columns: [] }));
     if (!table) return;
     try {
       const cols = await listAnalysisColumns(table);
-      setRows((rows) => rows.map((r, i) => (i === index ? { ...r, columns: cols } : r)));
+      setRows((rows) => updateRowById(rows, rowId, { columns: cols }));
     } catch (err: unknown) {
       setLoadError(err instanceof Error ? err.message : String(err));
     }
   }
 
-  function setRowColumn(
+  function handleColumnChange(
     setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>,
-    index: number,
+    rowId: string,
     column: string,
   ) {
-    setRows((rows) => rows.map((r, i) => (i === index ? { ...r, column } : r)));
+    setRows((rows) => updateRowById(rows, rowId, { column }));
   }
 
-  function removeRow(setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>, index: number) {
-    setRows((rows) => (rows.length <= 1 ? rows : rows.filter((_, i) => i !== index)));
+  function handleFuzzyChange(
+    setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>,
+    rowId: string,
+    fuzzyThresholdPercent: number,
+  ) {
+    setRows((rows) => updateRowById(rows, rowId, { fuzzyThresholdPercent }));
+  }
+
+  function handleRemoveRow(setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>, rowId: string) {
+    setRows((rows) => removeRowById(rows, rowId));
   }
 
   function buildRequest(withDedup: boolean): RecordMatchRequest | null {
@@ -263,116 +412,6 @@ export default function AnalysisPage() {
     }
   }
 
-  function renderCriterionBox(
-    title: string,
-    rows: CriterionRow[],
-    setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>,
-    showFuzzy: boolean,
-    pairedRows?: CriterionRow[],
-  ) {
-    return (
-      <section className="srse-card" style={{ flex: "1 1 380px" }}>
-        <h2 className="srse-card-title">{title}</h2>
-        <p className="srse-text-muted" style={{ fontSize: "0.82rem", marginTop: 0 }}>
-          Based on schema of Lakehouse
-        </p>
-
-        {rows.map((row, index) => (
-          <div
-            key={index}
-            style={{
-              display: "flex",
-              gap: "0.6rem",
-              alignItems: "flex-end",
-              flexWrap: "wrap",
-              marginBottom: "0.6rem",
-              paddingBottom: "0.6rem",
-              borderBottom: index === rows.length - 1 ? "none" : "1px solid var(--srse-border)",
-            }}
-          >
-            <div style={{ flex: "1 1 150px" }}>
-              <label className="srse-text-muted" style={fieldLabelStyle}>
-                Table
-              </label>
-              <select
-                className="srse-select"
-                style={{ width: "100%" }}
-                value={row.table}
-                onChange={(e) => setRowTable(setRows, index, e.target.value)}
-              >
-                <option value="">— select —</option>
-                {tables.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div style={{ flex: "1 1 150px" }}>
-              <label className="srse-text-muted" style={fieldLabelStyle}>
-                Column
-              </label>
-              <select
-                className="srse-select"
-                style={{ width: "100%" }}
-                value={row.column}
-                onChange={(e) => setRowColumn(setRows, index, e.target.value)}
-                disabled={!row.table}
-              >
-                <option value="">— select —</option>
-                {row.columns.map((c) => (
-                  <option key={c.name} value={c.name}>
-                    {businessNameFor(row.table, c.name) ?? c.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            {showFuzzy &&
-              (isFuzzyMatchable(row.table, row.column) ||
-                (pairedRows?.[index] && isFuzzyMatchable(pairedRows[index].table, pairedRows[index].column))) && (
-              <div style={{ flex: "0 1 100px" }}>
-                <label className="srse-text-muted" style={fieldLabelStyle}>
-                  Fuzzy %
-                </label>
-                <input
-                  type="number"
-                  className="srse-input"
-                  style={{ width: "100%" }}
-                  min={0}
-                  max={100}
-                  value={row.fuzzyThresholdPercent}
-                  onChange={(e) =>
-                    setRows((rs) =>
-                      rs.map((r, i) => (i === index ? { ...r, fuzzyThresholdPercent: Number(e.target.value) } : r)),
-                    )
-                  }
-                />
-              </div>
-            )}
-            {rows.length > 1 && (
-              <button
-                type="button"
-                className="srse-btn srse-btn-ghost srse-btn-sm"
-                onClick={() => removeRow(setRows, index)}
-                title="Remove this row"
-              >
-                ✕
-              </button>
-            )}
-          </div>
-        ))}
-
-        <button
-          type="button"
-          className="srse-btn srse-btn-ghost srse-btn-sm"
-          onClick={() => setRows((rs) => [...rs, emptyRow()])}
-        >
-          + Add more
-        </button>
-      </section>
-    );
-  }
-
   return (
     <main className="srse-page">
       <h1 className="srse-page-title">Analysis</h1>
@@ -383,18 +422,47 @@ export default function AnalysisPage() {
 
       {loadError && <p className="srse-text-danger">{loadError}</p>}
 
-      <label className="srse-checkbox-label" style={{ marginBottom: "1rem", display: "inline-flex" }}>
+      <label className="srse-checkbox-label" htmlFor="highlight-duplicates" style={{ marginBottom: "1rem", display: "inline-flex" }}>
         <input
+          id="highlight-duplicates"
           type="checkbox"
           checked={highlightDuplicates}
           onChange={(e) => setHighlightDuplicates(e.target.checked)}
         />
+        {" "}
         Highlight Duplicate Records
       </label>
 
       <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", width: "100%" }}>
-        {renderCriterionBox("Select Source", sourceRows, setSourceRows, true, targetRows)}
-        {renderCriterionBox("Select Target", targetRows, setTargetRows, false)}
+        <CriterionBox
+          title="Select Source"
+          boxId="source"
+          rows={sourceRows}
+          tables={tables}
+          showFuzzy
+          pairedRows={targetRows}
+          isFuzzyMatchable={isFuzzyMatchable}
+          businessNameFor={businessNameFor}
+          onTableChange={(rowId, table) => handleTableChange(setSourceRows, rowId, table)}
+          onColumnChange={(rowId, column) => handleColumnChange(setSourceRows, rowId, column)}
+          onFuzzyChange={(rowId, value) => handleFuzzyChange(setSourceRows, rowId, value)}
+          onRemove={(rowId) => handleRemoveRow(setSourceRows, rowId)}
+          onAdd={() => setSourceRows((rs) => [...rs, createEmptyRow()])}
+        />
+        <CriterionBox
+          title="Select Target"
+          boxId="target"
+          rows={targetRows}
+          tables={tables}
+          showFuzzy={false}
+          isFuzzyMatchable={isFuzzyMatchable}
+          businessNameFor={businessNameFor}
+          onTableChange={(rowId, table) => handleTableChange(setTargetRows, rowId, table)}
+          onColumnChange={(rowId, column) => handleColumnChange(setTargetRows, rowId, column)}
+          onFuzzyChange={(rowId, value) => handleFuzzyChange(setTargetRows, rowId, value)}
+          onRemove={(rowId) => handleRemoveRow(setTargetRows, rowId)}
+          onAdd={() => setTargetRows((rs) => [...rs, createEmptyRow()])}
+        />
       </div>
 
       <p className="srse-text-muted" style={{ fontSize: "0.78rem", marginTop: "0.5rem" }}>
@@ -407,21 +475,24 @@ export default function AnalysisPage() {
         <h2 className="srse-card-title">Optional filters</h2>
         <div style={{ display: "flex", gap: "1.5rem", flexWrap: "wrap", marginTop: "0.75rem" }}>
           <div style={{ flex: "2 1 420px" }}>
-            <label className="srse-checkbox-label" style={{ display: "inline-flex" }}>
+            <label className="srse-checkbox-label" htmlFor="age-filter-enabled" style={{ display: "inline-flex" }}>
               <input
+                id="age-filter-enabled"
                 type="checkbox"
                 checked={ageFilterEnabled}
                 onChange={(e) => setAgeFilterEnabled(e.target.checked)}
               />
+              {" "}
               Age range filter
             </label>
             {ageFilterEnabled && (
               <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginTop: "0.6rem", alignItems: "flex-end" }}>
                 <div style={{ flex: "0 1 140px" }}>
-                  <label className="srse-text-muted" style={fieldLabelStyle}>
+                  <label htmlFor="min-age" className="srse-text-muted" style={fieldLabelStyle}>
                     Minimum Age
                   </label>
                   <input
+                    id="min-age"
                     type="number"
                     className="srse-input"
                     style={{ width: "100%" }}
@@ -431,10 +502,11 @@ export default function AnalysisPage() {
                   />
                 </div>
                 <div style={{ flex: "0 1 140px" }}>
-                  <label className="srse-text-muted" style={fieldLabelStyle}>
+                  <label htmlFor="max-age" className="srse-text-muted" style={fieldLabelStyle}>
                     Maximum Age
                   </label>
                   <input
+                    id="max-age"
                     type="number"
                     className="srse-input"
                     style={{ width: "100%" }}
@@ -444,10 +516,11 @@ export default function AnalysisPage() {
                   />
                 </div>
                 <div style={{ flex: "0 1 140px" }}>
-                  <label className="srse-text-muted" style={fieldLabelStyle}>
+                  <label htmlFor="age-unit" className="srse-text-muted" style={fieldLabelStyle}>
                     Unit
                   </label>
                   <select
+                    id="age-unit"
                     className="srse-select"
                     style={{ width: "100%" }}
                     value={ageUnit}

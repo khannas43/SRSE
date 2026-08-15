@@ -12,8 +12,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 let cachedToken: Promise<string> | null = null;
 
 async function getAuthToken(): Promise<string> {
-  if (!cachedToken) {
-    cachedToken = fetch(`${API_BASE}/api/auth/mock-login`, { method: "POST" })
+  cachedToken ??= fetch(`${API_BASE}/api/auth/mock-login`, { method: "POST" })
       .then(async (res) => {
         if (!res.ok) {
           throw new Error(`Mock login failed ${res.status}: ${await res.text()}`);
@@ -25,7 +24,6 @@ async function getAuthToken(): Promise<string> {
         cachedToken = null; // let the next call retry instead of caching the failure
         throw err;
       });
-  }
   return cachedToken;
 }
 

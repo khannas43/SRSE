@@ -5,6 +5,7 @@ import java.io.PrintWriter;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 
 /**
@@ -17,62 +18,66 @@ import java.util.logging.Logger;
  */
 public class SwappableDataSource implements DataSource {
 
-    private volatile DataSource delegate;
+    private final AtomicReference<DataSource> delegate;
 
     public SwappableDataSource(DataSource initial) {
-        this.delegate = initial;
+        this.delegate = new AtomicReference<>(initial);
     }
 
     public DataSource getDelegate() {
-        return delegate;
+        return delegate.get();
     }
 
     public void swap(DataSource next) {
-        this.delegate = next;
+        this.delegate.set(next);
+    }
+
+    private DataSource current() {
+        return delegate.get();
     }
 
     @Override
     public Connection getConnection() throws SQLException {
-        return delegate.getConnection();
+        return current().getConnection();
     }
 
     @Override
     public Connection getConnection(String username, String password) throws SQLException {
-        return delegate.getConnection(username, password);
+        return current().getConnection(username, password);
     }
 
     @Override
     public PrintWriter getLogWriter() throws SQLException {
-        return delegate.getLogWriter();
+        return current().getLogWriter();
     }
 
     @Override
     public void setLogWriter(PrintWriter out) throws SQLException {
-        delegate.setLogWriter(out);
+        current().setLogWriter(out);
     }
 
     @Override
     public void setLoginTimeout(int seconds) throws SQLException {
-        delegate.setLoginTimeout(seconds);
+        current().setLoginTimeout(seconds);
     }
 
     @Override
     public int getLoginTimeout() throws SQLException {
-        return delegate.getLoginTimeout();
+        return current().getLoginTimeout();
     }
 
     @Override
     public Logger getParentLogger() throws SQLFeatureNotSupportedException {
-        return delegate.getParentLogger();
+        return current().getParentLogger();
     }
 
     @Override
     public <T> T unwrap(Class<T> iface) throws SQLException {
-        return delegate.unwrap(iface);
+        return current().unwrap(iface);
     }
 
     @Override
     public boolean isWrapperFor(Class<?> iface) throws SQLException {
-        return delegate.isWrapperFor(iface);
+        return current().isWrapperFor(iface);
     }
 }

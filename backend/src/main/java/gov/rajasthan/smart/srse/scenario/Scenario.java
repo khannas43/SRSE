@@ -57,17 +57,27 @@ public class Scenario {
     protected Scenario() {
     }
 
-    public Scenario(Long id, String name, Set<Long> schemeIds, String rulesetJson,
-                    Long totalCount, String breakdownJson,
-                    Instant createdAt, String createdBy) {
-        this.id = id;
-        this.name = name;
-        this.schemeIds = new LinkedHashSet<>(schemeIds);
-        this.rulesetJson = rulesetJson;
-        this.totalCount = totalCount;
-        this.breakdownJson = breakdownJson;
-        this.createdAt = createdAt;
-        this.createdBy = createdBy;
+    public Scenario(ScenarioData data) {
+        this.id = data.id();
+        this.name = data.name();
+        this.schemeIds = new LinkedHashSet<>(data.schemeIds());
+        this.rulesetJson = data.rulesetJson();
+        this.totalCount = data.totalCount();
+        this.breakdownJson = data.breakdownJson();
+        this.createdAt = data.createdAt();
+        this.createdBy = data.createdBy();
+    }
+
+    public record ScenarioData(
+            Long id,
+            String name,
+            Set<Long> schemeIds,
+            String rulesetJson,
+            Long totalCount,
+            String breakdownJson,
+            Instant createdAt,
+            String createdBy
+    ) {
     }
 
     /**

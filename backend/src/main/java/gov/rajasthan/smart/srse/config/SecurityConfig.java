@@ -28,8 +28,7 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
  * behind STATE_OFFICER —
  * enforced by whichever of {@link MockJwtAuthenticationFilter}
  * / {@link RajSewadwarAuthenticationFilter} is active for {@code srse.auth-mode}.
- * Real RajSewadwar SSO payload parsing is still a stub — see that filter's
- * TODO.
+ * Real RajSewadwar SSO payload parsing is still a stub — see that filter.
  */
 @Configuration
 @EnableWebSecurity

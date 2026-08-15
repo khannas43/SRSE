@@ -62,14 +62,14 @@ export function MultiSelectDropdown({
   allLabel = "All",
   width = 220,
   disabled = false,
-}: {
+}: Readonly<{
   options: DropdownOption[];
   selected: string[];
   onChange: (next: string[]) => void;
   allLabel?: string;
   width?: number | string;
   disabled?: boolean;
-}) {
+}>) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const normalized = options.map(normalize);
@@ -87,7 +87,14 @@ export function MultiSelectDropdown({
 
   const isAll = selected.length === 0;
   const selectedLabel = (value: string) => normalized.find((o) => o.value === value)?.label ?? value;
-  const summary = isAll ? allLabel : selected.length === 1 ? selectedLabel(selected[0]) : `${selected.length} selected`;
+  let summary: string;
+  if (isAll) {
+    summary = allLabel;
+  } else if (selected.length === 1) {
+    summary = selectedLabel(selected[0]);
+  } else {
+    summary = `${selected.length} selected`;
+  }
 
   return (
     <div ref={containerRef} style={{ position: "relative", display: "inline-block", width }}>
@@ -119,6 +126,7 @@ export function MultiSelectDropdown({
             }}
           >
             <input type="checkbox" checked={isAll} onChange={() => onChange([])} />
+            {" "}
             {allLabel}
           </label>
           {normalized.map((opt) => (
@@ -134,6 +142,7 @@ export function MultiSelectDropdown({
                   )
                 }
               />
+              {" "}
               {opt.label}
             </label>
           ))}

@@ -72,9 +72,9 @@ public class FieldCatalogSeedRunner implements ApplicationRunner {
         String allowedValues = Optional.ofNullable(entry.allowedValues())
                 .map(values -> String.join(",", values))
                 .orElse(null);
-        catalogRepository.save(new FieldCatalogEntry(
+        catalogRepository.save(new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
                 null, entry.fieldKey(), entry.displayLabel(), entry.tier(), entry.dataType(),
-                entry.groupName(), allowedValues, true, Boolean.TRUE.equals(entry.fuzzyMatchable())));
+                entry.groupName(), allowedValues, true, Boolean.TRUE.equals(entry.fuzzyMatchable()))));
     }
 
     // fuzzyMatchable is boxed (not primitive) so YAML entries that omit it bind to null,

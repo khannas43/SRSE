@@ -57,8 +57,8 @@ const columns = [
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 
 function csvEscape(value: unknown): string {
-  const s = String(value ?? "");
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  const s = String(value);
+  return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
 }
 
 function downloadCsv(rows: BreakdownRow[], visibleIds: Set<string>) {
@@ -71,10 +71,10 @@ function downloadCsv(rows: BreakdownRow[], visibleIds: Set<string>) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `breakdown-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.csv`;
+  a.download = `breakdown-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, "-")}.csv`;
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
+  a.remove();
   URL.revokeObjectURL(url);
 }
 
@@ -99,15 +99,21 @@ const filterInputStyle: CSSProperties = {
   marginTop: "0.35rem",
 };
 
+function sortIndicator(sorted: false | "asc" | "desc"): string {
+  if (sorted === "asc") return "▲";
+  if (sorted === "desc") return "▼";
+  return "⇅";
+}
+
 export function ResultsPanel({
   totalCount,
   breakdown,
   caption,
-}: {
+}: Readonly<{
   totalCount: number;
   breakdown: BreakdownRow[];
   caption?: string;
-}) {
+}>) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   // Empty selection means "all columns visible" — same convention as the
@@ -190,25 +196,34 @@ export function ResultsPanel({
                     <tr key={hg.id}>
                       {hg.headers.map((header) => (
                         <th key={header.id} style={{ verticalAlign: "top" }}>
-                          <span
+                          <button
+                            type="button"
                             onClick={header.column.getToggleSortingHandler()}
-                            style={{ cursor: "pointer", userSelect: "none", display: "inline-flex", gap: "0.3rem" }}
+                            style={{
+                              cursor: "pointer",
+                              userSelect: "none",
+                              display: "inline-flex",
+                              gap: "0.3rem",
+                              background: "none",
+                              border: "none",
+                              padding: 0,
+                              font: "inherit",
+                              color: "inherit",
+                            }}
                           >
                             {flexRender(header.column.columnDef.header, header.getContext())}
                             <span style={{ color: "var(--srse-text-faint)" }}>
-                              {header.column.getIsSorted() === "asc"
-                                ? "▲"
-                                : header.column.getIsSorted() === "desc"
-                                  ? "▼"
-                                  : "⇅"}
+                              {sortIndicator(header.column.getIsSorted())}
                             </span>
-                          </span>
+                          </button>
                           <input
+                            id={`breakdown-filter-${header.id}`}
                             value={(header.column.getFilterValue() as string) ?? ""}
                             onChange={(e) => header.column.setFilterValue(e.target.value)}
                             placeholder={header.column.id === "count" ? "min ≥" : "filter…"}
                             style={filterInputStyle}
                             onClick={(e) => e.stopPropagation()}
+                            aria-label={`Filter ${String(header.column.columnDef.header)}`}
                           />
                         </th>
                       ))}
@@ -249,9 +264,10 @@ export function ResultsPanel({
                 {filteredSortedRows.length !== breakdown.length ? ` (of ${breakdown.length})` : ""}
               </span>
               <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-                <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.85rem" }}>
-                  Rows per page
+                <label htmlFor="breakdown-rows-per-page" style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.85rem" }}>
+                  <span>Rows per page</span>
                   <select
+                    id="breakdown-rows-per-page"
                     value={pageSize}
                     onChange={(e) => table.setPageSize(Number(e.target.value))}
                     className="srse-select"

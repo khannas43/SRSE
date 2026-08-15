@@ -46,7 +46,7 @@ class ScenarioServiceTest {
             if (s.getId() != null) {
                 return s;
             }
-            return new Scenario(
+            return new Scenario(new Scenario.ScenarioData(
                     idSeq.getAndIncrement(),
                     s.getName(),
                     s.getSchemeIds(),
@@ -54,7 +54,7 @@ class ScenarioServiceTest {
                     s.getTotalCount(),
                     s.getBreakdownJson(),
                     s.getCreatedAt(),
-                    s.getCreatedBy());
+                    s.getCreatedBy()));
         });
     }
 
@@ -183,16 +183,18 @@ class ScenarioServiceTest {
     }
 
     private Scenario unevaluated(Long id, String name) {
-        return new Scenario(id, name, Set.of(1L), "{\"root\":null}",
-                null, null, Instant.parse("2026-01-01T00:00:00Z"), null);
+        return new Scenario(new Scenario.ScenarioData(
+                id, name, Set.of(1L), "{\"root\":null}", null, null,
+                Instant.parse("2026-01-01T00:00:00Z"), null));
     }
 
     private Scenario evaluated(Long id, String name, Long totalCount,
                                List<BreakdownRow> breakdown) {
         try {
             String json = objectMapper.writeValueAsString(breakdown);
-            return new Scenario(id, name, Set.of(1L), "{\"root\":null}",
-                    totalCount, json, Instant.parse("2026-01-01T00:00:00Z"), null);
+            return new Scenario(new Scenario.ScenarioData(
+                    id, name, Set.of(1L), "{\"root\":null}", totalCount, json,
+                    Instant.parse("2026-01-01T00:00:00Z"), null));
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }

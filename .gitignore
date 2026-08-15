@@ -30,3 +30,6 @@ __pycache__/
 .vscode/
 *.iml
 .DS_Store
+
+# SonarScanner working directory
+.scannerwork/

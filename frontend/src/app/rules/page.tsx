@@ -45,7 +45,7 @@ const RADIO_FIELD_KEYS = new Set(["tsp_classification"]);
 
 const INCOME_BY_FY_GROUP = "Income by Financial Year";
 
-type FyRow = { fy: string; min: number; max: number };
+type FyRow = { id: string; fy: string; min: number; max: number };
 
 /**
  * Multiple independent FY picker + range rows, shared across the whole
@@ -58,32 +58,31 @@ type FyRow = { fy: string; min: number; max: number };
 function FyIncomeComposite({
   fields,
   onAdd,
-}: {
+}: Readonly<{
   fields: FieldCatalogEntry[];
   onAdd: (fyFieldKey: string, min: number, max: number) => void;
-}) {
-  // Latest FY first regardless of catalogue array order.
+}>) {
   const sorted = useMemo(() => [...fields].sort((a, b) => b.fieldKey.localeCompare(a.fieldKey)), [fields]);
 
   function emptyRow(): FyRow {
-    return { fy: sorted[0]?.fieldKey ?? "", min: 0, max: 100 };
+    return { id: crypto.randomUUID(), fy: sorted[0]?.fieldKey ?? "", min: 0, max: 100 };
   }
 
   const [rows, setRows] = useState<FyRow[]>([emptyRow()]);
 
-  function updateRow(index: number, patch: Partial<FyRow>) {
-    setRows((rs) => rs.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+  function updateRow(id: string, patch: Partial<FyRow>) {
+    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   }
 
-  function removeRow(index: number) {
-    setRows((rs) => (rs.length <= 1 ? rs : rs.filter((_, i) => i !== index)));
+  function removeRow(id: string) {
+    setRows((rs) => (rs.length <= 1 ? rs : rs.filter((r) => r.id !== id)));
   }
 
   return (
     <div style={{ width: "100%" }}>
-      {rows.map((row, index) => (
+      {rows.map((row) => (
         <div
-          key={index}
+          key={row.id}
           style={{
             display: "flex",
             alignItems: "center",
@@ -95,7 +94,7 @@ function FyIncomeComposite({
         >
           <select
             value={row.fy}
-            onChange={(e) => updateRow(index, { fy: e.target.value })}
+            onChange={(e) => updateRow(row.id, { fy: e.target.value })}
             className="srse-select"
             style={{ flex: "0 1 160px" }}
           >
@@ -110,7 +109,7 @@ function FyIncomeComposite({
             className="srse-input"
             style={{ flex: "1 1 120px", minWidth: 90, maxWidth: 220 }}
             value={row.min}
-            onChange={(e) => updateRow(index, { min: Number(e.target.value) })}
+            onChange={(e) => updateRow(row.id, { min: Number(e.target.value) })}
           />
           <span className="srse-text-muted">to</span>
           <input
@@ -118,7 +117,7 @@ function FyIncomeComposite({
             className="srse-input"
             style={{ flex: "1 1 120px", minWidth: 90, maxWidth: 220 }}
             value={row.max}
-            onChange={(e) => updateRow(index, { max: Number(e.target.value) })}
+            onChange={(e) => updateRow(row.id, { max: Number(e.target.value) })}
           />
           <button
             type="button"
@@ -132,7 +131,7 @@ function FyIncomeComposite({
             <button
               type="button"
               className="srse-btn srse-btn-ghost srse-btn-sm"
-              onClick={() => removeRow(index)}
+              onClick={() => removeRow(row.id)}
               title="Remove this row"
             >
               ✕
@@ -160,13 +159,76 @@ function groupFields(fields: FieldCatalogEntry[]): Map<string, FieldCatalogEntry
   return groups;
 }
 
+type IncomeExemptionControlsProps = Readonly<{
+  fields: FieldCatalogEntry[];
+  exemptRation: string[];
+  exemptCaste: string[];
+  onExemptRationChange: (next: string[]) => void;
+  onExemptCasteChange: (next: string[]) => void;
+  onAdd: () => void;
+}>;
+
+function IncomeExemptionControls({
+  fields,
+  exemptRation,
+  exemptCaste,
+  onExemptRationChange,
+  onExemptCasteChange,
+  onAdd,
+}: IncomeExemptionControlsProps) {
+  const rationField = fields.find((f) => f.fieldKey === "ration_card_category");
+  const casteField = fields.find((f) => f.fieldKey === "community");
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "0.75rem", marginTop: "0.6rem" }}>
+      {rationField && (
+        <div style={{ flex: "0 1 220px" }}>
+          <div className="srse-text-muted" style={{ marginBottom: "0.3rem" }}>
+            Ration card
+          </div>
+          <MultiSelectDropdown
+            options={rationField.allowedValues}
+            selected={exemptRation}
+            onChange={onExemptRationChange}
+            allLabel="None exempted"
+            width="100%"
+          />
+        </div>
+      )}
+      {casteField && (
+        <div style={{ flex: "0 1 220px" }}>
+          <div className="srse-text-muted" style={{ marginBottom: "0.3rem" }}>
+            Caste
+          </div>
+          <MultiSelectDropdown
+            options={casteField.allowedValues}
+            selected={exemptCaste}
+            onChange={onExemptCasteChange}
+            allLabel="None exempted"
+            width="100%"
+          />
+        </div>
+      )}
+      <button
+        type="button"
+        className="srse-btn srse-btn-primary"
+        style={{ marginLeft: "auto" }}
+        onClick={onAdd}
+        title="Adds (income in range) OR (category is one of the exempted values)"
+      >
+        + Add income with exemption
+      </button>
+    </div>
+  );
+}
+
 function FieldPalette({
   fields,
   targetPath,
-}: {
+}: Readonly<{
   fields: FieldCatalogEntry[];
   targetPath: NodePath;
-}) {
+}>) {
   const addPredicate = useRuleBuilder((s) => s.addPredicate);
   const addGroup = useRuleBuilder((s) => s.addGroup);
   const [pending, setPending] = useState<PendingByField>({});
@@ -209,6 +271,16 @@ function FieldPalette({
     };
     addPredicate(targetPath, predicate);
     setPending((p) => ({ ...p, [field.fieldKey]: { ...pendingFor(field.fieldKey), selected: [] } }));
+  }
+
+  function toggleCheckboxSelection(fieldKey: string, opt: string) {
+    setPending((p) => {
+      const current = pendingFor(fieldKey);
+      const next = current.selected.includes(opt)
+        ? current.selected.filter((v) => v !== opt)
+        : [...current.selected, opt];
+      return { ...p, [fieldKey]: { ...current, selected: next } };
+    });
   }
 
   function addBoolean(field: FieldCatalogEntry, value: boolean) {
@@ -394,63 +466,24 @@ function FieldPalette({
                       </button>
 
                       {showExemption[field.fieldKey] && (
-                        <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "0.75rem", marginTop: "0.6rem" }}>
-                          {(() => {
-                            const rationField = fields.find((f) => f.fieldKey === "ration_card_category");
-                            const casteField = fields.find((f) => f.fieldKey === "community");
-                            return (
-                              <>
-                                {rationField && (
-                                  <div style={{ flex: "0 1 220px" }}>
-                                    <div className="srse-text-muted" style={{ marginBottom: "0.3rem" }}>
-                                      Ration card
-                                    </div>
-                                    <MultiSelectDropdown
-                                      options={rationField.allowedValues}
-                                      selected={pendingFor(field.fieldKey).exemptRation}
-                                      onChange={(next) =>
-                                        setPending((p) => ({
-                                          ...p,
-                                          [field.fieldKey]: { ...pendingFor(field.fieldKey), exemptRation: next },
-                                        }))
-                                      }
-                                      allLabel="None exempted"
-                                      width="100%"
-                                    />
-                                  </div>
-                                )}
-                                {casteField && (
-                                  <div style={{ flex: "0 1 220px" }}>
-                                    <div className="srse-text-muted" style={{ marginBottom: "0.3rem" }}>
-                                      Caste
-                                    </div>
-                                    <MultiSelectDropdown
-                                      options={casteField.allowedValues}
-                                      selected={pendingFor(field.fieldKey).exemptCaste}
-                                      onChange={(next) =>
-                                        setPending((p) => ({
-                                          ...p,
-                                          [field.fieldKey]: { ...pendingFor(field.fieldKey), exemptCaste: next },
-                                        }))
-                                      }
-                                      allLabel="None exempted"
-                                      width="100%"
-                                    />
-                                  </div>
-                                )}
-                              </>
-                            );
-                          })()}
-                          <button
-                            type="button"
-                            className="srse-btn srse-btn-primary"
-                            style={{ marginLeft: "auto" }}
-                            onClick={() => addIncomeWithExemption(field)}
-                            title="Adds (income in range) OR (category is one of the exempted values)"
-                          >
-                            + Add income with exemption
-                          </button>
-                        </div>
+                        <IncomeExemptionControls
+                          fields={fields}
+                          exemptRation={pendingFor(field.fieldKey).exemptRation}
+                          exemptCaste={pendingFor(field.fieldKey).exemptCaste}
+                          onExemptRationChange={(next) =>
+                            setPending((p) => ({
+                              ...p,
+                              [field.fieldKey]: { ...pendingFor(field.fieldKey), exemptRation: next },
+                            }))
+                          }
+                          onExemptCasteChange={(next) =>
+                            setPending((p) => ({
+                              ...p,
+                              [field.fieldKey]: { ...pendingFor(field.fieldKey), exemptCaste: next },
+                            }))
+                          }
+                          onAdd={() => addIncomeWithExemption(field)}
+                        />
                       )}
                     </div>
                   )}
@@ -576,16 +609,9 @@ function FieldPalette({
                               <input
                                 type="checkbox"
                                 checked={selected.includes(opt)}
-                                onChange={() =>
-                                  setPending((p) => {
-                                    const current = pendingFor(field.fieldKey);
-                                    const next = current.selected.includes(opt)
-                                      ? current.selected.filter((v) => v !== opt)
-                                      : [...current.selected, opt];
-                                    return { ...p, [field.fieldKey]: { ...current, selected: next } };
-                                  })
-                                }
+                                onChange={() => toggleCheckboxSelection(field.fieldKey, opt)}
                               />
+                              {" "}
                               {opt}
                             </label>
                           );
@@ -782,11 +808,12 @@ function RulesPageInner() {
               <RuleGroupEditor node={root} path={[]} fields={fields} targetPath={targetPath} onSetTarget={setTargetPath} />
 
               <div style={{ marginTop: "1rem", paddingTop: "1rem", borderTop: "1px solid var(--srse-border)" }}>
-                <label style={{ display: "block", marginBottom: "0.75rem" }}>
+                <label htmlFor="ruleset-name" style={{ display: "block", marginBottom: "0.75rem" }}>
                   <span style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.35rem", color: "var(--srse-text-muted)" }}>
                     Name
                   </span>
                   <input
+                    id="ruleset-name"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     placeholder="e.g. Senior citizen — no vehicle, low income"

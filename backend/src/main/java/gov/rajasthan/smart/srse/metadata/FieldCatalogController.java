@@ -39,9 +39,9 @@ public class FieldCatalogController {
 
     @PostMapping("/fields")
     public FieldCatalogEntryResponse create(@RequestBody FieldCatalogRequest req) {
-        FieldCatalogEntry saved = repository.save(new FieldCatalogEntry(
+        FieldCatalogEntry saved = repository.save(new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
                 null, req.fieldKey(), req.displayLabel(), req.tier(), req.dataType(),
-                req.groupName(), joinAllowedValues(req.allowedValues()), true, req.fuzzyMatchable()));
+                req.groupName(), joinAllowedValues(req.allowedValues()), true, req.fuzzyMatchable())));
         return FieldCatalogEntryResponse.from(saved);
     }
 
@@ -49,9 +49,9 @@ public class FieldCatalogController {
     public FieldCatalogEntryResponse update(@PathVariable String fieldKey, @RequestBody FieldCatalogRequest req) {
         FieldCatalogEntry existing = repository.findByFieldKey(fieldKey)
                 .orElseThrow(() -> new FieldResolver.UnknownFieldException(fieldKey));
-        FieldCatalogEntry saved = repository.save(new FieldCatalogEntry(
+        FieldCatalogEntry saved = repository.save(new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
                 existing.getId(), fieldKey, req.displayLabel(), req.tier(), req.dataType(),
-                req.groupName(), joinAllowedValues(req.allowedValues()), existing.isActive(), req.fuzzyMatchable()));
+                req.groupName(), joinAllowedValues(req.allowedValues()), existing.isActive(), req.fuzzyMatchable())));
         return FieldCatalogEntryResponse.from(saved);
     }
 
@@ -59,10 +59,10 @@ public class FieldCatalogController {
     public void deactivate(@PathVariable String fieldKey) {
         FieldCatalogEntry existing = repository.findByFieldKey(fieldKey)
                 .orElseThrow(() -> new FieldResolver.UnknownFieldException(fieldKey));
-        repository.save(new FieldCatalogEntry(
+        repository.save(new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
                 existing.getId(), existing.getFieldKey(), existing.getDisplayLabel(), existing.getTier(),
                 existing.getDataType(), existing.getGroupName(), existing.getAllowedValues(), false,
-                existing.isFuzzyMatchable()));
+                existing.isFuzzyMatchable())));
     }
 
     private static String joinAllowedValues(List<String> allowedValues) {

@@ -50,10 +50,10 @@ class FieldColumnMappingControllerTest {
 
     @Test
     void listShowsNullPhysicalExpressionWhenFieldHasNoMappingYet() throws Exception {
-        FieldCatalogEntry mapped = new FieldCatalogEntry(
-                1L, "age_years", "Age", FieldTier.TIER_1, FieldDataType.NUMBER, "Demographic", null, true);
-        FieldCatalogEntry unmapped = new FieldCatalogEntry(
-                2L, "has_vehicle", "Owns a vehicle", FieldTier.TIER_1, FieldDataType.BOOLEAN, "Assets", null, true);
+        FieldCatalogEntry mapped = new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
+                1L, "age_years", "Age", FieldTier.TIER_1, FieldDataType.NUMBER, "Demographic", null, true, false));
+        FieldCatalogEntry unmapped = new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
+                2L, "has_vehicle", "Owns a vehicle", FieldTier.TIER_1, FieldDataType.BOOLEAN, "Assets", null, true, false));
         when(catalogRepository.findAll()).thenReturn(List.of(mapped, unmapped));
         when(mappingRepository.findByFieldKeyAndDataMode("age_years", DataMode.LIVE))
                 .thenReturn(Optional.of(new FieldColumnMapping(10L, "age_years", DataMode.LIVE, "golden.age_years")));
@@ -70,8 +70,8 @@ class FieldColumnMappingControllerTest {
 
     @Test
     void upsertDelegatesToServiceAndReturnsUpdatedRow() throws Exception {
-        FieldCatalogEntry entry = new FieldCatalogEntry(
-                1L, "age_years", "Age", FieldTier.TIER_1, FieldDataType.NUMBER, "Demographic", null, true);
+        FieldCatalogEntry entry = new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
+                1L, "age_years", "Age", FieldTier.TIER_1, FieldDataType.NUMBER, "Demographic", null, true, false));
         when(catalogRepository.findByFieldKey("age_years")).thenReturn(Optional.of(entry));
         when(mappingService.upsert(eq("age_years"), eq(DataMode.LIVE), eq("golden.age_years")))
                 .thenReturn(new FieldColumnMapping(10L, "age_years", DataMode.LIVE, "golden.age_years"));

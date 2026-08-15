@@ -24,7 +24,7 @@ import {
   type ColumnMetadata,
 } from "@/lib/analysisApi";
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status }: Readonly<{ status: string }>) {
   const up = status === "up";
   return (
     <span className={up ? "srse-badge srse-badge-success" : "srse-badge srse-badge-danger"}>
@@ -45,11 +45,11 @@ function ConnectionCard({
   planeKey,
   plane,
   onLiveUpdate,
-}: {
+}: Readonly<{
   planeKey: PlaneKey;
   plane: ConnectionPlaneInfo;
   onLiveUpdate: (plane: ConnectionPlaneInfo) => void;
-}) {
+}>) {
   const [editing, setEditing] = useState(false);
   const [jdbcUrl, setJdbcUrl] = useState(plane.jdbcUrl);
   const [username, setUsername] = useState(plane.username);
@@ -216,7 +216,7 @@ function ConnectionsPanel() {
 const TIER_OPTIONS: FieldTier[] = ["TIER_1", "TIER_2", "TIER_3"];
 const DATA_TYPE_OPTIONS: FieldDataType[] = ["NUMBER", "STRING", "BOOLEAN", "DATE"];
 
-function AddFieldForm({ onCreated }: { onCreated: () => void }) {
+function AddFieldForm({ onCreated }: Readonly<{ onCreated: () => void }>) {
   const [fieldKey, setFieldKey] = useState("");
   const [displayLabel, setDisplayLabel] = useState("");
   const [tier, setTier] = useState<FieldTier>("TIER_1");
@@ -305,8 +305,9 @@ function AddFieldForm({ onCreated }: { onCreated: () => void }) {
         className="srse-input"
         style={{ width: 260 }}
       />
-      <label className="srse-checkbox-label" title="Offer approximate (Levenshtein) matching for this field in the rule builder">
-        <input type="checkbox" checked={fuzzyMatchable} onChange={(e) => setFuzzyMatchable(e.target.checked)} />
+        <label className="srse-checkbox-label" htmlFor="add-field-fuzzy">
+        <input id="add-field-fuzzy" type="checkbox" checked={fuzzyMatchable} onChange={(e) => setFuzzyMatchable(e.target.checked)} />
+        {" "}
         Fuzzy matchable
       </label>
       <button type="button" className="srse-btn srse-btn-primary" disabled={saving} onClick={onSubmit}>
@@ -330,22 +331,26 @@ function buildDobAgeExpression(dobColumn: string): string {
   return `date_diff('year', ${dobColumn}, current_date)`;
 }
 
-const DOB_AGE_EXPRESSION_RE = /^date_diff\('year',\s*(.+?),\s*current_date\)$/;
+const DOB_AGE_PREFIX = "date_diff('year', ";
+const DOB_AGE_SUFFIX = ", current_date)";
 
 function parseDobAgeExpression(expression: string): string | null {
-  const match = DOB_AGE_EXPRESSION_RE.exec(expression.trim());
-  return match ? match[1] : null;
+  const trimmed = expression.trim();
+  if (!trimmed.startsWith(DOB_AGE_PREFIX) || !trimmed.endsWith(DOB_AGE_SUFFIX)) {
+    return null;
+  }
+  return trimmed.slice(DOB_AGE_PREFIX.length, trimmed.length - DOB_AGE_SUFFIX.length).trim();
 }
 
 function MappingRowEditor({
   row,
   dataMode,
   onSaved,
-}: {
+}: Readonly<{
   row: MappingRow;
   dataMode: DataMode;
   onSaved: (physicalExpression: string) => void;
-}) {
+}>) {
   const isAgeField = row.fieldKey === "age_years";
   const existingDobColumn = isAgeField ? parseDobAgeExpression(row.physicalExpression ?? "") : null;
 
@@ -381,14 +386,17 @@ function MappingRowEditor({
         {isAgeField && (
           <label
             className="srse-checkbox-label"
+            htmlFor={`dob-mode-${row.fieldKey}`}
             style={{ display: "flex", marginBottom: "0.4rem", fontSize: "0.78rem" }}
             title="Computes age on the fly as of today, instead of storing a fixed number — no need to know Presto syntax, just the DOB column name for this environment"
           >
             <input
+              id={`dob-mode-${row.fieldKey}`}
               type="checkbox"
               checked={dobMode}
               onChange={(e) => setDobMode(e.target.checked)}
             />
+            {" "}
             Compute from Date of Birth
           </label>
         )}
@@ -455,12 +463,14 @@ function MappingsPanel() {
     <section className="srse-card">
       <h2 className="srse-card-title">Field → table/column mappings</h2>
       <div style={{ display: "flex", gap: "1.25rem", alignItems: "center", marginBottom: "0.85rem" }}>
-        <label className="srse-checkbox-label">
-          <input type="radio" checked={dataMode === "SYNTHETIC"} onChange={() => setDataMode("SYNTHETIC")} />
+        <label className="srse-checkbox-label" htmlFor="mapping-data-mode-synthetic">
+          <input id="mapping-data-mode-synthetic" type="radio" checked={dataMode === "SYNTHETIC"} onChange={() => setDataMode("SYNTHETIC")} />
+          {" "}
           Synthetic
         </label>
-        <label className="srse-checkbox-label">
-          <input type="radio" checked={dataMode === "LIVE"} onChange={() => setDataMode("LIVE")} />
+        <label className="srse-checkbox-label" htmlFor="mapping-data-mode-live">
+          <input id="mapping-data-mode-live" type="radio" checked={dataMode === "LIVE"} onChange={() => setDataMode("LIVE")} />
+          {" "}
           Live
         </label>
       </div>
@@ -507,10 +517,10 @@ function MappingsPanel() {
 function ColumnMetadataRowEditor({
   row,
   onSaved,
-}: {
+}: Readonly<{
   row: ColumnMetadata;
   onSaved: (updated: ColumnMetadata) => void;
-}) {
+}>) {
   const [businessName, setBusinessName] = useState(row.businessName ?? "");
   const [fuzzyMatchable, setFuzzyMatchable] = useState(row.fuzzyMatchable);
   const [saving, setSaving] = useState(false);
@@ -554,12 +564,14 @@ function ColumnMetadataRowEditor({
         />
       </td>
       <td>
-        <label className="srse-checkbox-label" title="Offer approximate (Levenshtein) matching for this column in the Analysis tab">
+        <label className="srse-checkbox-label" htmlFor={`col-meta-fuzzy-${row.table}-${row.column}`} title="Offer approximate (Levenshtein) matching for this column in the Analysis tab">
           <input
+            id={`col-meta-fuzzy-${row.table}-${row.column}`}
             type="checkbox"
             checked={fuzzyMatchable}
             onChange={(e) => setFuzzyMatchable(e.target.checked)}
           />
+          {" "}
           Fuzzy
         </label>
       </td>
@@ -575,7 +587,7 @@ function ColumnMetadataRowEditor({
   );
 }
 
-function RegisterColumnMetadataForm({ onCreated }: { onCreated: () => void }) {
+function RegisterColumnMetadataForm({ onCreated }: Readonly<{ onCreated: () => void }>) {
   const [tables, setTables] = useState<string[]>([]);
   const [table, setTable] = useState("");
   const [columns, setColumns] = useState<ColumnInfo[]>([]);
@@ -648,8 +660,9 @@ function RegisterColumnMetadataForm({ onCreated }: { onCreated: () => void }) {
         className="srse-input"
         style={{ width: 220 }}
       />
-      <label className="srse-checkbox-label" title="Offer approximate (Levenshtein) matching for this column in the Analysis tab">
-        <input type="checkbox" checked={fuzzyMatchable} onChange={(e) => setFuzzyMatchable(e.target.checked)} />
+      <label className="srse-checkbox-label" htmlFor="register-col-fuzzy" title="Offer approximate (Levenshtein) matching for this column in the Analysis tab">
+        <input id="register-col-fuzzy" type="checkbox" checked={fuzzyMatchable} onChange={(e) => setFuzzyMatchable(e.target.checked)} />
+        {" "}
         Fuzzy matchable
       </label>
       <button type="button" className="srse-btn srse-btn-primary" disabled={saving || !table || !column} onClick={onSubmit}>

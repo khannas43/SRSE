@@ -89,3 +89,41 @@ cd backend && mvn test
 `DATA_MODE=synthetic` (laptop) | `live` (client Dev). Same codebase; only config
 and the field→column mapping differ. No lakehouse connection needed to build or
 test locally.
+
+## Code quality (SonarQube)
+
+Local SonarQube scans the full monorepo (Java backend + TypeScript frontend) as a
+single project.
+
+### One-time setup
+
+1. Ensure SonarQube is running (default: http://localhost:9012).
+2. Create a project manually: **Project key** `SRSE`, **Display name** `SRSE`
+   at http://localhost:9012/projects/create
+   (Project key is case-sensitive — must match `sonar-project.properties`.)
+3. Generate a token: **My Account → Security → Generate Token**
+4. Add to `.env` (copy from `.env.example`):
+
+```bash
+export SONAR_HOST_URL=http://localhost:9012
+export SONAR_TOKEN=<your-token>
+```
+
+### Run a scan
+
+```bash
+./scripts/sonar-scan.sh
+```
+
+This runs backend tests with JaCoCo coverage, then uploads results via
+`sonarsource/sonar-scanner-cli` (Docker). Dashboard:
+http://localhost:9012/dashboard?id=SRSE
+
+### Optional: scan before every push
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The pre-push hook calls the same script and blocks the push if the scan fails.
+Start with manual scans first — each run takes 1–3 minutes.

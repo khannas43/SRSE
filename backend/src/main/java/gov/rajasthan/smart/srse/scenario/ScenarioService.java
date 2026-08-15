@@ -44,9 +44,8 @@ public class ScenarioService {
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Failed to serialize ruleset", e);
         }
-        Scenario scenario = new Scenario(
-                null, name, schemeIds, rulesetJson,
-                null, null, Instant.now(), null);
+        Scenario scenario = new Scenario(new Scenario.ScenarioData(
+                null, name, schemeIds, rulesetJson, null, null, Instant.now(), null));
         return repository.save(scenario);
     }
 

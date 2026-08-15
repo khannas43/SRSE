@@ -10,7 +10,6 @@ import org.springframework.stereotype.Component;
 import javax.crypto.SecretKey;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Date;
 import java.util.List;
 
 /**
@@ -31,13 +30,20 @@ public class MockJwtService {
 
     public String issue(String subject) {
         Instant now = Instant.now();
+        Instant expires = now.plus(TOKEN_TTL);
         return Jwts.builder()
                 .setSubject(subject)
                 .claim("authorities", List.of(Authorities.STATE_OFFICER))
-                .setIssuedAt(Date.from(now))
-                .setExpiration(Date.from(now.plus(TOKEN_TTL)))
+                .setIssuedAt(toLegacyDate(now))
+                .setExpiration(toLegacyDate(expires))
                 .signWith(signingKey)
                 .compact();
+    }
+
+    /** jjwt 0.11.x API requires {@link java.util.Date}; isolated here for Sonar S2143. */
+    @SuppressWarnings("java:S2143")
+    private static java.util.Date toLegacyDate(Instant instant) {
+        return java.util.Date.from(instant);
     }
 
     @SuppressWarnings("unchecked")

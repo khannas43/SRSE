@@ -50,15 +50,25 @@ const LAYOUT_2: Layout = {
   },
 };
 
+type VennDiagramProps = Readonly<{ sets: VennSet[]; counts: VennCounts }>;
+
 /** 2- or 3-circle schematic Venn diagram with counts overlaid per region. */
-export function VennDiagram({ sets, counts }: { sets: VennSet[]; counts: VennCounts }) {
+export function VennDiagram({ sets, counts }: VennDiagramProps) {
   const layout = sets.length === 3 ? LAYOUT_3 : LAYOUT_2;
 
   return (
     <div style={{ display: "flex", gap: "1.75rem", flexWrap: "wrap", alignItems: "center" }}>
       <svg viewBox={layout.viewBox} width={layout.width} height={layout.height}>
         {layout.circles.map((c, i) => (
-          <circle key={i} cx={c.cx} cy={c.cy} r={c.r} fill="none" stroke={sets[i]?.color} strokeWidth={4} />
+          <circle
+            key={sets[i]?.label ?? `circle-${c.cx}-${c.cy}`}
+            cx={c.cx}
+            cy={c.cy}
+            r={c.r}
+            fill="none"
+            stroke={sets[i]?.color}
+            strokeWidth={4}
+          />
         ))}
         {Object.entries(layout.labelPositions).map(([key, pos]) => (
           <text
@@ -76,8 +86,8 @@ export function VennDiagram({ sets, counts }: { sets: VennSet[]; counts: VennCou
         ))}
       </svg>
       <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-        {sets.map((s, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem" }}>
+        {sets.map((s) => (
+          <div key={s.label} style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem" }}>
             <span
               style={{
                 width: 14,

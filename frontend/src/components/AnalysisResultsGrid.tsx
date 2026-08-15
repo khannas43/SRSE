@@ -23,13 +23,13 @@ function prettify(columnId: string): string {
   return columnId
     .replace(/^source_/, "Source: ")
     .replace(/^target_/, "Target: ")
-    .replace(/_/g, " ")
+    .replaceAll("_", " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function csvEscape(value: unknown): string {
-  const s = String(value ?? "");
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  const s = String(value);
+  return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
 }
 
 function downloadCsv(rows: Row[], visibleIds: string[], labelFor: (id: string) => string) {
@@ -41,10 +41,10 @@ function downloadCsv(rows: Row[], visibleIds: string[], labelFor: (id: string) =
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `analysis-match-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.csv`;
+  a.download = `analysis-match-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, "-")}.csv`;
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
+  a.remove();
   URL.revokeObjectURL(url);
 }
 
@@ -59,6 +59,54 @@ const filterInputStyle: CSSProperties = {
   marginTop: "0.35rem",
 };
 
+type AnalysisResultsGridProps = Readonly<{
+  columns: string[];
+  rows: Row[];
+  sql: string;
+  streaming?: boolean;
+  totalRows?: number | null;
+  totalRowsIsPartial?: boolean;
+  highlightDuplicates: boolean;
+  dedupAvailable: boolean;
+  dedupEnabled: boolean;
+  onDedupToggle: (enabled: boolean) => void;
+  columnLabels?: Record<string, string>;
+}>;
+
+function sortIndicator(sorted: false | "asc" | "desc"): string {
+  if (sorted === "asc") return "▲";
+  if (sorted === "desc") return "▼";
+  return "⇅";
+}
+
+function MatchRowCountCaption({
+  rowsLength,
+  streaming,
+  totalRows,
+  totalRowsIsPartial,
+}: Readonly<{
+  rowsLength: number;
+  streaming: boolean;
+  totalRows: number | null | undefined;
+  totalRowsIsPartial: boolean | undefined;
+}>) {
+  if (streaming || totalRows == null || totalRows <= rowsLength) {
+    return (
+      <>
+        {rowsLength} row{rowsLength === 1 ? "" : "s"}
+        {streaming ? " (loading more…)" : ""}
+      </>
+    );
+  }
+  return (
+    <>
+      Showing {rowsLength} of {totalRows}
+      {totalRowsIsPartial ? "+" : ""} matching rows — refine your Source/Target criteria (add a
+      matching column, narrow a fuzzy threshold, or add an age filter) to bring this into view.
+    </>
+  );
+}
+
 export function AnalysisResultsGrid({
   columns,
   rows,
@@ -71,25 +119,7 @@ export function AnalysisResultsGrid({
   dedupEnabled,
   onDedupToggle,
   columnLabels,
-}: {
-  columns: string[];
-  rows: Row[];
-  sql: string;
-  streaming?: boolean;
-  // The true match count from the backend, which can exceed rows.length —
-  // the grid only ever holds a bounded number of rows in the browser (see
-  // analysis/page.tsx's MAX_DISPLAYED_ROWS), independent of how many the
-  // backend actually found. null while unknown (still streaming, or errored
-  // before a "done"/abort). totalRowsIsPartial means even this number is a
-  // lower bound (we stopped counting, not just stopped displaying).
-  totalRows?: number | null;
-  totalRowsIsPartial?: boolean;
-  highlightDuplicates: boolean;
-  dedupAvailable: boolean;
-  dedupEnabled: boolean;
-  onDedupToggle: (enabled: boolean) => void;
-  columnLabels?: Record<string, string>;
-}) {
+}: AnalysisResultsGridProps) {
   const labelFor = (id: string) => columnLabels?.[id] ?? prettify(id);
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
@@ -110,7 +140,7 @@ export function AnalysisResultsGrid({
           header: labelFor(id),
           filterFn: (row, columnId, filterValue) => {
             if (!filterValue) return true;
-            return String(row.getValue(columnId) ?? "")
+            return String(row.getValue(columnId))
               .toLowerCase()
               .includes(String(filterValue).toLowerCase());
           },
@@ -158,29 +188,25 @@ export function AnalysisResultsGrid({
             Match results
           </h2>
           <span className="srse-text-muted" style={{ fontSize: "0.85rem" }}>
-            {streaming || totalRows == null || totalRows <= rows.length ? (
-              <>
-                {rows.length} row{rows.length === 1 ? "" : "s"}
-                {streaming ? " (loading more…)" : ""}
-              </>
-            ) : (
-              <>
-                Showing {rows.length} of {totalRows}
-                {totalRowsIsPartial ? "+" : ""} matching rows — refine your Source/Target criteria (add a
-                matching column, narrow a fuzzy threshold, or add an age filter) to bring this into view.
-              </>
-            )}
+            <MatchRowCountCaption
+              rowsLength={rows.length}
+              streaming={!!streaming}
+              totalRows={totalRows}
+              totalRowsIsPartial={totalRowsIsPartial}
+            />
           </span>
         </div>
         {rows.length > 0 && (
           <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
             {dedupAvailable && (
-              <label className="srse-checkbox-label" title="Hides older duplicate rows, keeping the latest by last-updated date">
+              <label className="srse-checkbox-label" htmlFor="hide-duplicate-records" title="Hides older duplicate rows, keeping the latest by last-updated date">
                 <input
+                  id="hide-duplicate-records"
                   type="checkbox"
                   checked={dedupEnabled}
                   onChange={(e) => onDedupToggle(e.target.checked)}
                 />
+                {" "}
                 Hide duplicate records
               </label>
             )}
@@ -216,25 +242,34 @@ export function AnalysisResultsGrid({
                   <tr key={hg.id}>
                     {hg.headers.map((header) => (
                       <th key={header.id} style={{ verticalAlign: "top" }}>
-                        <span
+                        <button
+                          type="button"
                           onClick={header.column.getToggleSortingHandler()}
-                          style={{ cursor: "pointer", userSelect: "none", display: "inline-flex", gap: "0.3rem" }}
+                          style={{
+                            cursor: "pointer",
+                            userSelect: "none",
+                            display: "inline-flex",
+                            gap: "0.3rem",
+                            background: "none",
+                            border: "none",
+                            padding: 0,
+                            font: "inherit",
+                            color: "inherit",
+                          }}
                         >
                           {flexRender(header.column.columnDef.header, header.getContext())}
                           <span style={{ color: "var(--srse-text-faint)" }}>
-                            {header.column.getIsSorted() === "asc"
-                              ? "▲"
-                              : header.column.getIsSorted() === "desc"
-                                ? "▼"
-                                : "⇅"}
+                            {sortIndicator(header.column.getIsSorted())}
                           </span>
-                        </span>
+                        </button>
                         <input
+                          id={`filter-${header.id}`}
                           value={(header.column.getFilterValue() as string) ?? ""}
                           onChange={(e) => header.column.setFilterValue(e.target.value)}
                           placeholder="filter…"
                           style={filterInputStyle}
                           onClick={(e) => e.stopPropagation()}
+                          aria-label={`Filter ${String(header.column.columnDef.header)}`}
                         />
                       </th>
                     ))}
@@ -278,9 +313,10 @@ export function AnalysisResultsGrid({
               {filteredSortedRows.length !== rows.length ? ` (of ${rows.length})` : ""}
             </span>
             <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.85rem" }}>
-                Rows per page
+              <label htmlFor="rows-per-page" style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.85rem" }}>
+                <span>Rows per page</span>
                 <select
+                  id="rows-per-page"
                   value={pageSize}
                   onChange={(e) => table.setPageSize(Number(e.target.value))}
                   className="srse-select"
@@ -365,7 +401,7 @@ export function AnalysisResultsGrid({
         <ChartsSection
           rows={rows}
           dimensions={columns.map((c) => ({ key: c, label: labelFor(c) }))}
-          getValue={(row, key) => String(row[key] ?? "")}
+          getValue={(row, key) => String(row[key])}
           getCount={() => 1}
         />
       </div>

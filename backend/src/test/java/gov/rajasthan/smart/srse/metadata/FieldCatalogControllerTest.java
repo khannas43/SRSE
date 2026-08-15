@@ -48,12 +48,12 @@ class FieldCatalogControllerTest {
 
     @Test
     void listFieldsExcludesInactiveEntriesAndSplitsAllowedValues() throws Exception {
-        FieldCatalogEntry active = new FieldCatalogEntry(
+        FieldCatalogEntry active = new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
                 1L, "district", "District", FieldTier.TIER_1, FieldDataType.STRING,
-                "Demographic", "Jaipur,Jodhpur", true);
-        FieldCatalogEntry inactive = new FieldCatalogEntry(
+                "Demographic", "Jaipur,Jodhpur", true, false));
+        FieldCatalogEntry inactive = new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
                 2L, "legacy_field", "Legacy", FieldTier.TIER_1, FieldDataType.STRING,
-                "Demographic", null, false);
+                "Demographic", null, false, false));
         when(repository.findAll()).thenReturn(List.of(active, inactive));
 
         mockMvc.perform(get("/api/metadata/fields"))
@@ -69,8 +69,9 @@ class FieldCatalogControllerTest {
     void createPersistsNewField() throws Exception {
         when(repository.save(any())).thenAnswer(inv -> {
             FieldCatalogEntry e = inv.getArgument(0);
-            return new FieldCatalogEntry(9L, e.getFieldKey(), e.getDisplayLabel(), e.getTier(),
-                    e.getDataType(), e.getGroupName(), e.getAllowedValues(), e.isActive());
+            return new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
+                    9L, e.getFieldKey(), e.getDisplayLabel(), e.getTier(),
+                    e.getDataType(), e.getGroupName(), e.getAllowedValues(), e.isActive(), e.isFuzzyMatchable()));
         });
 
         String body = """
@@ -90,8 +91,9 @@ class FieldCatalogControllerTest {
     void createPersistsFuzzyMatchableFlag() throws Exception {
         when(repository.save(any())).thenAnswer(inv -> {
             FieldCatalogEntry e = inv.getArgument(0);
-            return new FieldCatalogEntry(10L, e.getFieldKey(), e.getDisplayLabel(), e.getTier(),
-                    e.getDataType(), e.getGroupName(), e.getAllowedValues(), e.isActive(), e.isFuzzyMatchable());
+            return new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
+                    10L, e.getFieldKey(), e.getDisplayLabel(), e.getTier(),
+                    e.getDataType(), e.getGroupName(), e.getAllowedValues(), e.isActive(), e.isFuzzyMatchable()));
         });
 
         String body = """
@@ -110,9 +112,9 @@ class FieldCatalogControllerTest {
 
     @Test
     void deactivateFlipsActiveFalseAndPreservesOtherFields() throws Exception {
-        FieldCatalogEntry existing = new FieldCatalogEntry(
+        FieldCatalogEntry existing = new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
                 3L, "class_passed", "Highest Class Passed", FieldTier.TIER_1, FieldDataType.STRING,
-                "Education", "NURSERY,KG", true);
+                "Education", "NURSERY,KG", true, false));
         when(repository.findByFieldKey("class_passed")).thenReturn(Optional.of(existing));
         when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
