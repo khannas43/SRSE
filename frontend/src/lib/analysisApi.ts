@@ -96,12 +96,14 @@ export type RecordMatchStreamHandlers = {
 export async function runRecordMatchStream(
   req: RecordMatchRequest,
   handlers: RecordMatchStreamHandlers,
+  signal?: AbortSignal,
 ): Promise<void> {
   const res = await authorizedFetch(`${API_BASE}/api/analysis/match`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(req),
+    signal,
   });
   if (!res.ok) {
     throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);

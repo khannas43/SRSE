@@ -64,6 +64,8 @@ export function AnalysisResultsGrid({
   rows,
   sql,
   streaming,
+  totalRows,
+  totalRowsIsPartial,
   highlightDuplicates,
   dedupAvailable,
   dedupEnabled,
@@ -74,6 +76,14 @@ export function AnalysisResultsGrid({
   rows: Row[];
   sql: string;
   streaming?: boolean;
+  // The true match count from the backend, which can exceed rows.length —
+  // the grid only ever holds a bounded number of rows in the browser (see
+  // analysis/page.tsx's MAX_DISPLAYED_ROWS), independent of how many the
+  // backend actually found. null while unknown (still streaming, or errored
+  // before a "done"/abort). totalRowsIsPartial means even this number is a
+  // lower bound (we stopped counting, not just stopped displaying).
+  totalRows?: number | null;
+  totalRowsIsPartial?: boolean;
   highlightDuplicates: boolean;
   dedupAvailable: boolean;
   dedupEnabled: boolean;
@@ -117,7 +127,7 @@ export function AnalysisResultsGrid({
       columnFilters,
       columnVisibility: Object.fromEntries(columns.map((c) => [c, effectiveVisibleIds.includes(c)])),
     },
-    initialState: { pagination: { pageSize: 100 } },
+    initialState: { pagination: { pageSize: 20 } },
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     getCoreRowModel: getCoreRowModel(),
@@ -148,8 +158,18 @@ export function AnalysisResultsGrid({
             Match results
           </h2>
           <span className="srse-text-muted" style={{ fontSize: "0.85rem" }}>
-            {rows.length} row{rows.length === 1 ? "" : "s"}
-            {streaming ? " (loading more…)" : ""}
+            {streaming || totalRows == null || totalRows <= rows.length ? (
+              <>
+                {rows.length} row{rows.length === 1 ? "" : "s"}
+                {streaming ? " (loading more…)" : ""}
+              </>
+            ) : (
+              <>
+                Showing {rows.length} of {totalRows}
+                {totalRowsIsPartial ? "+" : ""} matching rows — refine your Source/Target criteria (add a
+                matching column, narrow a fuzzy threshold, or add an age filter) to bring this into view.
+              </>
+            )}
           </span>
         </div>
         {rows.length > 0 && (

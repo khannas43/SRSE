@@ -69,6 +69,23 @@ export default function AnalysisPage() {
   const [matchColumns, setMatchColumns] = useState<string[]>([]);
   const [matchRows, setMatchRows] = useState<Record<string, unknown>[]>([]);
   const [matchSql, setMatchSql] = useState("");
+  // The backend deliberately no longer caps the match result (see
+  // RecordMatchService's javadoc) — but a browser tab still cannot hold or
+  // recompute over an unbounded row array without crashing (confirmed live:
+  // an OOM tab crash on a match with far more matches than the grid/charts
+  // could safely render). These are a display-side safety limit, not a
+  // reintroduction of that backend guardrail: the true total is still
+  // counted and shown even when not every row is rendered.
+  const MAX_DISPLAYED_ROWS = 20000;
+  // Beyond this many rows, stop reading the stream entirely rather than keep
+  // parsing JSON that will never be shown — for a pathologically large match
+  // (a poorly-selective blocking key), even parsing (not rendering) millions
+  // of NDJSON lines can hang the tab on its own.
+  const MAX_ROWS_TO_PARSE = 200000;
+  const [matchTotalRows, setMatchTotalRows] = useState<number | null>(null);
+  // True when we stopped reading before the stream finished naturally, so
+  // matchTotalRows (if set at all) is a lower bound, not an exact count.
+  const [matchCountIsPartial, setMatchCountIsPartial] = useState(false);
   // True for the whole streaming lifecycle (first byte to last), not just the
   // initial network round trip — drives the grid's "(loading more…)" caption
   // and disables CSV/column-visibility until the result is actually complete.
@@ -79,6 +96,7 @@ export default function AnalysisPage() {
   // large match). Buffer them here and flush in batches on a timer instead.
   const pendingRowsRef = useRef<Record<string, unknown>[]>([]);
   const flushIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const rowsSeenRef = useRef(0);
 
   useEffect(() => {
     listAnalysisTables()
@@ -187,32 +205,55 @@ export default function AnalysisPage() {
     setMatchColumns([]);
     setMatchRows([]);
     setMatchSql("");
+    setMatchTotalRows(null);
+    setMatchCountIsPartial(false);
     pendingRowsRef.current = [];
+    rowsSeenRef.current = 0;
     if (flushIntervalRef.current !== null) {
       clearInterval(flushIntervalRef.current);
     }
     flushIntervalRef.current = setInterval(flushPendingRows, 100);
 
+    const controller = new AbortController();
     try {
-      await runRecordMatchStream(req, {
-        onMeta: (meta) => {
-          setMatchColumns(meta.columns);
-          setMatchSql(meta.sql);
+      await runRecordMatchStream(
+        req,
+        {
+          onMeta: (meta) => {
+            setMatchColumns(meta.columns);
+            setMatchSql(meta.sql);
+          },
+          onRow: (row) => {
+            rowsSeenRef.current += 1;
+            if (rowsSeenRef.current <= MAX_DISPLAYED_ROWS) {
+              pendingRowsRef.current.push(row);
+            }
+            if (rowsSeenRef.current >= MAX_ROWS_TO_PARSE) {
+              setMatchCountIsPartial(true);
+              controller.abort();
+            }
+          },
+          onDone: (totalRows) => {
+            setMatchTotalRows(totalRows);
+            setMatchStatus("ok");
+          },
+          onError: (message) => {
+            setMatchError(message);
+            setMatchStatus("error");
+          },
         },
-        onRow: (row) => {
-          pendingRowsRef.current.push(row);
-        },
-        onDone: () => {
-          setMatchStatus("ok");
-        },
-        onError: (message) => {
-          setMatchError(message);
-          setMatchStatus("error");
-        },
-      });
+        controller.signal,
+      );
     } catch (err: unknown) {
-      setMatchError(err instanceof Error ? err.message : String(err));
-      setMatchStatus("error");
+      if (controller.signal.aborted) {
+        // Intentional stop at MAX_ROWS_TO_PARSE, not a real failure — the
+        // true total is unknown past this point, so report a lower bound.
+        setMatchTotalRows(rowsSeenRef.current);
+        setMatchStatus("ok");
+      } else {
+        setMatchError(err instanceof Error ? err.message : String(err));
+        setMatchStatus("error");
+      }
     } finally {
       if (flushIntervalRef.current !== null) {
         clearInterval(flushIntervalRef.current);
@@ -447,6 +488,8 @@ export default function AnalysisPage() {
             rows={matchRows}
             sql={matchSql}
             streaming={matchStreaming}
+            totalRows={matchTotalRows}
+            totalRowsIsPartial={matchCountIsPartial}
             highlightDuplicates={highlightDuplicates}
             dedupAvailable={!!dedupColumn}
             dedupEnabled={dedupEnabled}
