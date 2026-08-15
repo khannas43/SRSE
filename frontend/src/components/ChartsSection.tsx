@@ -30,6 +30,23 @@ const MAX_INTERSECTION_DIMS = 5;
 // Separator for composite group-by keys — unlikely to appear in real data values.
 const KEY_SEP = "␟";
 
+// Analysis match results are no longer capped at 1000 rows, so a field can
+// have thousands of distinct values. Recharts renders one SVG bar/label (or
+// pie slice) per category with no virtualization — beyond a few dozen that
+// crashes the tab (confirmed live: an OOM "Error code: 5" renderer crash),
+// not just looks bad. Cap what actually gets rendered, always by count so
+// the most meaningful categories survive the cut, and say so when truncated.
+const MAX_CHART_CATEGORIES = 50;
+// A plain HTML table row is far cheaper than an SVG bar, so this can be looser.
+const MAX_TABLE_ROWS = 200;
+// Matrix mode multiplies two axes into rowVals.length * colVals.length cells —
+// cap each axis so the product stays bounded even if both dimensions are
+// high-cardinality (e.g. two id-like columns).
+const MAX_MATRIX_AXIS_VALUES = 40;
+// Native <select> handles a few hundred options fine — this is just a sanity
+// ceiling for pathological cases, not a rendering-cost concern like the above.
+const MAX_SELECT_OPTIONS = 500;
+
 type ChartType = "bar" | "pie" | "intersection";
 type IntersectionDisplay = "table" | "venn";
 
@@ -64,7 +81,7 @@ export function ChartsSection<T>({
   // For the Venn view only: which specific value defines "inside" each circle.
   const [vennValues, setVennValues] = useState<Record<string, string>>({});
 
-  const singleAgg = useMemo(() => {
+  const singleAggFull = useMemo(() => {
     if (!singleDim) return [];
     const totals = new Map<string, number>();
     for (const row of rows) {
@@ -75,6 +92,8 @@ export function ChartsSection<T>({
       .map(([value, count]) => ({ value, count }))
       .sort((a, b) => b.count - a.count);
   }, [rows, singleDim, getValue, getCount]);
+  const singleAggTruncated = singleAggFull.length > MAX_CHART_CATEGORIES;
+  const singleAgg = singleAggTruncated ? singleAggFull.slice(0, MAX_CHART_CATEGORIES) : singleAggFull;
 
   const intersection = useMemo(() => {
     if (intersectionDims.length < 2) return null;
@@ -84,18 +103,34 @@ export function ChartsSection<T>({
       totals.set(key, (totals.get(key) ?? 0) + getCount(row));
     }
     if (intersectionDims.length === 2) {
-      const rowVals = Array.from(
+      const rowValsFull = Array.from(
         new Set(rows.map((r) => getValue(r, intersectionDims[0]) || "(blank)")),
       ).sort();
-      const colVals = Array.from(
+      const colValsFull = Array.from(
         new Set(rows.map((r) => getValue(r, intersectionDims[1]) || "(blank)")),
       ).sort();
-      return { kind: "matrix" as const, rowVals, colVals, totals };
+      const rowVals = rowValsFull.slice(0, MAX_MATRIX_AXIS_VALUES);
+      const colVals = colValsFull.slice(0, MAX_MATRIX_AXIS_VALUES);
+      return {
+        kind: "matrix" as const,
+        rowVals,
+        colVals,
+        totals,
+        truncated: rowValsFull.length > MAX_MATRIX_AXIS_VALUES || colValsFull.length > MAX_MATRIX_AXIS_VALUES,
+        rowValsFullCount: rowValsFull.length,
+        colValsFullCount: colValsFull.length,
+      };
     }
-    const combos = Array.from(totals.entries())
+    const combosFull = Array.from(totals.entries())
       .map(([key, count]) => ({ parts: key.split(KEY_SEP), count }))
       .sort((a, b) => b.count - a.count);
-    return { kind: "flat" as const, combos };
+    const truncated = combosFull.length > MAX_TABLE_ROWS;
+    return {
+      kind: "flat" as const,
+      combos: truncated ? combosFull.slice(0, MAX_TABLE_ROWS) : combosFull,
+      truncated,
+      fullCount: combosFull.length,
+    };
   }, [rows, intersectionDims, getValue, getCount]);
 
   // Venn view only applies to 2 or 3 dims — beyond that there's no clean
@@ -103,7 +138,8 @@ export function ChartsSection<T>({
   const vennEligibleDims = intersectionDims.length === 2 || intersectionDims.length === 3;
 
   const distinctValuesFor = useMemo(
-    () => (key: string) => Array.from(new Set(rows.map((r) => getValue(r, key) || "(blank)"))).sort(),
+    () => (key: string) =>
+      Array.from(new Set(rows.map((r) => getValue(r, key) || "(blank)"))).sort().slice(0, MAX_SELECT_OPTIONS),
     [rows, getValue],
   );
 
@@ -192,6 +228,13 @@ export function ChartsSection<T>({
               ))}
             </select>
           </label>
+
+          {singleAggTruncated && (
+            <p className="srse-text-muted" style={{ fontSize: "0.78rem", marginTop: "-0.35rem", marginBottom: "0.6rem" }}>
+              Showing the top {MAX_CHART_CATEGORIES} of {singleAggFull.length} distinct values by count — pick a
+              lower-cardinality field, or use the data grid / CSV export, to see the rest.
+            </p>
+          )}
 
           {singleAgg.length === 0 ? (
             <p className="srse-text-muted">No data to chart.</p>
@@ -301,52 +344,69 @@ export function ChartsSection<T>({
               counts={vennCounts}
             />
           ) : intersection?.kind === "matrix" ? (
-            <div style={{ overflowX: "auto" }}>
-              <table className="srse-table">
-                <thead>
-                  <tr>
-                    <th>
-                      {dimLabel(intersectionDims[0])} vs {dimLabel(intersectionDims[1])}
-                    </th>
-                    {intersection.colVals.map((c) => (
-                      <th key={c}>{c}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {intersection.rowVals.map((r) => (
-                    <tr key={r}>
-                      <td style={{ fontWeight: 500 }}>{r}</td>
+            <div>
+              {intersection.truncated && (
+                <p className="srse-text-muted" style={{ fontSize: "0.78rem", marginBottom: "0.6rem" }}>
+                  Showing the top {intersection.rowVals.length} of {intersection.rowValsFullCount} row values and
+                  top {intersection.colVals.length} of {intersection.colValsFullCount} column values by name —
+                  pick lower-cardinality fields to see the rest.
+                </p>
+              )}
+              <div style={{ overflowX: "auto" }}>
+                <table className="srse-table">
+                  <thead>
+                    <tr>
+                      <th>
+                        {dimLabel(intersectionDims[0])} vs {dimLabel(intersectionDims[1])}
+                      </th>
                       {intersection.colVals.map((c) => (
-                        <td key={c}>{intersection.totals.get(`${r}${KEY_SEP}${c}`) ?? 0}</td>
+                        <th key={c}>{c}</th>
                       ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {intersection.rowVals.map((r) => (
+                      <tr key={r}>
+                        <td style={{ fontWeight: 500 }}>{r}</td>
+                        {intersection.colVals.map((c) => (
+                          <td key={c}>{intersection.totals.get(`${r}${KEY_SEP}${c}`) ?? 0}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           ) : intersection?.kind === "flat" ? (
-            <div style={{ overflowX: "auto" }}>
-              <table className="srse-table">
-                <thead>
-                  <tr>
-                    {intersectionDims.map((k) => (
-                      <th key={k}>{dimLabel(k)}</th>
-                    ))}
-                    <th>Count</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {intersection.combos.map((combo, i) => (
-                    <tr key={i}>
-                      {combo.parts.map((p, j) => (
-                        <td key={j}>{p}</td>
+            <div>
+              {intersection.truncated && (
+                <p className="srse-text-muted" style={{ fontSize: "0.78rem", marginBottom: "0.6rem" }}>
+                  Showing the top {MAX_TABLE_ROWS} of {intersection.fullCount} combinations by count — pick fewer
+                  or lower-cardinality fields, or use the data grid / CSV export, to see the rest.
+                </p>
+              )}
+              <div style={{ overflowX: "auto" }}>
+                <table className="srse-table">
+                  <thead>
+                    <tr>
+                      {intersectionDims.map((k) => (
+                        <th key={k}>{dimLabel(k)}</th>
                       ))}
-                      <td>{combo.count}</td>
+                      <th>Count</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {intersection.combos.map((combo, i) => (
+                      <tr key={i}>
+                        {combo.parts.map((p, j) => (
+                          <td key={j}>{p}</td>
+                        ))}
+                        <td>{combo.count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           ) : null}
         </div>
