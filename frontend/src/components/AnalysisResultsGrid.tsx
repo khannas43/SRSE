@@ -63,7 +63,7 @@ export function AnalysisResultsGrid({
   columns,
   rows,
   sql,
-  capped,
+  streaming,
   highlightDuplicates,
   dedupAvailable,
   dedupEnabled,
@@ -73,7 +73,7 @@ export function AnalysisResultsGrid({
   columns: string[];
   rows: Row[];
   sql: string;
-  capped: boolean;
+  streaming?: boolean;
   highlightDuplicates: boolean;
   dedupAvailable: boolean;
   dedupEnabled: boolean;
@@ -117,7 +117,7 @@ export function AnalysisResultsGrid({
       columnFilters,
       columnVisibility: Object.fromEntries(columns.map((c) => [c, effectiveVisibleIds.includes(c)])),
     },
-    initialState: { pagination: { pageSize: 10 } },
+    initialState: { pagination: { pageSize: 100 } },
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     getCoreRowModel: getCoreRowModel(),
@@ -149,7 +149,7 @@ export function AnalysisResultsGrid({
           </h2>
           <span className="srse-text-muted" style={{ fontSize: "0.85rem" }}>
             {rows.length} row{rows.length === 1 ? "" : "s"}
-            {capped ? " — capped, refine your match criteria to narrow this down" : ""}
+            {streaming ? " (loading more…)" : ""}
           </span>
         </div>
         {rows.length > 0 && (
@@ -170,11 +170,14 @@ export function AnalysisResultsGrid({
               onChange={setVisibleColumnIds}
               allLabel="All columns"
               width={200}
+              disabled={streaming}
             />
             <button
               type="button"
               className="srse-btn srse-btn-sm"
               onClick={() => downloadCsv(filteredSortedRows, [...effectiveVisibleIds], labelFor)}
+              disabled={streaming}
+              title={streaming ? "Wait for the match to finish loading before exporting" : undefined}
             >
               ⬇ Download CSV
             </button>

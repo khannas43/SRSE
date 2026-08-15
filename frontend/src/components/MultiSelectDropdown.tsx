@@ -61,12 +61,14 @@ export function MultiSelectDropdown({
   onChange,
   allLabel = "All",
   width = 220,
+  disabled = false,
 }: {
   options: DropdownOption[];
   selected: string[];
   onChange: (next: string[]) => void;
   allLabel?: string;
   width?: number | string;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -91,12 +93,15 @@ export function MultiSelectDropdown({
     <div ref={containerRef} style={{ position: "relative", display: "inline-block", width }}>
       <button
         type="button"
+        disabled={disabled}
         style={{
           ...buttonStyle,
           borderColor: open ? "var(--srse-primary)" : "var(--srse-border-strong)",
           boxShadow: open ? "0 0 0 3px var(--srse-primary-bg)" : "none",
+          opacity: disabled ? 0.6 : 1,
+          cursor: disabled ? "not-allowed" : "pointer",
         }}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => !disabled && setOpen((o) => !o)}
       >
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary}</span>
         <span style={{ fontSize: "0.7rem", color: "var(--srse-text-faint)", flexShrink: 0 }}>{open ? "▲" : "▼"}</span>

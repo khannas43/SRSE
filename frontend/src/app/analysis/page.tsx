@@ -1,16 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   listAnalysisColumns,
   listAnalysisTables,
   listColumnMetadata,
-  runRecordMatch,
+  runRecordMatchStream,
   type AgeUnit,
   type ColumnInfo,
   type ColumnMetadata,
   type RecordMatchRequest,
-  type RecordMatchResponse,
 } from "@/lib/analysisApi";
 import { AnalysisResultsGrid } from "@/components/AnalysisResultsGrid";
 
@@ -67,7 +66,19 @@ export default function AnalysisPage() {
 
   const [matchStatus, setMatchStatus] = useState<"idle" | "loading" | "ok" | "error">("idle");
   const [matchError, setMatchError] = useState<string | null>(null);
-  const [matchResult, setMatchResult] = useState<RecordMatchResponse | null>(null);
+  const [matchColumns, setMatchColumns] = useState<string[]>([]);
+  const [matchRows, setMatchRows] = useState<Record<string, unknown>[]>([]);
+  const [matchSql, setMatchSql] = useState("");
+  // True for the whole streaming lifecycle (first byte to last), not just the
+  // initial network round trip — drives the grid's "(loading more…)" caption
+  // and disables CSV/column-visibility until the result is actually complete.
+  const matchStreaming = matchStatus === "loading";
+
+  // Rows arrive one at a time over the stream; appending each straight into
+  // React state would mean an O(n) array copy per row (O(n^2) overall for a
+  // large match). Buffer them here and flush in batches on a timer instead.
+  const pendingRowsRef = useRef<Record<string, unknown>[]>([]);
+  const flushIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     listAnalysisTables()
@@ -157,6 +168,14 @@ export default function AnalysisPage() {
     return labels;
   }
 
+  function flushPendingRows() {
+    if (pendingRowsRef.current.length > 0) {
+      const batch = pendingRowsRef.current;
+      pendingRowsRef.current = [];
+      setMatchRows((prev) => [...prev, ...batch]);
+    }
+  }
+
   async function runMatch(withDedup: boolean) {
     const req = buildRequest(withDedup);
     if (!req) {
@@ -165,13 +184,41 @@ export default function AnalysisPage() {
     }
     setMatchStatus("loading");
     setMatchError(null);
+    setMatchColumns([]);
+    setMatchRows([]);
+    setMatchSql("");
+    pendingRowsRef.current = [];
+    if (flushIntervalRef.current !== null) {
+      clearInterval(flushIntervalRef.current);
+    }
+    flushIntervalRef.current = setInterval(flushPendingRows, 100);
+
     try {
-      const result = await runRecordMatch(req);
-      setMatchResult(result);
-      setMatchStatus("ok");
+      await runRecordMatchStream(req, {
+        onMeta: (meta) => {
+          setMatchColumns(meta.columns);
+          setMatchSql(meta.sql);
+        },
+        onRow: (row) => {
+          pendingRowsRef.current.push(row);
+        },
+        onDone: () => {
+          setMatchStatus("ok");
+        },
+        onError: (message) => {
+          setMatchError(message);
+          setMatchStatus("error");
+        },
+      });
     } catch (err: unknown) {
       setMatchError(err instanceof Error ? err.message : String(err));
       setMatchStatus("error");
+    } finally {
+      if (flushIntervalRef.current !== null) {
+        clearInterval(flushIntervalRef.current);
+        flushIntervalRef.current = null;
+      }
+      flushPendingRows();
     }
   }
 
@@ -393,13 +440,13 @@ export default function AnalysisPage() {
         </p>
       )}
 
-      {matchResult && (
+      {matchColumns.length > 0 && (
         <div style={{ marginTop: "1.5rem" }}>
           <AnalysisResultsGrid
-            columns={matchResult.columns}
-            rows={matchResult.rows}
-            sql={matchResult.sql}
-            capped={matchResult.capped}
+            columns={matchColumns}
+            rows={matchRows}
+            sql={matchSql}
+            streaming={matchStreaming}
             highlightDuplicates={highlightDuplicates}
             dedupAvailable={!!dedupColumn}
             dedupEnabled={dedupEnabled}

@@ -5,7 +5,7 @@ package gov.rajasthan.smart.srse.analysis;
  * {@link RecordMatchService} requires every criterion on the same side (all
  * Source, or all Target) to share the same {@code table} — a composite match
  * key of 1-N columns from one table, not an N-way join across tables — to
- * keep the underlying CROSS JOIN a simple two-table comparison.
+ * keep the underlying join a simple two-table comparison.
  *
  * {@code fuzzyThresholdPercent} is set on the Source-side criterion only
  * (0..100) and applies to that (source, target) column pair when either

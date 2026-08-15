@@ -4,6 +4,7 @@ import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.execution.GuardrailProperties;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadata;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadataRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -11,9 +12,14 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -23,7 +29,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -47,8 +56,10 @@ class RecordMatchServiceTest {
         throw new FieldResolver.UnknownFieldException(fieldKey);
     };
 
-    /** analysisRowCap=1000, queryTimeoutSeconds=30. */
-    private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30, 1000);
+    /** queryTimeoutSeconds=30. */
+    private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30);
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     private RecordMatchService service;
 
@@ -58,7 +69,7 @@ class RecordMatchServiceTest {
         // relies on falling back to the name-substring guess, unchanged.
         lenient().when(columnMetadata.findByTableNameAndColumnName(anyString(), anyString()))
                 .thenReturn(Optional.empty());
-        service = new RecordMatchService(jdbc, schemaService, guardrails, fieldResolver, columnMetadata);
+        service = new RecordMatchService(jdbc, schemaService, guardrails, fieldResolver, columnMetadata, objectMapper);
     }
 
     private static MatchCriterion exact(String table, String column) {
@@ -76,77 +87,75 @@ class RecordMatchServiceTest {
                 false, null, null);
     }
 
-    @Test
-    void exactColumnMatchEmitsEqualityNotFuzzy() {
-        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
+    private record Captured(String sql, Object[] params) {}
 
-        service.match(exactMatchRequest());
-
+    /** Executes the streamed body against a throwaway sink and captures the SQL/params bound to {@code jdbc.query}. */
+    private Captured runAndCapture(RecordMatchRequest req) throws Exception {
+        StreamingResponseBody body = service.match(req);
+        body.writeTo(new ByteArrayOutputStream());
         ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<Object[]> paramsCap = ArgumentCaptor.forClass(Object[].class);
-        verify(jdbc).queryForList(sqlCap.capture(), paramsCap.capture());
-        String sql = sqlCap.getValue();
-        assertTrue(sql.contains("src.district = tgt.district"), sql);
-        assertFalse(sql.contains("levenshtein_distance"), sql);
-        assertEquals(0, paramsCap.getValue().length);
+        verify(jdbc).query(sqlCap.capture(), paramsCap.capture(), any(RowCallbackHandler.class));
+        return new Captured(sqlCap.getValue(), paramsCap.getValue());
+    }
+
+    /** Executes the streamed body and returns the raw NDJSON bytes written, for wire-format assertions. */
+    private String writtenOutput(RecordMatchRequest req) throws Exception {
+        StreamingResponseBody body = service.match(req);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        body.writeTo(out);
+        return out.toString(StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void exactColumnMatchEmitsEqualityNotFuzzy() throws Exception {
+        Captured c = runAndCapture(exactMatchRequest());
+        assertTrue(c.sql().contains("src.district = tgt.district"), c.sql());
+        assertFalse(c.sql().contains("levenshtein_distance"), c.sql());
+        assertEquals(0, c.params().length);
         verify(jdbc).setQueryTimeout(30);
     }
 
     @Test
-    void nameColumnMatchEmitsFuzzySimilarityWithBoundThreshold() {
-        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
-
+    void nameColumnMatchEmitsFuzzySimilarityWithBoundThreshold() throws Exception {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "father_name", 75.0)),
                 List.of(exact("beneficiary", "father_name")),
                 false, null, null);
-        service.match(req);
-
-        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
-        ArgumentCaptor<Object[]> paramsCap = ArgumentCaptor.forClass(Object[].class);
-        verify(jdbc).queryForList(sqlCap.capture(), paramsCap.capture());
-        String sql = sqlCap.getValue();
-        assertTrue(sql.contains("levenshtein_distance(lower(src.father_name), lower(tgt.father_name))"), sql);
-        assertArrayEquals(new Object[]{0.75}, paramsCap.getValue());
+        Captured c = runAndCapture(req);
+        assertTrue(c.sql().contains("levenshtein_distance(lower(src.father_name), lower(tgt.father_name))"), c.sql());
+        assertArrayEquals(new Object[]{0.75}, c.params());
     }
 
     @Test
-    void registeredFuzzyOverrideAppliesToNonNameColumn() {
+    void registeredFuzzyOverrideAppliesToNonNameColumn() throws Exception {
         // "guardian" has no "name" substring — substring guess alone would
         // treat this as exact. A registered fuzzy=true entry must override it.
         when(columnMetadata.findByTableNameAndColumnName("beneficiary", "guardian"))
                 .thenReturn(Optional.of(new AnalysisColumnMetadata(1L, "beneficiary", "guardian", "Guardian", true)));
-        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
 
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "guardian", 70.0)),
                 List.of(exact("beneficiary", "guardian")),
                 false, null, null);
-        service.match(req);
-
-        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
-        verify(jdbc).queryForList(sqlCap.capture(), any(Object[].class));
-        assertTrue(sqlCap.getValue().contains("levenshtein_distance"), sqlCap.getValue());
+        Captured c = runAndCapture(req);
+        assertTrue(c.sql().contains("levenshtein_distance"), c.sql());
     }
 
     @Test
-    void registeredNonFuzzyOverrideAppliesToNameColumn() {
+    void registeredNonFuzzyOverrideAppliesToNameColumn() throws Exception {
         // "scheme_name" contains "name" — substring guess alone would fuzzy-
         // match it. A registered fuzzy=false entry must override that too.
         when(columnMetadata.findByTableNameAndColumnName("beneficiary", "scheme_name"))
                 .thenReturn(Optional.of(new AnalysisColumnMetadata(1L, "beneficiary", "scheme_name", "Scheme", false)));
-        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
 
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "scheme_name")),
                 List.of(exact("beneficiary", "scheme_name")),
                 false, null, null);
-        service.match(req);
-
-        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
-        verify(jdbc).queryForList(sqlCap.capture(), any(Object[].class));
-        assertTrue(sqlCap.getValue().contains("src.scheme_name = tgt.scheme_name"), sqlCap.getValue());
-        assertFalse(sqlCap.getValue().contains("levenshtein_distance"), sqlCap.getValue());
+        Captured c = runAndCapture(req);
+        assertTrue(c.sql().contains("src.scheme_name = tgt.scheme_name"), c.sql());
+        assertFalse(c.sql().contains("levenshtein_distance"), c.sql());
     }
 
     @Test
@@ -160,21 +169,24 @@ class RecordMatchServiceTest {
     }
 
     @Test
-    void addMoreProducesMultipleAndedCriteria() {
-        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
-
+    void addMoreProducesBlockingKeyAndEqualityInJoinOnFuzzyCheckInWhere() throws Exception {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "father_name", 80.0), exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "father_name"), exact("beneficiary", "district")),
                 false, null, null);
-        service.match(req);
+        String sql = runAndCapture(req).sql();
 
-        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
-        verify(jdbc).queryForList(sqlCap.capture(), any(Object[].class));
-        String sql = sqlCap.getValue();
-        assertTrue(sql.contains("levenshtein_distance"), sql);
-        assertTrue(sql.contains("src.district = tgt.district"), sql);
-        assertTrue(sql.contains(" AND "), sql);
+        int onIdx = sql.indexOf(" ON ");
+        int whereIdx = sql.indexOf(" WHERE ");
+        assertTrue(onIdx > 0 && whereIdx > onIdx, sql);
+        String onClause = sql.substring(onIdx, whereIdx);
+        String whereClause = sql.substring(whereIdx);
+
+        assertTrue(onClause.contains("substr(lower(src.father_name), 1, 3) = substr(lower(tgt.father_name), 1, 3)"), sql);
+        assertTrue(onClause.contains("src.district = tgt.district"), sql);
+        assertTrue(onClause.contains(" AND "), sql);
+        assertFalse(onClause.contains("levenshtein_distance"), sql);
+        assertTrue(whereClause.contains("levenshtein_distance"), sql);
     }
 
     @Test
@@ -208,58 +220,42 @@ class RecordMatchServiceTest {
     }
 
     @Test
-    void dedupWrapsQueryWithRowNumberPartitionedBySourceColumns() {
-        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
-
+    void dedupWrapsQueryWithRowNumberPartitionedBySourceColumns() throws Exception {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
                 false, new DedupSpec("beneficiary", "last_refreshed_at"), null);
-        service.match(req);
+        String sql = runAndCapture(req).sql();
 
-        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
-        verify(jdbc).queryForList(sqlCap.capture(), any(Object[].class));
-        String sql = sqlCap.getValue();
         assertTrue(sql.contains("ROW_NUMBER() OVER"), sql);
         assertTrue(sql.contains("PARTITION BY \"source_district\""), sql);
         assertTrue(sql.contains("WHERE rn = 1"), sql);
     }
 
     @Test
-    void ageFilterResolvesAgeYearsAndBindsBothSides() {
-        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
-
+    void ageFilterResolvesAgeYearsAndBindsBothSides() throws Exception {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
                 false, null,
                 new AgeFilterSpec(18, 60, "YEARS"));
-        service.match(req);
+        Captured c = runAndCapture(req);
 
-        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
-        ArgumentCaptor<Object[]> paramsCap = ArgumentCaptor.forClass(Object[].class);
-        verify(jdbc).queryForList(sqlCap.capture(), paramsCap.capture());
-        String sql = sqlCap.getValue();
-        assertTrue(sql.contains("src.age_years BETWEEN ? AND ?"), sql);
-        assertTrue(sql.contains("tgt.age_years BETWEEN ? AND ?"), sql);
+        assertTrue(c.sql().contains("src.age_years BETWEEN ? AND ?"), c.sql());
+        assertTrue(c.sql().contains("tgt.age_years BETWEEN ? AND ?"), c.sql());
         // district=district is exact (no param); age filter adds 2+2 bounds (src, tgt).
-        assertArrayEquals(new Object[]{18.0, 60.0, 18.0, 60.0}, paramsCap.getValue());
+        assertArrayEquals(new Object[]{18.0, 60.0, 18.0, 60.0}, c.params());
     }
 
     @Test
-    void ageFilterConvertsMonthsAndDaysToFractionalYears() {
-        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
-
+    void ageFilterConvertsMonthsAndDaysToFractionalYears() throws Exception {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
                 false, null,
                 new AgeFilterSpec(12, 24, "MONTHS"));
-        service.match(req);
-
-        ArgumentCaptor<Object[]> paramsCap = ArgumentCaptor.forClass(Object[].class);
-        verify(jdbc).queryForList(anyString(), paramsCap.capture());
-        assertArrayEquals(new Object[]{1.0, 2.0, 1.0, 2.0}, paramsCap.getValue());
+        Captured c = runAndCapture(req);
+        assertArrayEquals(new Object[]{1.0, 2.0, 1.0, 2.0}, c.params());
     }
 
     @Test
@@ -285,30 +281,53 @@ class RecordMatchServiceTest {
     }
 
     @Test
-    void reportsCappedWhenResultHitsRowCap() {
-        List<Map<String, Object>> full = new java.util.ArrayList<>();
-        for (int i = 0; i < 1000; i++) {
-            full.add(Map.of("source_district", "Jaipur"));
-        }
-        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(full);
+    void streamsMultipleRowsAsSeparateNdjsonLinesFollowedByDone() throws Exception {
+        ResultSet rs = mock(ResultSet.class);
+        ResultSetMetaData md = mock(ResultSetMetaData.class);
+        when(rs.getMetaData()).thenReturn(md);
+        when(md.getColumnCount()).thenReturn(1);
+        when(md.getColumnLabel(1)).thenReturn("source_district");
+        when(rs.getObject(1)).thenReturn("Jaipur");
 
-        RecordMatchResponse resp = service.match(exactMatchRequest());
+        doAnswer(invocation -> {
+            RowCallbackHandler handler = invocation.getArgument(2);
+            handler.processRow(rs);
+            handler.processRow(rs);
+            handler.processRow(rs);
+            return null;
+        }).when(jdbc).query(anyString(), any(Object[].class), any(RowCallbackHandler.class));
 
-        assertTrue(resp.capped());
-        assertEquals(1000, resp.rows().size());
+        String[] lines = writtenOutput(exactMatchRequest()).strip().split("\n");
+
+        assertEquals(5, lines.length, String.join("\n", lines)); // meta + 3 rows + done
+        assertTrue(lines[0].contains("\"type\":\"meta\""), lines[0]);
+        assertTrue(lines[1].contains("\"type\":\"row\""), lines[1]);
+        assertTrue(lines[2].contains("\"type\":\"row\""), lines[2]);
+        assertTrue(lines[3].contains("\"type\":\"row\""), lines[3]);
+        assertTrue(lines[4].contains("\"type\":\"done\""), lines[4]);
+        assertTrue(lines[4].contains("\"totalRows\":3"), lines[4]);
     }
 
     @Test
-    void displaySqlHasNoRemainingPlaceholders() {
-        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
+    void queryFailureProducesErrorLineInsteadOfPropagating() throws Exception {
+        doThrow(new RuntimeException("presto timeout"))
+                .when(jdbc).query(anyString(), any(Object[].class), any(RowCallbackHandler.class));
 
+        String output = writtenOutput(exactMatchRequest());
+        assertTrue(output.contains("\"type\":\"error\""), output);
+        assertTrue(output.contains("presto timeout"), output);
+    }
+
+    @Test
+    void displaySqlHasNoRemainingPlaceholders() throws Exception {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "father_name", 75.0)),
                 List.of(exact("beneficiary", "father_name")),
                 false, null, null);
-        RecordMatchResponse resp = service.match(req);
+        String output = writtenOutput(req);
+        String metaLine = output.strip().split("\n")[0];
 
-        assertFalse(resp.sql().contains("?"), resp.sql());
-        assertTrue(resp.sql().contains("0.75"), resp.sql());
+        assertFalse(metaLine.contains("?"), metaLine);
+        assertTrue(metaLine.contains("0.75"), metaLine);
     }
 }

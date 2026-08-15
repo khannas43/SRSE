@@ -1,14 +1,20 @@
 package gov.rajasthan.smart.srse.analysis;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.compiler.FuzzyMatchSql;
 import gov.rajasthan.smart.srse.execution.GuardrailProperties;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadata;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadataRepository;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.jdbc.core.ColumnMapRowMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -36,20 +42,44 @@ import java.util.Set;
  *  - Read-only. No write/DELETE capability. "Dedup" is view-only — it
  *    collapses duplicate rows in the returned grid, never touches the
  *    lakehouse.
- *  - Result rows are always capped at {@link GuardrailProperties#analysisRowCap()}.
- *  - Each side of the underlying CROSS JOIN is itself pre-capped at
- *    {@link #JOIN_INPUT_CAP} rows before comparison — a fuzzy cross-table
- *    compare is inherently O(n*m); without this, a self-match against the
- *    full table would attempt a full n^2 comparison and risk the same kind
- *    of Presto OOM this session already hit once on a much smaller insert
- *    workload. This caps *input* rows per side, not the officer-visible
- *    result — real client-scale matching will need a smarter blocking key,
- *    tracked as a follow-up, not solved here.
+ *  - The join runs across the FULL source/target tables — no row cap, no
+ *    input sampling. An earlier version pre-sampled each side to a top-500
+ *    slice before a CROSS JOIN; at real (crore-scale) row counts that made
+ *    matches nearly impossible to find (an arbitrary ~0.0005% slice per
+ *    side), silently. Instead, every criterion pair becomes part of the
+ *    JOIN's ON clause: exact pairs join on equality directly; fuzzy pairs
+ *    join on a {@link #BLOCKING_PREFIX_LEN}-character case-insensitive
+ *    prefix ("blocking key" — standard record-linkage technique), with the
+ *    real Levenshtein-similarity check applied afterward as a WHERE filter
+ *    only within already-blocked candidate pairs. This trades a small,
+ *    documented amount of recall (a typo in the first {@link #BLOCKING_PREFIX_LEN}
+ *    characters of a fuzzy column can be missed) for the join being a real
+ *    hash join Presto can execute at scale, instead of a nested-loop cross
+ *    product over a token sample.
+ *  - There is no output row cap either (removed {@code SRSE_ANALYSIS_ROW_CAP}
+ *    deliberately) — the only remaining safety net against a runaway/badly
+ *    blocked match is {@link GuardrailProperties#queryTimeoutSeconds()}.
+ *    Results stream to the client as they're produced (see below), so a
+ *    timeout mid-match still leaves whatever rows already streamed visible.
+ *  - {@link #match} returns a {@link StreamingResponseBody}: request
+ *    validation and SQL/param construction happen synchronously (so bad
+ *    requests still fail fast with a normal exception before any response
+ *    is written), but the JDBC query itself executes lazily, inside the
+ *    body-writing callback, streaming one newline-delimited JSON line per
+ *    row via {@link RowCallbackHandler} — never materializing the full
+ *    result as an in-memory list.
  */
 @Service
 public class RecordMatchService {
 
-    private static final int JOIN_INPUT_CAP = 500;
+    /**
+     * Prefix length (case-insensitive, characters) used as the equi-join
+     * blocking key for fuzzy criterion pairs. Chosen as a pragmatic default,
+     * not derived from data — a longer prefix narrows candidate pairs
+     * further (cheaper) but misses more early-character typos; a shorter one
+     * is more forgiving but blocks fewer candidates out.
+     */
+    private static final int BLOCKING_PREFIX_LEN = 3;
     private static final int MAX_CRITERIA_PER_SIDE = 8;
     private static final Set<String> AGE_UNITS = Set.of("DAYS", "MONTHS", "YEARS");
 
@@ -58,20 +88,23 @@ public class RecordMatchService {
     private final GuardrailProperties guardrails;
     private final FieldResolver fields;
     private final AnalysisColumnMetadataRepository columnMetadata;
+    private final ObjectMapper objectMapper;
 
     public RecordMatchService(@Qualifier("prestoJdbcTemplate") JdbcTemplate jdbc,
                               AnalysisSchemaService schemaService,
                               GuardrailProperties guardrails,
                               FieldResolver fields,
-                              AnalysisColumnMetadataRepository columnMetadata) {
+                              AnalysisColumnMetadataRepository columnMetadata,
+                              ObjectMapper objectMapper) {
         this.jdbc = jdbc;
         this.schemaService = schemaService;
         this.guardrails = guardrails;
         this.fields = fields;
         this.columnMetadata = columnMetadata;
+        this.objectMapper = objectMapper;
     }
 
-    public RecordMatchResponse match(RecordMatchRequest req) {
+    public StreamingResponseBody match(RecordMatchRequest req) {
         String sourceTable = validateSide(req.sourceCriteria(), "sourceCriteria");
         String targetTable = validateSide(req.targetCriteria(), "targetCriteria");
         if (req.sourceCriteria().size() != req.targetCriteria().size()) {
@@ -93,6 +126,7 @@ public class RecordMatchService {
         List<Object> params = new ArrayList<>();
         Set<String> outerColumns = new LinkedHashSet<>();
         StringBuilder select = new StringBuilder();
+        StringBuilder onClause = new StringBuilder();
         StringBuilder where = new StringBuilder();
 
         for (MatchCriterion c : req.sourceCriteria()) {
@@ -108,8 +142,8 @@ public class RecordMatchService {
             String srcCol = "src." + sc.column();
             String tgtCol = "tgt." + tc.column();
             boolean isNameColumn = isFuzzyMatchable(sc, tc);
-            if (where.length() > 0) {
-                where.append(" AND ");
+            if (onClause.length() > 0) {
+                onClause.append(" AND ");
             }
             if (isNameColumn) {
                 if (sc.fuzzyThresholdPercent() == null) {
@@ -120,10 +154,14 @@ public class RecordMatchService {
                 if (threshold < 0 || threshold > 100) {
                     throw new IllegalArgumentException("fuzzyThresholdPercent must be between 0 and 100");
                 }
+                onClause.append(blockingKeyExpr(srcCol)).append(" = ").append(blockingKeyExpr(tgtCol));
+                if (where.length() > 0) {
+                    where.append(" AND ");
+                }
                 where.append(FuzzyMatchSql.similarityExpr(srcCol, tgtCol)).append(" >= ?");
                 params.add(threshold / 100.0);
             } else {
-                where.append(srcCol).append(" = ").append(tgtCol);
+                onClause.append(srcCol).append(" = ").append(tgtCol);
             }
         }
         if (where.length() == 0) {
@@ -171,9 +209,8 @@ public class RecordMatchService {
             params.add(maxYears);
         }
 
-        String srcSub = "(SELECT * FROM " + sourceTable + " LIMIT " + JOIN_INPUT_CAP + ") src";
-        String tgtSub = "(SELECT * FROM " + targetTable + " LIMIT " + JOIN_INPUT_CAP + ") tgt";
-        String baseSql = "SELECT " + select + " FROM " + srcSub + " CROSS JOIN " + tgtSub + " WHERE " + where;
+        String baseSql = "SELECT " + select + " FROM " + sourceTable + " src JOIN " + targetTable
+                + " tgt ON " + onClause + " WHERE " + where;
 
         String finalSql;
         if (req.dedup() != null) {
@@ -182,19 +219,47 @@ public class RecordMatchService {
                     .reduce((a, b) -> a + ", " + b).orElseThrow();
             finalSql = "SELECT * FROM (SELECT base.*, ROW_NUMBER() OVER ("
                     + "PARTITION BY " + partitionCols + " ORDER BY \"" + dedupAlias + "\" DESC) AS rn "
-                    + "FROM (" + baseSql + ") base) ranked WHERE rn = 1 LIMIT " + guardrails.analysisRowCap();
+                    + "FROM (" + baseSql + ") base) ranked WHERE rn = 1";
         } else {
-            finalSql = baseSql + " LIMIT " + guardrails.analysisRowCap();
+            finalSql = baseSql;
         }
 
-        jdbc.setQueryTimeout(guardrails.queryTimeoutSeconds());
-        List<Map<String, Object>> rows = jdbc.queryForList(finalSql, params.toArray());
+        List<String> columns = List.copyOf(outerColumns);
+        String displaySql = renderForDisplay(finalSql, params);
 
-        return new RecordMatchResponse(
-                List.copyOf(outerColumns),
-                rows,
-                renderForDisplay(finalSql, params),
-                rows.size() >= guardrails.analysisRowCap());
+        return outputStream -> {
+            writeLine(outputStream, Map.of("type", "meta", "columns", columns, "sql", displaySql));
+            try {
+                jdbc.setQueryTimeout(guardrails.queryTimeoutSeconds());
+                ColumnMapRowMapper rowMapper = new ColumnMapRowMapper();
+                long[] totalRows = {0};
+                jdbc.query(finalSql, params.toArray(), (RowCallbackHandler) rs -> {
+                    Map<String, Object> row = rowMapper.mapRow(rs, 0);
+                    try {
+                        writeLine(outputStream, Map.of("type", "row", "data", row));
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e);
+                    }
+                    totalRows[0]++;
+                });
+                writeLine(outputStream, Map.of("type", "done", "totalRows", totalRows[0]));
+            } catch (UncheckedIOException e) {
+                throw e.getCause();
+            } catch (Exception e) {
+                String message = e.getMessage() != null ? e.getMessage() : e.toString();
+                writeLine(outputStream, Map.of("type", "error", "message", message));
+            }
+        };
+    }
+
+    private void writeLine(java.io.OutputStream out, Map<String, Object> payload) throws IOException {
+        out.write(objectMapper.writeValueAsBytes(payload));
+        out.write('\n');
+        out.flush();
+    }
+
+    private static String blockingKeyExpr(String columnRef) {
+        return "substr(lower(" + columnRef + "), 1, " + BLOCKING_PREFIX_LEN + ")";
     }
 
     private String buildMatchScoreExpr(RecordMatchRequest req) {

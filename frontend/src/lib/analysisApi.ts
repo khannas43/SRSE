@@ -62,13 +62,6 @@ export type RecordMatchRequest = {
   ageFilter: AgeFilterSpec | null;
 };
 
-export type RecordMatchResponse = {
-  columns: string[];
-  rows: Record<string, unknown>[];
-  sql: string;
-  capped: boolean;
-};
-
 export async function listAnalysisTables(): Promise<string[]> {
   const res = await authorizedFetch(`${API_BASE}/api/analysis/tables`, { credentials: "include" });
   if (!res.ok) {
@@ -88,7 +81,22 @@ export async function listAnalysisColumns(table: string): Promise<ColumnInfo[]> 
   return res.json();
 }
 
-export async function runRecordMatch(req: RecordMatchRequest): Promise<RecordMatchResponse> {
+export type RecordMatchStreamHandlers = {
+  onMeta: (meta: { columns: string[]; sql: string }) => void;
+  onRow: (row: Record<string, unknown>) => void;
+  onDone: (totalRows: number) => void;
+  onError: (message: string) => void;
+};
+
+// The match result is no longer a single buffered JSON object — the backend
+// streams newline-delimited JSON (one "meta" line, then one "row" line per
+// match, then a "done" or "error" line) so the officer sees the first rows
+// almost immediately instead of waiting for the whole (now uncapped) result.
+// See RecordMatchService's javadoc on the backend for why.
+export async function runRecordMatchStream(
+  req: RecordMatchRequest,
+  handlers: RecordMatchStreamHandlers,
+): Promise<void> {
   const res = await authorizedFetch(`${API_BASE}/api/analysis/match`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -98,7 +106,54 @@ export async function runRecordMatch(req: RecordMatchRequest): Promise<RecordMat
   if (!res.ok) {
     throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
   }
-  return res.json();
+  if (!res.body) {
+    throw new Error("Analysis service error: streaming response has no body");
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  function handleLine(line: string) {
+    if (!line.trim()) {
+      return;
+    }
+    const event = JSON.parse(line) as
+      | { type: "meta"; columns: string[]; sql: string }
+      | { type: "row"; data: Record<string, unknown> }
+      | { type: "done"; totalRows: number }
+      | { type: "error"; message: string };
+    switch (event.type) {
+      case "meta":
+        handlers.onMeta({ columns: event.columns, sql: event.sql });
+        break;
+      case "row":
+        handlers.onRow(event.data);
+        break;
+      case "done":
+        handlers.onDone(event.totalRows);
+        break;
+      case "error":
+        handlers.onError(event.message);
+        break;
+    }
+  }
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex: number;
+    while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+      handleLine(buffer.slice(0, newlineIndex));
+      buffer = buffer.slice(newlineIndex + 1);
+    }
+  }
+  if (buffer.trim()) {
+    handleLine(buffer);
+  }
 }
 
 // Admin-managed business name / fuzzy-matchable override per physical
