@@ -1,34 +1,70 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  listAnalysisCatalogs,
   listAnalysisColumns,
+  listAnalysisSchemas,
   listAnalysisTables,
   listColumnMetadata,
+  qualifiedTableName,
   runRecordMatchStream,
   type AgeUnit,
-  type ColumnInfo,
   type ColumnMetadata,
   type RecordMatchRequest,
+  type RegisteredColumn,
+  type TableRef,
 } from "@/lib/analysisApi";
 import { AnalysisResultsGrid } from "@/components/AnalysisResultsGrid";
+import LakehouseCascade, {
+  EMPTY_CASCADE,
+  isCascadeComplete,
+  type CascadeFetchers,
+  type CascadeValue,
+} from "@/components/LakehouseCascade";
 
 const fieldLabelStyle = { display: "block", marginBottom: "0.3rem", fontSize: "0.82rem" } as const;
 
+/**
+ * The officer's cascade is backed by the REGISTRY, not the live cluster —
+ * every level offers only what an admin registered on the Admin page. (The
+ * Admin page passes live-browse fetchers to this same component; see
+ * LakehouseCascade's javadoc.)
+ */
+const REGISTRY_FETCHERS: CascadeFetchers = {
+  listCatalogs: listAnalysisCatalogs,
+  listSchemas: listAnalysisSchemas,
+  listTables: listAnalysisTables,
+};
+
+// A picked table is now a three-part address, not a name: with the Silver and
+// Gold layers both registered, the same table name exists under more than one
+// catalog, so every comparison and metadata lookup keys on all three parts.
 type CriterionRow = {
   id: string;
-  table: string;
+  ref: CascadeValue;
   column: string;
-  columns: ColumnInfo[];
+  columns: RegisteredColumn[];
   fuzzyThresholdPercent: number;
 };
 
 function createEmptyRow(): CriterionRow {
-  return { id: crypto.randomUUID(), table: "", column: "", columns: [], fuzzyThresholdPercent: 80 };
+  return {
+    id: crypto.randomUUID(),
+    ref: EMPTY_CASCADE,
+    column: "",
+    columns: [],
+    fuzzyThresholdPercent: 80,
+  };
 }
 
-function metadataKey(table: string, column: string): string {
-  return `${table}.${column}`;
+function metadataKey(ref: TableRef, column: string): string {
+  return `${qualifiedTableName(ref)}.${column}`;
+}
+
+/** A row is usable only once all four levels are picked. */
+function isRowFilled(row: CriterionRow): boolean {
+  return isCascadeComplete(row.ref) && Boolean(row.column);
 }
 
 function isNameColumn(column: string): boolean {
@@ -39,7 +75,7 @@ function isNameColumn(column: string): boolean {
 // column picker, checked in priority order against the Target table's columns.
 const LAST_UPDATED_HINTS = ["updated", "refresh", "modified", "date"];
 
-function detectLastUpdatedColumn(columns: ColumnInfo[]): string | null {
+function detectLastUpdatedColumn(columns: RegisteredColumn[]): string | null {
   for (const hint of LAST_UPDATED_HINTS) {
     const match = columns.find((c) => c.name.toLowerCase().includes(hint));
     if (match) return match.name;
@@ -62,34 +98,33 @@ type CriterionBoxProps = Readonly<{
   title: string;
   boxId: string;
   rows: CriterionRow[];
-  tables: string[];
   showFuzzy: boolean;
   pairedRows?: CriterionRow[];
-  isFuzzyMatchable: (table: string, column: string) => boolean;
-  businessNameFor: (table: string, column: string) => string | null;
-  onTableChange: (rowId: string, table: string) => void;
+  isFuzzyMatchable: (ref: TableRef, column: string) => boolean;
+  businessNameFor: (ref: TableRef, column: string) => string | null;
+  onTableChange: (rowId: string, ref: CascadeValue) => void;
   onColumnChange: (rowId: string, column: string) => void;
   onFuzzyChange: (rowId: string, value: number) => void;
   onRemove: (rowId: string) => void;
   onAdd: () => void;
+  onError: (message: string) => void;
 }>;
 
 function rowShowsFuzzy(
   row: CriterionRow,
   index: number,
   pairedRows: CriterionRow[] | undefined,
-  isFuzzyMatchable: (table: string, column: string) => boolean,
+  isFuzzyMatchable: (ref: TableRef, column: string) => boolean,
 ): boolean {
-  if (isFuzzyMatchable(row.table, row.column)) return true;
+  if (isFuzzyMatchable(row.ref, row.column)) return true;
   const paired = pairedRows?.[index];
-  return paired ? isFuzzyMatchable(paired.table, paired.column) : false;
+  return paired ? isFuzzyMatchable(paired.ref, paired.column) : false;
 }
 
 function CriterionBox({
   title,
   boxId,
   rows,
-  tables,
   showFuzzy,
   pairedRows,
   isFuzzyMatchable,
@@ -99,12 +134,13 @@ function CriterionBox({
   onFuzzyChange,
   onRemove,
   onAdd,
+  onError,
 }: CriterionBoxProps) {
   return (
     <section className="srse-card" style={{ flex: "1 1 380px" }}>
       <h2 className="srse-card-title">{title}</h2>
       <p className="srse-text-muted" style={{ fontSize: "0.82rem", marginTop: 0 }}>
-        Based on schema of Lakehouse
+        Catalog › Schema › Table › Column — registered lakehouse tables only
       </p>
 
       {rows.map((row, index) => (
@@ -120,24 +156,14 @@ function CriterionBox({
             borderBottom: index === rows.length - 1 ? "none" : "1px solid var(--srse-border)",
           }}
         >
-          <div style={{ flex: "1 1 150px" }}>
-            <label htmlFor={`${boxId}-table-${row.id}`} className="srse-text-muted" style={fieldLabelStyle}>
-              Table
-            </label>
-            <select
-              id={`${boxId}-table-${row.id}`}
-              className="srse-select"
-              style={{ width: "100%" }}
-              value={row.table}
-              onChange={(e) => onTableChange(row.id, e.target.value)}
-            >
-              <option value="">— select —</option>
-              {tables.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
+          <div style={{ flex: "1 1 100%" }}>
+            <LakehouseCascade
+              value={row.ref}
+              onChange={(ref) => onTableChange(row.id, ref)}
+              fetchers={REGISTRY_FETCHERS}
+              idPrefix={`${boxId}-${row.id}`}
+              onError={onError}
+            />
           </div>
           <div style={{ flex: "1 1 150px" }}>
             <label htmlFor={`${boxId}-column-${row.id}`} className="srse-text-muted" style={fieldLabelStyle}>
@@ -149,12 +175,12 @@ function CriterionBox({
               style={{ width: "100%" }}
               value={row.column}
               onChange={(e) => onColumnChange(row.id, e.target.value)}
-              disabled={!row.table}
+              disabled={!isCascadeComplete(row.ref)}
             >
               <option value="">— select —</option>
               {row.columns.map((c) => (
                 <option key={c.name} value={c.name}>
-                  {businessNameFor(row.table, c.name) ?? c.name}
+                  {businessNameFor(row.ref, c.name) ?? c.name}
                 </option>
               ))}
             </select>
@@ -197,7 +223,6 @@ function CriterionBox({
 }
 
 export default function AnalysisPage() {
-  const [tables, setTables] = useState<string[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [columnMetadata, setColumnMetadata] = useState<Map<string, ColumnMetadata>>(new Map());
 
@@ -240,35 +265,39 @@ export default function AnalysisPage() {
   const rowsSeenRef = useRef(0);
 
   useEffect(() => {
-    listAnalysisTables()
-      .then(setTables)
-      .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
+    // The table list is no longer fetched here — each CriterionBox's cascade
+    // loads its own levels from the registry on demand.
     listColumnMetadata()
-      .then((entries) => setColumnMetadata(new Map(entries.map((e) => [metadataKey(e.table, e.column), e]))))
+      .then((entries) => setColumnMetadata(new Map(entries.map((e) => [metadataKey(e, e.column), e]))))
       .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
   }, []);
+
+  const reportError = useCallback((message: string) => setLoadError(message), []);
 
   // Admin-registered override takes precedence, on either side of the pair
   // it's used for — same fallback order as the backend (RecordMatchService),
   // so the UI's Fuzzy % control and the actual query never disagree.
-  function isFuzzyMatchable(table: string, column: string): boolean {
-    const entry = columnMetadata.get(metadataKey(table, column));
+  function isFuzzyMatchable(ref: TableRef, column: string): boolean {
+    const entry = columnMetadata.get(metadataKey(ref, column));
     return entry ? entry.fuzzyMatchable : isNameColumn(column);
   }
 
-  function businessNameFor(table: string, column: string): string | null {
-    return columnMetadata.get(metadataKey(table, column))?.businessName ?? null;
+  function businessNameFor(ref: TableRef, column: string): string | null {
+    return columnMetadata.get(metadataKey(ref, column))?.businessName ?? null;
   }
 
   async function handleTableChange(
     setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>,
     rowId: string,
-    table: string,
+    ref: CascadeValue,
   ) {
-    setRows((rows) => updateRowById(rows, rowId, { table, column: "", columns: [] }));
-    if (!table) return;
+    // Clearing the column alongside the table matters more than it used to:
+    // changing only the catalog can leave a column name that exists in both
+    // layers, which would submit a valid-looking but wrong reference.
+    setRows((rows) => updateRowById(rows, rowId, { ref, column: "", columns: [] }));
+    if (!isCascadeComplete(ref)) return;
     try {
-      const cols = await listAnalysisColumns(table);
+      const cols = await listAnalysisColumns(ref);
       setRows((rows) => updateRowById(rows, rowId, { columns: cols }));
     } catch (err: unknown) {
       setLoadError(err instanceof Error ? err.message : String(err));
@@ -296,28 +325,30 @@ export default function AnalysisPage() {
   }
 
   function buildRequest(withDedup: boolean): RecordMatchRequest | null {
-    const filledSource = sourceRows.filter((r) => r.table && r.column);
-    const filledTarget = targetRows.filter((r) => r.table && r.column);
+    const filledSource = sourceRows.filter(isRowFilled);
+    const filledTarget = targetRows.filter(isRowFilled);
     const n = Math.min(filledSource.length, filledTarget.length);
     if (n === 0) return null;
+    const dedupRef = targetRows[0]?.ref;
     return {
       sourceCriteria: filledSource.slice(0, n).map((r, i) => ({
-        table: r.table,
+        ...r.ref,
         column: r.column,
         fuzzyThresholdPercent:
-          isFuzzyMatchable(r.table, r.column) || isFuzzyMatchable(filledTarget[i].table, filledTarget[i].column)
+          isFuzzyMatchable(r.ref, r.column) || isFuzzyMatchable(filledTarget[i].ref, filledTarget[i].column)
             ? r.fuzzyThresholdPercent
             : null,
       })),
       targetCriteria: filledTarget.slice(0, n).map((r) => ({
-        table: r.table,
+        ...r.ref,
         column: r.column,
         fuzzyThresholdPercent: null,
       })),
       highlightDuplicates,
-      dedup: withDedup && dedupColumn && targetRows[0]?.table
-        ? { table: targetRows[0].table, column: dedupColumn }
-        : null,
+      dedup:
+        withDedup && dedupColumn && dedupRef && isCascadeComplete(dedupRef)
+          ? { ...dedupRef, column: dedupColumn }
+          : null,
       ageFilter: ageFilterEnabled ? { minAge, maxAge, unit: ageUnit } : null,
     };
   }
@@ -325,11 +356,11 @@ export default function AnalysisPage() {
   function buildColumnLabels(): Record<string, string> {
     const labels: Record<string, string> = {};
     for (const r of sourceRows) {
-      const bn = r.table && r.column ? businessNameFor(r.table, r.column) : null;
+      const bn = isRowFilled(r) ? businessNameFor(r.ref, r.column) : null;
       if (bn) labels[`source_${r.column}`] = `Source: ${bn}`;
     }
     for (const r of targetRows) {
-      const bn = r.table && r.column ? businessNameFor(r.table, r.column) : null;
+      const bn = isRowFilled(r) ? businessNameFor(r.ref, r.column) : null;
       if (bn) labels[`target_${r.column}`] = `Target: ${bn}`;
     }
     return labels;
@@ -438,30 +469,30 @@ export default function AnalysisPage() {
           title="Select Source"
           boxId="source"
           rows={sourceRows}
-          tables={tables}
           showFuzzy
           pairedRows={targetRows}
           isFuzzyMatchable={isFuzzyMatchable}
           businessNameFor={businessNameFor}
-          onTableChange={(rowId, table) => handleTableChange(setSourceRows, rowId, table)}
+          onTableChange={(rowId, ref) => handleTableChange(setSourceRows, rowId, ref)}
           onColumnChange={(rowId, column) => handleColumnChange(setSourceRows, rowId, column)}
           onFuzzyChange={(rowId, value) => handleFuzzyChange(setSourceRows, rowId, value)}
           onRemove={(rowId) => handleRemoveRow(setSourceRows, rowId)}
           onAdd={() => setSourceRows((rs) => [...rs, createEmptyRow()])}
+          onError={reportError}
         />
         <CriterionBox
           title="Select Target"
           boxId="target"
           rows={targetRows}
-          tables={tables}
           showFuzzy={false}
           isFuzzyMatchable={isFuzzyMatchable}
           businessNameFor={businessNameFor}
-          onTableChange={(rowId, table) => handleTableChange(setTargetRows, rowId, table)}
+          onTableChange={(rowId, ref) => handleTableChange(setTargetRows, rowId, ref)}
           onColumnChange={(rowId, column) => handleColumnChange(setTargetRows, rowId, column)}
           onFuzzyChange={(rowId, value) => handleFuzzyChange(setTargetRows, rowId, value)}
           onRemove={(rowId) => handleRemoveRow(setTargetRows, rowId)}
           onAdd={() => setTargetRows((rs) => [...rs, createEmptyRow()])}
+          onError={reportError}
         />
       </div>
 

@@ -170,4 +170,51 @@ class ExecutionServiceTest {
         verify(jdbc).queryForList(anyString(), paramsCap.capture());
         assertArrayEquals(new Object[]{18, 25}, paramsCap.getValue());
     }
+
+    // ---- fully-qualified Golden Layer mappings ----
+
+    /**
+     * With the lakehouse mapped across multiple catalogs and schemas, an
+     * admin binds a catalogue field to a FULLY-QUALIFIED
+     * {@code catalog.schema.table.column}. resolveTable() must then yield
+     * {@code catalog.schema.table} — dropping only the column — or the
+     * count/breakdown queries would name a table that does not exist.
+     */
+    @Test
+    void derivesTheQualifiedTableFromAQualifiedMapping() {
+        FieldResolver qualified = fieldKey -> {
+            if ("age_years".equals(fieldKey) || "district".equals(fieldKey) || "gender".equals(fieldKey)) {
+                return "iceberg_gold.golden_layer.tbl_beneficiary." + fieldKey;
+            }
+            throw new FieldResolver.UnknownFieldException(fieldKey);
+        };
+        ExecutionService qualifiedService = new ExecutionService(
+                new RuleCompiler(qualified), jdbc, guardrails, qualified, "age_band");
+        when(jdbc.queryForObject(anyString(), eq(Long.class), ArgumentMatchers.<Object[]>any()))
+                .thenReturn(42L);
+
+        assertEquals(42L, qualifiedService.count(ageGte18()));
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).queryForObject(sql.capture(), eq(Long.class), ArgumentMatchers.<Object[]>any());
+        assertTrue(sql.getValue().contains("FROM iceberg_gold.golden_layer.tbl_beneficiary WHERE"),
+                sql.getValue());
+    }
+
+    @Test
+    void breakdownQualifiesTheAgeBandColumnWithTheFullTablePath() {
+        FieldResolver qualified = fieldKey -> "iceberg_gold.golden_layer.tbl_beneficiary." + fieldKey;
+        ExecutionService qualifiedService = new ExecutionService(
+                new RuleCompiler(qualified), jdbc, guardrails, qualified, "age_band");
+        when(jdbc.query(anyString(), ArgumentMatchers.<RowMapper<BreakdownRow>>any(),
+                ArgumentMatchers.<Object[]>any())).thenReturn(List.of());
+
+        qualifiedService.breakdown(ageGte18());
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).query(sql.capture(), ArgumentMatchers.<RowMapper<BreakdownRow>>any(),
+                ArgumentMatchers.<Object[]>any());
+        assertTrue(sql.getValue().contains(
+                "iceberg_gold.golden_layer.tbl_beneficiary.age_band AS age_band"), sql.getValue());
+    }
 }

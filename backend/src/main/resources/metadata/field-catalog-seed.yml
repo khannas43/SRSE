@@ -6,6 +6,19 @@
 # Lovadeep's Golden Layer column names (CLAUDE.md open items) — swap them here
 # once confirmed; no Java code or SQL needs to change.
 #
+# LIVE expressions must be FULLY QUALIFIED —
+# `<catalog>.<schema>.<table>.<column>`, e.g.
+# `iceberg_gold.golden_layer.tbl_beneficiary.age_years`. SRSE now maps several
+# catalogs and schemas at once (Silver and Gold layers), so the connection has
+# no single implicit catalog/schema to fall back on; a bare `table.column`
+# resolves only if the JDBC URL still carries a default catalog/schema, which
+# is true locally but NOT guaranteed in client Dev. The CHANGE_ME placeholders
+# below deliberately keep the bare shape so they fail loudly rather than
+# silently querying the wrong layer.
+#
+# The Admin page's Catalog -> Schema -> Table -> Column cascade writes these
+# in qualified form, so in practice only this seed file needs hand-editing.
+#
 # `groupName` drives the officer-facing rule-builder's parameter grouping.
 # `allowedValues` (STRING fields only) drives the multi-select option list —
 # leave unset for NUMBER/BOOLEAN fields, whose UI control is derived from

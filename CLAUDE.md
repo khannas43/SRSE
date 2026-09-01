@@ -55,6 +55,56 @@ calculation. Three field tiers:
 
 New cross-table need ⇒ one-time data-engineering step to add the flat column FIRST.
 
+## Lakehouse addressing: Catalog → Schema → Table → Column (load-bearing)
+
+SRSE addresses lakehouse objects by their **full four-part path**. A bare table
+name is NOT an address: the deployment maps at least two layers (**Silver** and
+**Gold**) whose catalog, schema and table names all differ, and the same table
+name legitimately exists in more than one of them.
+
+- **The Presto connection is catalog-agnostic.** `jdbc:presto://host:8080` is a
+  complete URL. Any trailing `/catalog/schema` is only a *default* — never
+  relied on. (It used to be the single implicit catalog+schema for the whole
+  app; that model could not express multiple catalogs.)
+- **Everything is qualified.** `field_column_mapping.physical_expression` in
+  LIVE mode, `analysis_column_metadata`'s key, and every identifier the
+  Analysis tab's match SQL emits are `catalog.schema.table[.column]`.
+- **Two reaches, never conflated** (`gov.rajasthan.smart.srse.lakehouse`):
+  - `LakehouseBrowseService` — the LIVE cluster, everything the connection can
+    reach. **Admin-only**, for discovery.
+  - `LakehouseRegistryService` — the admin-registered subset, persisted in DB2
+    (`registered_table`). **Everything officer-facing reads this.**
+- **Registration is per TABLE; columns are never copied into DB2.** Registering
+  exposes all of a table's live columns, re-read on every call — so a column
+  added upstream appears without re-registration, and a dropped one disappears
+  instead of lingering as a reference that compiles into a broken query.
+  Individual columns are hidden (and given business names / fuzzy flags) via
+  `analysis_column_metadata`.
+- **`layer` (SILVER/GOLD) is a display TAG, not a hierarchy level.** A
+  Silver↔Gold reconciliation is an ordinary two-table match whose sides carry
+  different catalog/schema values; nothing in the query path special-cases it.
+
+### Injection safety at this seam (extends the non-negotiables below)
+
+Catalog and schema names must be **interpolated**, not bound — Presto has no
+placeholder for a catalog qualifier, so `?.information_schema` is not valid SQL.
+Two mechanisms cover that, and **both** must stay:
+
+1. **Allow-list (primary).** Each level is validated against the level above
+   before use: catalog against `SHOW CATALOGS`, schema against that catalog's
+   `information_schema.schemata`, and so on. Only names the lakehouse itself
+   reported reach SQL text.
+2. **Identifier grammar (defence in depth).** `LakehouseIdentifiers` rejects
+   anything that is not a bare Presto identifier — including on the first,
+   not-yet-validated use, since the validation query must itself interpolate
+   the catalog to run at all.
+
+Officer-supplied identifiers additionally pass **two gates**
+(`LakehouseRegistryService.validateColumn`): the table must be *registered*, and
+the column must exist *live* and not be hidden. Neither alone is sufficient —
+the registry can name a since-dropped table, and live introspection alone would
+let an officer reach any table on the cluster.
+
 ## Java 17 code-style expectations (backend)
 
 - **Records** for AST nodes and immutable DTOs.

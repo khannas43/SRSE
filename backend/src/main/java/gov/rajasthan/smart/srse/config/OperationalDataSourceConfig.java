@@ -28,15 +28,44 @@ import java.util.Map;
  */
 @Configuration
 @EnableJpaRepositories(
+        // Must list EVERY package holding an operational-plane repository.
+        // `lakehouse` is here for RegisteredTableRepository: that package is
+        // mostly Presto-side (LakehouseBrowseService), but the registry of
+        // admin-approved tables is SRSE's own configuration data and so lives
+        // on the operational plane like the rest of the metadata.
         basePackages = {
                 "gov.rajasthan.smart.srse.metadata",
                 "gov.rajasthan.smart.srse.scenario",
-                "gov.rajasthan.smart.srse.scheme"
+                "gov.rajasthan.smart.srse.scheme",
+                "gov.rajasthan.smart.srse.lakehouse"
         },
         entityManagerFactoryRef = "operationalEmf",
         transactionManagerRef = "operationalTx"
 )
 public class OperationalDataSourceConfig {
+
+    /**
+     * The operational plane's package list, in ONE place.
+     *
+     * <p>It has to appear twice — {@code @EnableJpaRepositories} needs
+     * compile-time constants in its annotation, so that list is spelled out
+     * literally above and this array feeds the entity scan below.
+     * {@code OperationalDataSourceConfigTest} asserts the two agree and that
+     * together they cover every {@code @Entity} and repository in the app.
+     *
+     * <p>That guard exists because the failure mode is silent in the worst
+     * way: a package missing from the ENTITY list is not a startup error —
+     * the table simply never gets created and every query against it fails at
+     * runtime. (A package missing from the REPOSITORY list at least fails
+     * loudly at startup, which is how the omission of {@code lakehouse} was
+     * caught — on deploy, not by any test.)
+     */
+    static final String[] OPERATIONAL_PACKAGES = {
+            "gov.rajasthan.smart.srse.metadata",
+            "gov.rajasthan.smart.srse.scenario",
+            "gov.rajasthan.smart.srse.scheme",
+            "gov.rajasthan.smart.srse.lakehouse"
+    };
 
     @Bean
     @Primary
@@ -58,10 +87,7 @@ public class OperationalDataSourceConfig {
         props.put("hibernate.hbm2ddl.auto", ddlAuto);
         return builder
                 .dataSource(operationalDataSource())
-                .packages(
-                        "gov.rajasthan.smart.srse.metadata",
-                        "gov.rajasthan.smart.srse.scenario",
-                        "gov.rajasthan.smart.srse.scheme")
+                .packages(OPERATIONAL_PACKAGES)
                 .persistenceUnit("operational")
                 .properties(props)
                 .build();

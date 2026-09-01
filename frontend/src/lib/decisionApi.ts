@@ -378,3 +378,103 @@ export async function upsertMapping(
   }
   return res.json();
 }
+
+// ---------------------------------------------------------------------------
+// Admin: lakehouse Catalog → Schema → Table → Column cascade
+// ---------------------------------------------------------------------------
+// Two distinct reaches, deliberately kept apart:
+//
+//  - browse* : the LIVE lakehouse — everything the current Presto connection
+//    can physically see. Admin-only, used for discovery.
+//  - registrations : the subset an admin has chosen to expose. This is what
+//    officers get offered (via analysisApi's cascade); the Analysis tab never
+//    calls the browse endpoints.
+//
+// This replaces the old model where a single catalog and schema were baked
+// into the JDBC URL. The connection is now catalog-agnostic — any /catalog
+// /schema still in the URL is only a default — because SRSE maps several
+// catalogs at once, including the lakehouse's Silver and Gold layers.
+
+export type LakehouseColumnInfo = { name: string; dataType: string };
+
+export type TableRegistration = {
+  id: number;
+  catalog: string;
+  schema: string;
+  table: string;
+  /** SILVER / GOLD / null — a display tag, not a level of the hierarchy. */
+  layer: string | null;
+  qualifiedName: string;
+};
+
+async function adminGet<T>(path: string): Promise<T> {
+  const res = await authorizedFetch(`${API_BASE}${path}`, { credentials: "include" });
+  if (!res.ok) {
+    throw new Error(`Admin service error ${res.status}: ${await res.text()}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+const enc = encodeURIComponent;
+
+export function browseCatalogs(): Promise<string[]> {
+  return adminGet<string[]>(`/api/admin/lakehouse/browse/catalogs`);
+}
+
+export function browseSchemas(catalog: string): Promise<string[]> {
+  return adminGet<string[]>(`/api/admin/lakehouse/browse/catalogs/${enc(catalog)}/schemas`);
+}
+
+export function browseTables(catalog: string, schema: string): Promise<string[]> {
+  return adminGet<string[]>(
+    `/api/admin/lakehouse/browse/catalogs/${enc(catalog)}/schemas/${enc(schema)}/tables`,
+  );
+}
+
+export function browseColumns(
+  catalog: string,
+  schema: string,
+  table: string,
+): Promise<LakehouseColumnInfo[]> {
+  return adminGet<LakehouseColumnInfo[]>(
+    `/api/admin/lakehouse/browse/catalogs/${enc(catalog)}/schemas/${enc(schema)}` +
+      `/tables/${enc(table)}/columns`,
+  );
+}
+
+export function listRegistrations(): Promise<TableRegistration[]> {
+  return adminGet<TableRegistration[]>(`/api/admin/lakehouse/registrations`);
+}
+
+/**
+ * Registers a table (or re-tags an already-registered one). Registering
+ * exposes ALL of the table's live columns to officers — individual columns
+ * are hidden afterwards via upsertColumnMetadata's `visible` flag.
+ */
+export async function registerTable(req: {
+  catalog: string;
+  schema: string;
+  table: string;
+  layer: string | null;
+}): Promise<TableRegistration> {
+  const res = await authorizedFetch(`${API_BASE}/api/admin/lakehouse/registrations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    throw new Error(`Admin service error ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
+}
+
+export async function unregisterTable(id: number): Promise<void> {
+  const res = await authorizedFetch(`${API_BASE}/api/admin/lakehouse/registrations/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Admin service error ${res.status}: ${await res.text()}`);
+  }
+}

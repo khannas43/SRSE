@@ -32,6 +32,8 @@ srse/
 
 ## Quickstart (local, offline)
 
+See **[docs/CONFIGURATION_GUIDE.md](docs/CONFIGURATION_GUIDE.md)** for the full step-by-step setup (prerequisites, `.env`, Docker, client Dev, admin, troubleshooting).
+
 ```bash
 cp .env.example .env          # adjust if needed
 docker compose up             # brings up the full local stack

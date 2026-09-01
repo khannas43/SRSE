@@ -2,6 +2,7 @@ package gov.rajasthan.smart.srse.analysis;
 
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.execution.GuardrailProperties;
+import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadata;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadataRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,6 +34,8 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -43,7 +46,7 @@ class RecordMatchServiceTest {
     private JdbcTemplate jdbc;
 
     @Mock
-    private AnalysisSchemaService schemaService;
+    private LakehouseRegistryService registry;
 
     @Mock
     private AnalysisColumnMetadataRepository columnMetadata;
@@ -67,17 +70,26 @@ class RecordMatchServiceTest {
     void setUp() {
         // Default: no admin override registered — every existing test below
         // relies on falling back to the name-substring guess, unchanged.
-        lenient().when(columnMetadata.findByTableNameAndColumnName(anyString(), anyString()))
+        lenient().when(columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
+                        anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(Optional.empty());
-        service = new RecordMatchService(jdbc, schemaService, guardrails, fieldResolver, columnMetadata, objectMapper);
+        service = new RecordMatchService(jdbc, registry, guardrails, fieldResolver, columnMetadata, objectMapper);
     }
 
+    /** Every criterion in these tests lives in one catalog+schema unless a test says otherwise. */
+    private static final String CATALOG = "iceberg_data";
+    private static final String SCHEMA = "jan_aadhar_data_txn";
+
     private static MatchCriterion exact(String table, String column) {
-        return new MatchCriterion(table, column, null);
+        return new MatchCriterion(CATALOG, SCHEMA, table, column, null);
     }
 
     private static MatchCriterion fuzzy(String table, String column, double thresholdPercent) {
-        return new MatchCriterion(table, column, thresholdPercent);
+        return new MatchCriterion(CATALOG, SCHEMA, table, column, thresholdPercent);
+    }
+
+    private static String qualified(String table) {
+        return CATALOG + "." + SCHEMA + "." + table;
     }
 
     private static RecordMatchRequest exactMatchRequest() {
@@ -131,8 +143,10 @@ class RecordMatchServiceTest {
     void registeredFuzzyOverrideAppliesToNonNameColumn() throws Exception {
         // "guardian" has no "name" substring — substring guess alone would
         // treat this as exact. A registered fuzzy=true entry must override it.
-        when(columnMetadata.findByTableNameAndColumnName("beneficiary", "guardian"))
-                .thenReturn(Optional.of(new AnalysisColumnMetadata(1L, "beneficiary", "guardian", "Guardian", true)));
+        when(columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
+                CATALOG, SCHEMA, "beneficiary", "guardian"))
+                .thenReturn(Optional.of(new AnalysisColumnMetadata(
+                        1L, CATALOG, SCHEMA, "beneficiary", "guardian", "Guardian", true, true)));
 
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "guardian", 70.0)),
@@ -146,8 +160,10 @@ class RecordMatchServiceTest {
     void registeredNonFuzzyOverrideAppliesToNameColumn() throws Exception {
         // "scheme_name" contains "name" — substring guess alone would fuzzy-
         // match it. A registered fuzzy=false entry must override that too.
-        when(columnMetadata.findByTableNameAndColumnName("beneficiary", "scheme_name"))
-                .thenReturn(Optional.of(new AnalysisColumnMetadata(1L, "beneficiary", "scheme_name", "Scheme", false)));
+        when(columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
+                CATALOG, SCHEMA, "beneficiary", "scheme_name"))
+                .thenReturn(Optional.of(new AnalysisColumnMetadata(
+                        1L, CATALOG, SCHEMA, "beneficiary", "scheme_name", "Scheme", false, true)));
 
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "scheme_name")),
@@ -224,7 +240,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
-                false, new DedupSpec("beneficiary", "last_refreshed_at"), null);
+                false, new DedupSpec(CATALOG, SCHEMA, "beneficiary", "last_refreshed_at"), null);
         String sql = runAndCapture(req).sql();
 
         assertTrue(sql.contains("ROW_NUMBER() OVER"), sql);
@@ -329,5 +345,198 @@ class RecordMatchServiceTest {
 
         assertFalse(metaLine.contains("?"), metaLine);
         assertTrue(metaLine.contains("0.75"), metaLine);
+    }
+
+    // ---- Silver ↔ Gold: the two sides in different catalogs/schemas ----
+
+    private static MatchCriterion in(String catalog, String schema, String table, String column) {
+        return new MatchCriterion(catalog, schema, table, column, null);
+    }
+
+    /**
+     * The whole point of qualifying identifiers: an admin registers a Silver
+     * table and its Gold counterpart under different catalog/schema names,
+     * and reconciling them is an ordinary two-table match that Presto joins
+     * across catalogs natively.
+     */
+    @Test
+    void matchesAcrossTwoDifferentCatalogs() throws Exception {
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(in("iceberg_silver", "jan_aadhar_data_txn", "tbl_txn_bankdtl", "account_no")),
+                List.of(in("iceberg_gold", "golden_layer", "tbl_beneficiary_bank", "account_no")),
+                false, null, null));
+
+        assertTrue(c.sql().contains(
+                "FROM iceberg_silver.jan_aadhar_data_txn.tbl_txn_bankdtl src"), c.sql());
+        assertTrue(c.sql().contains(
+                "JOIN iceberg_gold.golden_layer.tbl_beneficiary_bank tgt"), c.sql());
+        assertTrue(c.sql().contains("src.account_no = tgt.account_no"), c.sql());
+    }
+
+    @Test
+    void singleSidedMatchStillEmitsTheFullyQualifiedTable() throws Exception {
+        Captured c = runAndCapture(exactMatchRequest());
+
+        assertTrue(c.sql().contains("FROM " + qualified("beneficiary") + " src"), c.sql());
+        assertTrue(c.sql().contains("JOIN " + qualified("beneficiary") + " tgt"), c.sql());
+    }
+
+    /**
+     * Same bare table name, different catalog — these are two DIFFERENT
+     * physical tables, so grouping them as one side would emit a join whose
+     * ON clause silently compared a table against itself.
+     */
+    @Test
+    void sameTableNameInDifferentCatalogsIsRejectedOnOneSide() {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(in("iceberg_silver", "s", "tbl_txn_bankdtl", "bank_id"),
+                        in("iceberg_gold", "s", "tbl_txn_bankdtl", "m_id")),
+                List.of(in("iceberg_silver", "s", "tbl_txn_bankdtl", "bank_id"),
+                        in("iceberg_silver", "s", "tbl_txn_bankdtl", "m_id")),
+                false, null, null);
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> service.match(req));
+        assertTrue(e.getMessage().contains("same table"), e.getMessage());
+    }
+
+    /** Every criterion passes the registry gate before its name reaches SQL text. */
+    @Test
+    void criterionRejectedByTheRegistryNeverReachesTheDatabase() {
+        doThrow(new IllegalArgumentException("Table is not registered for SRSE: a.b.c"))
+                .when(registry).validateColumns(any(), any());
+
+        assertThrows(IllegalArgumentException.class, () -> service.match(exactMatchRequest()));
+        verify(jdbc, never()).query(anyString(), any(Object[].class), any(RowCallbackHandler.class));
+    }
+
+    /** Dedup's table is compared qualified, so a same-named table in another catalog is not "the source table". */
+    @Test
+    void dedupTableInAnotherCatalogIsRejected() {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("beneficiary", "district")),
+                false,
+                new DedupSpec("iceberg_gold", SCHEMA, "beneficiary", "last_refreshed_at"),
+                null);
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> service.match(req));
+        assertTrue(e.getMessage().contains("source or target table"), e.getMessage());
+    }
+
+    /**
+     * Resolving a table's columns walks the whole catalog/schema/table
+     * hierarchy, so the gate is called ONCE per side with all of that side's
+     * columns — not once per criterion.
+     */
+    @Test
+    void gateIsCalledOncePerSideNotOncePerCriterion() throws Exception {
+        runAndCapture(new RecordMatchRequest(
+                List.of(exact("beneficiary", "district"), exact("beneficiary", "gender")),
+                List.of(exact("beneficiary", "district"), exact("beneficiary", "gender")),
+                false, null, null));
+
+        ArgumentCaptor<java.util.Collection<String>> columns =
+                ArgumentCaptor.forClass(java.util.Collection.class);
+        verify(registry, times(2)).validateColumns(any(), columns.capture());
+        assertEquals(List.of("district", "gender"), List.copyOf(columns.getAllValues().get(0)));
+    }
+
+    // ---- age filter over a Tier-2 (DOB-derived) age mapping ----
+
+    /**
+     * Regression: with age_years mapped as a DOB expression, the age filter
+     * used to take everything after the LAST dot — which lands inside the
+     * expression — and emit
+     * "src.date_of_birth, current_date) BETWEEN ? AND ?", SQL that does not
+     * parse. The expression must be rebased onto each alias instead.
+     */
+    @Test
+    void ageFilterRebasesADobDerivedAgeExpressionOntoBothAliases() throws Exception {
+        FieldResolver dobResolver = fieldKey -> {
+            if ("age_years".equals(fieldKey)) {
+                return "date_diff('year', beneficiary.date_of_birth, current_date)";
+            }
+            throw new FieldResolver.UnknownFieldException(fieldKey);
+        };
+        RecordMatchService dobService = new RecordMatchService(
+                jdbc, registry, guardrails, dobResolver, columnMetadata, objectMapper);
+
+        StreamingResponseBody body = dobService.match(new RecordMatchRequest(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("beneficiary", "district")),
+                false, null,
+                new AgeFilterSpec(18, 60, "YEARS")));
+        body.writeTo(new ByteArrayOutputStream());
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).query(sqlCap.capture(), any(Object[].class), any(RowCallbackHandler.class));
+        String sql = sqlCap.getValue();
+
+        assertTrue(sql.contains("date_diff('year', src.date_of_birth, current_date) BETWEEN ? AND ?"), sql);
+        assertTrue(sql.contains("date_diff('year', tgt.date_of_birth, current_date) BETWEEN ? AND ?"), sql);
+        // The old truncation emitted the expression's tail as a bare clause:
+        // "AND src.date_of_birth, current_date) BETWEEN ...".
+        assertFalse(sql.contains("AND src.date_of_birth,"), sql);
+    }
+
+    /** A fully-qualified plain mapping still collapses to alias + bare column. */
+    @Test
+    void ageFilterRebasesAFullyQualifiedPlainAgeColumn() throws Exception {
+        FieldResolver qualifiedResolver = fieldKey -> {
+            if ("age_years".equals(fieldKey)) {
+                return "iceberg_gold.golden_layer.tbl_beneficiary.age_years";
+            }
+            throw new FieldResolver.UnknownFieldException(fieldKey);
+        };
+        RecordMatchService qualifiedService = new RecordMatchService(
+                jdbc, registry, guardrails, qualifiedResolver, columnMetadata, objectMapper);
+
+        StreamingResponseBody body = qualifiedService.match(new RecordMatchRequest(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("beneficiary", "district")),
+                false, null,
+                new AgeFilterSpec(18, 60, "YEARS")));
+        body.writeTo(new ByteArrayOutputStream());
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).query(sqlCap.capture(), any(Object[].class), any(RowCallbackHandler.class));
+        String sql = sqlCap.getValue();
+
+        assertTrue(sql.contains("src.age_years BETWEEN ? AND ?"), sql);
+        assertTrue(sql.contains("tgt.age_years BETWEEN ? AND ?"), sql);
+        assertFalse(sql.contains("iceberg_gold.golden_layer.tbl_beneficiary.age_years BETWEEN"), sql);
+    }
+
+    /**
+     * Regression: the age filter used to hardcode a leading " AND ". With
+     * every criterion pair exact, nothing else writes to the WHERE clause, so
+     * that produced "WHERE  AND date_diff(...)" — invalid SQL. Only ever
+     * caught by asserting on the connector, since both the age expression and
+     * the bounds looked right on their own.
+     */
+    @Test
+    void ageFilterOverExactCriteriaEmitsNoDanglingAnd() throws Exception {
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("beneficiary", "district")),
+                false, null,
+                new AgeFilterSpec(18, 60, "YEARS")));
+
+        assertFalse(c.sql().contains("WHERE  AND"), c.sql());
+        assertFalse(c.sql().contains("WHERE AND"), c.sql());
+        assertTrue(c.sql().contains("WHERE src.age_years BETWEEN ? AND ?"), c.sql());
+    }
+
+    /** With a fuzzy pair already in the WHERE clause, the age filter must AND onto it. */
+    @Test
+    void ageFilterAndsOntoAnExistingFuzzyPredicate() throws Exception {
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(fuzzy("beneficiary", "father_name", 80.0)),
+                List.of(exact("beneficiary", "father_name")),
+                false, null,
+                new AgeFilterSpec(18, 60, "YEARS")));
+
+        assertFalse(c.sql().contains("WHERE  AND"), c.sql());
+        assertTrue(c.sql().contains(" AND src.age_years BETWEEN ? AND ?"), c.sql());
     }
 }

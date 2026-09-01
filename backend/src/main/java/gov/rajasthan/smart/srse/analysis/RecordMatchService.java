@@ -1,9 +1,12 @@
 package gov.rajasthan.smart.srse.analysis;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import gov.rajasthan.smart.srse.compiler.AliasRebase;
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.compiler.FuzzyMatchSql;
 import gov.rajasthan.smart.srse.execution.GuardrailProperties;
+import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService;
+import gov.rajasthan.smart.srse.lakehouse.QualifiedTable;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadata;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadataRepository;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -29,10 +32,14 @@ import java.util.Set;
  *  - This is a deliberate, isolated exception to the Rule Engine's "never
  *    JOIN, only pre-materialized flat-catalogue fields" rule (CLAUDE.md) —
  *    Source/Target table+column identifiers are NOT routed through
- *    {@code RuleCompiler}; they're validated against {@link AnalysisSchemaService}'s
- *    live introspection (an allow-list fetched from the lakehouse itself,
- *    not officer input) before ever reaching SQL text; only VALUES
- *    (thresholds, age bounds) are ever bound parameters. The one deliberate
+ *    {@code RuleCompiler}; every one is fully qualified
+ *    ({@code catalog.schema.table.column}) and passes
+ *    {@link LakehouseRegistryService}'s two gates before reaching SQL text —
+ *    the table must be admin-REGISTERED, and the column must exist in the
+ *    LIVE lakehouse and not be hidden. Neither gate alone suffices: the
+ *    registry is a snapshot of intent and can name a since-dropped table,
+ *    while live introspection alone would let an officer reach any table on
+ *    the cluster. Only VALUES (thresholds, age bounds) are bound parameters. The one deliberate
  *    exception within an exception: the age filter DOES resolve through the
  *    catalogue's {@link FieldResolver} (the {@code age_years} field, same as
  *    the Rule Engine) — there's no ad hoc "age column" for arbitrary tables.
@@ -84,20 +91,20 @@ public class RecordMatchService {
     private static final Set<String> AGE_UNITS = Set.of("DAYS", "MONTHS", "YEARS");
 
     private final JdbcTemplate jdbc;
-    private final AnalysisSchemaService schemaService;
+    private final LakehouseRegistryService registry;
     private final GuardrailProperties guardrails;
     private final FieldResolver fields;
     private final AnalysisColumnMetadataRepository columnMetadata;
     private final ObjectMapper objectMapper;
 
     public RecordMatchService(@Qualifier("prestoJdbcTemplate") JdbcTemplate jdbc,
-                              AnalysisSchemaService schemaService,
+                              LakehouseRegistryService registry,
                               GuardrailProperties guardrails,
                               FieldResolver fields,
                               AnalysisColumnMetadataRepository columnMetadata,
                               ObjectMapper objectMapper) {
         this.jdbc = jdbc;
-        this.schemaService = schemaService;
+        this.registry = registry;
         this.guardrails = guardrails;
         this.fields = fields;
         this.columnMetadata = columnMetadata;
@@ -111,14 +118,14 @@ public class RecordMatchService {
     }
 
     private void validateRequest(RecordMatchRequest req) {
-        String sourceTable = validateSide(req.sourceCriteria(), "sourceCriteria");
-        String targetTable = validateSide(req.targetCriteria(), "targetCriteria");
+        QualifiedTable sourceTable = validateSide(req.sourceCriteria(), "sourceCriteria");
+        QualifiedTable targetTable = validateSide(req.targetCriteria(), "targetCriteria");
         if (req.sourceCriteria().size() != req.targetCriteria().size()) {
             throw new IllegalArgumentException("sourceCriteria and targetCriteria must be the same size");
         }
         if (req.dedup() != null) {
-            validateSideMembership(req.dedup().table(), sourceTable, targetTable, "dedup.table");
-            schemaService.validateColumn(req.dedup().table(), req.dedup().column());
+            validateSideMembership(req.dedup().qualifiedTable(), sourceTable, targetTable, "dedup.table");
+            registry.validateColumn(req.dedup().qualifiedColumn());
         }
         if (req.ageFilter() != null) {
             validateAgeFilter(req.ageFilter());
@@ -152,8 +159,11 @@ public class RecordMatchService {
             where.append("TRUE");
         }
 
-        String sourceTable = req.sourceCriteria().get(0).table();
-        String targetTable = req.targetCriteria().get(0).table();
+        // Fully-qualified catalog.schema.table on both sides — the two sides
+        // can live in different catalogs entirely (a Silver-vs-Gold
+        // reconciliation), which Presto joins natively.
+        String sourceTable = req.sourceCriteria().get(0).qualifiedTable().qualifiedName();
+        String targetTable = req.targetCriteria().get(0).qualifiedTable().qualifiedName();
         String baseSql = "SELECT " + select + " FROM " + sourceTable + " src JOIN " + targetTable
                 + " tgt ON " + onClause + " WHERE " + where;
 
@@ -204,10 +214,7 @@ public class RecordMatchService {
             throw new IllegalArgumentException("fuzzyThresholdPercent must be between 0 and 100");
         }
         onClause.append(blockingKeyExpr(srcCol)).append(" = ").append(blockingKeyExpr(tgtCol));
-        if (where.length() > 0) {
-            where.append(" AND ");
-        }
-        where.append(FuzzyMatchSql.similarityExpr(srcCol, tgtCol)).append(" >= ?");
+        appendWhereClause(where, FuzzyMatchSql.similarityExpr(srcCol, tgtCol) + " >= ?");
         params.add(threshold / 100.0);
     }
 
@@ -215,8 +222,8 @@ public class RecordMatchService {
         if (req.dedup() == null) {
             return null;
         }
-        String sourceTable = req.sourceCriteria().get(0).table();
-        String side = req.dedup().table().equals(sourceTable) ? "src" : "tgt";
+        QualifiedTable sourceTable = req.sourceCriteria().get(0).qualifiedTable();
+        String side = req.dedup().qualifiedTable().equals(sourceTable) ? "src" : "tgt";
         String dedupAlias = "dedup_last_updated";
         appendSelect(select, outerColumns, side, req.dedup().column(), dedupAlias);
         return dedupAlias;
@@ -235,23 +242,33 @@ public class RecordMatchService {
         if (req.ageFilter() == null) {
             return;
         }
-        String ageColumn = resolveAgeColumnName();
+        // The catalogue's age expression is table-qualified for the Rule
+        // Engine's own table, so it has to be rebased onto each join alias —
+        // see AliasRebase for why taking "everything after the last dot" was
+        // wrong for a Tier-2 (DOB-derived) age expression.
+        String ageExpression = fields.resolveColumn("age_years");
         double divisor = ageDivisor(req.ageFilter().unit());
         double minYears = req.ageFilter().minAge() / divisor;
         double maxYears = req.ageFilter().maxAge() / divisor;
 
-        where.append(" AND src.").append(ageColumn).append(" BETWEEN ? AND ?");
-        where.append(" AND tgt.").append(ageColumn).append(" BETWEEN ? AND ?");
+        // Must NOT hardcode a leading " AND ": when every criterion pair is
+        // exact, nothing has written to `where` yet and an unconditional AND
+        // emitted "WHERE  AND date_diff(...)" — invalid SQL. Same guarded
+        // append the fuzzy path already uses.
+        appendWhereClause(where, AliasRebase.ontoAlias(ageExpression, "src") + " BETWEEN ? AND ?");
+        appendWhereClause(where, AliasRebase.ontoAlias(ageExpression, "tgt") + " BETWEEN ? AND ?");
         params.add(minYears);
         params.add(maxYears);
         params.add(minYears);
         params.add(maxYears);
     }
 
-    private String resolveAgeColumnName() {
-        String resolved = fields.resolveColumn("age_years");
-        int lastDot = resolved.lastIndexOf('.');
-        return lastDot >= 0 ? resolved.substring(lastDot + 1) : resolved;
+    /** Appends one AND-ed clause, adding the connector only when something precedes it. */
+    private static void appendWhereClause(StringBuilder where, String clause) {
+        if (where.length() > 0) {
+            where.append(" AND ");
+        }
+        where.append(clause);
     }
 
     private static double ageDivisor(String unit) {
@@ -335,15 +352,20 @@ public class RecordMatchService {
      * ignores (or vice versa: a submitted threshold the backend never uses).
      */
     private boolean isFuzzyMatchable(MatchCriterion sc, MatchCriterion tc) {
-        Optional<AnalysisColumnMetadata> srcMeta = columnMetadata.findByTableNameAndColumnName(sc.table(), sc.column());
+        Optional<AnalysisColumnMetadata> srcMeta = findMetadata(sc);
         if (srcMeta.isPresent()) {
             return srcMeta.get().isFuzzyMatchable();
         }
-        Optional<AnalysisColumnMetadata> tgtMeta = columnMetadata.findByTableNameAndColumnName(tc.table(), tc.column());
+        Optional<AnalysisColumnMetadata> tgtMeta = findMetadata(tc);
         if (tgtMeta.isPresent()) {
             return tgtMeta.get().isFuzzyMatchable();
         }
         return sc.column().toLowerCase().contains("name") || tc.column().toLowerCase().contains("name");
+    }
+
+    private Optional<AnalysisColumnMetadata> findMetadata(MatchCriterion c) {
+        return columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
+                c.catalog(), c.schema(), c.table(), c.column());
     }
 
     private void appendSelect(StringBuilder select, Set<String> outerColumns,
@@ -355,22 +377,35 @@ public class RecordMatchService {
         outerColumns.add(outAlias);
     }
 
-    /** Validates every criterion on one side shares a table; returns that table. */
-    private String validateSide(List<MatchCriterion> criteria, String label) {
+    /**
+     * Validates every criterion on one side shares one QUALIFIED table, and
+     * that each column passes the registry gate; returns that table.
+     *
+     * <p>The comparison is on the full {@code catalog.schema.table} triple,
+     * not the bare table name — with Silver and Gold layers both registered,
+     * two criteria naming the same {@code tbl_txn_bankdtl} can legitimately
+     * be two different physical tables, and treating them as one would emit a
+     * join whose ON clause silently compared a table against itself.
+     */
+    private QualifiedTable validateSide(List<MatchCriterion> criteria, String label) {
         if (criteria == null || criteria.isEmpty() || criteria.size() > MAX_CRITERIA_PER_SIDE) {
             throw new IllegalArgumentException(label + " must have 1 to " + MAX_CRITERIA_PER_SIDE + " entries");
         }
-        String table = criteria.get(0).table();
+        QualifiedTable table = criteria.get(0).qualifiedTable();
         for (MatchCriterion c : criteria) {
-            if (!table.equals(c.table())) {
+            if (!table.equals(c.qualifiedTable())) {
                 throw new IllegalArgumentException(label + " must all reference the same table");
             }
-            schemaService.validateColumn(c.table(), c.column());
         }
+        // One batched gate call rather than one per criterion: resolving a
+        // table's columns walks the whole catalog/schema/table hierarchy, and
+        // every criterion here shares one table by the check above.
+        registry.validateColumns(table, criteria.stream().map(MatchCriterion::column).toList());
         return table;
     }
 
-    private void validateSideMembership(String table, String sourceTable, String targetTable, String label) {
+    private void validateSideMembership(QualifiedTable table, QualifiedTable sourceTable,
+                                        QualifiedTable targetTable, String label) {
         if (!table.equals(sourceTable) && !table.equals(targetTable)) {
             throw new IllegalArgumentException(label + " must be the request's source or target table");
         }

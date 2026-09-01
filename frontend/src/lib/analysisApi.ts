@@ -1,8 +1,15 @@
 // Typed client for the Analysis tab's cross-table fuzzy record-match seam
 // (/api/analysis/**). Deliberately separate from decisionApi.ts's Rule
-// Engine calls — this tab reads the live lakehouse schema ad hoc rather
-// than the pre-registered field catalogue (see CLAUDE.md's flat-catalogue
-// rule and the analysis backend package's javadoc for why).
+// Engine calls — this tab picks tables/columns ad hoc rather than from the
+// pre-registered field catalogue (see CLAUDE.md's flat-catalogue rule and the
+// analysis backend package's javadoc for why).
+//
+// Every table/column reference here is FULLY QUALIFIED —
+// catalog › schema › table › column. SRSE maps several catalogs and schemas
+// at once (the lakehouse's Silver and Gold layers), so a bare table name is
+// no longer an address: the same table name legitimately exists in both
+// layers. Officers pick through a four-level cascade that offers only what an
+// admin registered on the Admin page.
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 
@@ -34,12 +41,43 @@ async function authorizedFetch(input: string, init: RequestInit = {}): Promise<R
 
 export type ColumnInfo = { name: string; dataType: string };
 
+// One rung of the officer-facing cascade. `layer` is the admin's SILVER/GOLD
+// tag (or null) — shown as a badge so an officer can tell the two layers'
+// same-named tables apart at a glance.
+export type RegisteredTable = { name: string; layer: string | null };
+
+// A column of a registered table: live from the lakehouse, decorated with the
+// admin's business name / fuzzy flag. Columns the admin hid are already
+// filtered out server-side, so anything returned here is selectable.
+export type RegisteredColumn = {
+  name: string;
+  dataType: string;
+  businessName: string | null;
+  fuzzyMatchable: boolean;
+};
+
+// A fully-qualified table address. Used as the identity of a picked table
+// everywhere in the Analysis tab — comparisons must be on all three parts,
+// never on `table` alone.
+export type TableRef = { catalog: string; schema: string; table: string };
+
+export function qualifiedTableName(ref: TableRef): string {
+  return `${ref.catalog}.${ref.schema}.${ref.table}`;
+}
+
+export function displayTableName(ref: TableRef): string {
+  return `${ref.catalog} › ${ref.schema} › ${ref.table}`;
+}
+
 // fuzzyThresholdPercent is set on Source-side criteria only (null on Target
 // entries) and applies to that (source, target) pair when either column
 // name contains "name" — see RecordMatchService's javadoc.
-export type MatchCriterion = { table: string; column: string; fuzzyThresholdPercent: number | null };
+export type MatchCriterion = TableRef & {
+  column: string;
+  fuzzyThresholdPercent: number | null;
+};
 
-export type DedupSpec = { table: string; column: string };
+export type DedupSpec = TableRef & { column: string };
 
 export type AgeUnit = "DAYS" | "MONTHS" | "YEARS";
 
@@ -60,23 +98,41 @@ export type RecordMatchRequest = {
   ageFilter: AgeFilterSpec | null;
 };
 
-export async function listAnalysisTables(): Promise<string[]> {
-  const res = await authorizedFetch(`${API_BASE}/api/analysis/tables`, { credentials: "include" });
+async function analysisGet<T>(path: string): Promise<T> {
+  const res = await authorizedFetch(`${API_BASE}${path}`, { credentials: "include" });
   if (!res.ok) {
     throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
   }
-  return res.json();
+  return res.json() as Promise<T>;
 }
 
-export async function listAnalysisColumns(table: string): Promise<ColumnInfo[]> {
-  const res = await authorizedFetch(
-    `${API_BASE}/api/analysis/tables/${encodeURIComponent(table)}/columns`,
-    { credentials: "include" },
+const e = encodeURIComponent;
+
+// ---- officer-facing cascade: Catalog → Schema → Table → Column ----
+// Every level is answered from the admin's registry, NOT the live cluster —
+// an officer is only ever offered what an admin registered. (The one live
+// read is the column list of an already-registered table, server-side, so a
+// column added upstream appears without re-registration.)
+
+export function listAnalysisCatalogs(): Promise<string[]> {
+  return analysisGet<string[]>(`/api/analysis/lakehouse/catalogs`);
+}
+
+export function listAnalysisSchemas(catalog: string): Promise<string[]> {
+  return analysisGet<string[]>(`/api/analysis/lakehouse/catalogs/${e(catalog)}/schemas`);
+}
+
+export function listAnalysisTables(catalog: string, schema: string): Promise<RegisteredTable[]> {
+  return analysisGet<RegisteredTable[]>(
+    `/api/analysis/lakehouse/catalogs/${e(catalog)}/schemas/${e(schema)}/tables`,
   );
-  if (!res.ok) {
-    throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
-  }
-  return res.json();
+}
+
+export function listAnalysisColumns(ref: TableRef): Promise<RegisteredColumn[]> {
+  return analysisGet<RegisteredColumn[]>(
+    `/api/analysis/lakehouse/catalogs/${e(ref.catalog)}/schemas/${e(ref.schema)}` +
+      `/tables/${e(ref.table)}/columns`,
+  );
 }
 
 export type RecordMatchStreamHandlers = {
@@ -156,15 +212,18 @@ export async function runRecordMatchStream(
   }
 }
 
-// Admin-managed business name / fuzzy-matchable override per physical
-// table.column — see AnalysisColumnMetadata's javadoc on the backend for why
-// this is separate from the Rule Engine's field catalogue. Unregistered
-// columns fall back to an auto-derived label and a name-substring guess.
-export type ColumnMetadata = {
-  table: string;
+// Admin-managed business name / fuzzy-matchable / visibility override per
+// physical column, keyed by the FULL catalog.schema.table.column address —
+// see AnalysisColumnMetadata's javadoc on the backend for why this is
+// separate from the Rule Engine's field catalogue, and why table+column alone
+// was not a unique key once Silver and Gold layers were both mapped.
+// Unregistered columns of a registered table are visible and fall back to an
+// auto-derived label and a name-substring guess for fuzzy eligibility.
+export type ColumnMetadata = TableRef & {
   column: string;
   businessName: string | null;
   fuzzyMatchable: boolean;
+  visible: boolean;
 };
 
 export async function listColumnMetadata(): Promise<ColumnMetadata[]> {
@@ -176,16 +235,17 @@ export async function listColumnMetadata(): Promise<ColumnMetadata[]> {
 }
 
 export async function upsertColumnMetadata(
-  table: string,
+  ref: TableRef,
   column: string,
   businessName: string | null,
   fuzzyMatchable: boolean,
+  visible: boolean = true,
 ): Promise<ColumnMetadata> {
   const res = await authorizedFetch(`${API_BASE}/api/analysis/column-metadata`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ table, column, businessName, fuzzyMatchable }),
+    body: JSON.stringify({ ...ref, column, businessName, fuzzyMatchable, visible }),
   });
   if (!res.ok) {
     throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
