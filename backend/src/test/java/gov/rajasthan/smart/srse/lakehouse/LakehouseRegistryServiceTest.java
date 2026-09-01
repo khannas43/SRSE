@@ -123,7 +123,8 @@ class LakehouseRegistryServiceTest {
         stubLiveColumns("bank_id", "account_no");
         when(columnMetadata.findByCatalogNameAndSchemaNameAndTableName(CATALOG, SCHEMA, TABLE))
                 .thenReturn(List.of(new AnalysisColumnMetadata(
-                        1L, CATALOG, SCHEMA, TABLE, "account_no", "Account Number", true, true)));
+                        1L, new QualifiedColumn(CATALOG, SCHEMA, TABLE, "account_no"),
+                        "Account Number", true, true)));
 
         LakehouseRegistryService.RegisteredColumn account = service.listColumns(CATALOG, SCHEMA, TABLE)
                 .stream().filter(c -> c.name().equals("account_no")).findFirst().orElseThrow();
@@ -138,7 +139,8 @@ class LakehouseRegistryServiceTest {
         stubLiveColumns("bank_id", "m_id");
         when(columnMetadata.findByCatalogNameAndSchemaNameAndTableName(CATALOG, SCHEMA, TABLE))
                 .thenReturn(List.of(new AnalysisColumnMetadata(
-                        1L, CATALOG, SCHEMA, TABLE, "m_id", null, false, false)));
+                        1L, new QualifiedColumn(CATALOG, SCHEMA, TABLE, "m_id"),
+                        null, false, false)));
 
         assertEquals(List.of("bank_id"), service.listColumns(CATALOG, SCHEMA, TABLE).stream()
                 .map(LakehouseRegistryService.RegisteredColumn::name).toList());
@@ -155,7 +157,8 @@ class LakehouseRegistryServiceTest {
         stubLiveColumns("bank_id");
         when(columnMetadata.findByCatalogNameAndSchemaNameAndTableName(CATALOG, SCHEMA, TABLE))
                 .thenReturn(List.of(new AnalysisColumnMetadata(
-                        1L, CATALOG, SCHEMA, TABLE, "dropped_column", "Gone", false, true)));
+                        1L, new QualifiedColumn(CATALOG, SCHEMA, TABLE, "dropped_column"),
+                        "Gone", false, true)));
 
         assertEquals(List.of("bank_id"), service.listColumns(CATALOG, SCHEMA, TABLE).stream()
                 .map(LakehouseRegistryService.RegisteredColumn::name).toList());
@@ -191,7 +194,8 @@ class LakehouseRegistryServiceTest {
         stubLiveColumns("bank_id", "m_id");
         when(columnMetadata.findByCatalogNameAndSchemaNameAndTableName(CATALOG, SCHEMA, TABLE))
                 .thenReturn(List.of(new AnalysisColumnMetadata(
-                        1L, CATALOG, SCHEMA, TABLE, "m_id", null, false, false)));
+                        1L, new QualifiedColumn(CATALOG, SCHEMA, TABLE, "m_id"),
+                        null, false, false)));
 
         assertThrows(IllegalArgumentException.class,
                 () -> service.validateColumn(new QualifiedColumn(CATALOG, SCHEMA, TABLE, "m_id")));

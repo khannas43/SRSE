@@ -33,8 +33,15 @@ public final class LakehouseIdentifiers {
      * {@code tbl_txn_bankdtl}) never needs them. A lakehouse object that
      * genuinely requires a quoted identifier is rejected loudly here rather
      * than silently mis-quoted downstream.
+     *
+     * <p>{@code \w} here means exactly {@code [A-Za-z0-9_]}: this pattern is
+     * compiled WITHOUT {@link Pattern#UNICODE_CHARACTER_CLASS}, and it must
+     * stay that way. Adding that flag would silently widen {@code \w} to
+     * Unicode letters and digits, weakening a guard whose whole job is to keep
+     * anything exotic out of interpolated SQL. The leading character is spelled
+     * out rather than {@code \w} because an identifier may not start with a digit.
      */
-    private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+    private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_]\\w*");
 
     private static final int MAX_LENGTH = 128;
 

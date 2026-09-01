@@ -3,6 +3,7 @@ package gov.rajasthan.smart.srse.analysis;
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.execution.GuardrailProperties;
 import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService;
+import gov.rajasthan.smart.srse.lakehouse.QualifiedColumn;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadata;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadataRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -146,7 +147,8 @@ class RecordMatchServiceTest {
         when(columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
                 CATALOG, SCHEMA, "beneficiary", "guardian"))
                 .thenReturn(Optional.of(new AnalysisColumnMetadata(
-                        1L, CATALOG, SCHEMA, "beneficiary", "guardian", "Guardian", true, true)));
+                        1L, new QualifiedColumn(CATALOG, SCHEMA, "beneficiary", "guardian"),
+                        "Guardian", true, true)));
 
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "guardian", 70.0)),
@@ -163,7 +165,8 @@ class RecordMatchServiceTest {
         when(columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
                 CATALOG, SCHEMA, "beneficiary", "scheme_name"))
                 .thenReturn(Optional.of(new AnalysisColumnMetadata(
-                        1L, CATALOG, SCHEMA, "beneficiary", "scheme_name", "Scheme", false, true)));
+                        1L, new QualifiedColumn(CATALOG, SCHEMA, "beneficiary", "scheme_name"),
+                        "Scheme", false, true)));
 
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "scheme_name")),

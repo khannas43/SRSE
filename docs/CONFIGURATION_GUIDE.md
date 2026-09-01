@@ -201,6 +201,26 @@ curl -s -X POST http://localhost:8080/api/admin/lakehouse/registrations \
 The Rule Engine tab does **not** need this — in synthetic mode it resolves
 through `StubFieldResolver` against the connection's default catalog/schema.
 
+**Testing the multi-catalog paths locally.** The stack ships a second Iceberg
+catalog, `iceberg_silver` (`docker/presto/catalog/iceberg_silver.properties`),
+purely so the local environment can exercise what the client deployment relies
+on: Silver and Gold layers in *different catalogs*. Without a second catalog
+nothing locally can prove a cross-catalog join actually executes.
+
+It shares the metastore and MinIO with `iceberg` — the point is two distinct
+Presto **catalog handles**, not two storage backends — so on a fresh stack both
+catalogs list the same schemas. To reconcile across them, register the same
+table under each catalog and pick one as Source and the other as Target. For a
+more realistic fixture, create a distinctly-named Silver table:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS iceberg_silver.silver_txn;
+CREATE TABLE iceberg_silver.silver_txn.tbl_txn_bankdtl AS
+SELECT id AS bank_id, id AS m_id, CAST(id AS VARCHAR) AS account_no,
+       father_name, district
+FROM iceberg.srse.beneficiary WHERE id <= 20000;
+```
+
 ### 4.4 Run backend tests (optional)
 
 ```bash

@@ -2,6 +2,7 @@ package gov.rajasthan.smart.srse.metadata;
 
 import gov.rajasthan.smart.srse.lakehouse.LakehouseBrowseService;
 import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService;
+import gov.rajasthan.smart.srse.lakehouse.QualifiedColumn;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -54,7 +55,7 @@ public class AnalysisColumnMetadataController {
                 .map(AnalysisColumnMetadata::getId)
                 .orElse(null);
         AnalysisColumnMetadata saved = repository.save(new AnalysisColumnMetadata(
-                existingId, req.catalog(), req.schema(), req.table(), req.column(),
+                existingId, new QualifiedColumn(req.catalog(), req.schema(), req.table(), req.column()),
                 req.businessName(), req.fuzzyMatchable(), req.visible()));
         return ColumnMetadataResponse.from(saved);
     }

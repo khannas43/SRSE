@@ -89,14 +89,21 @@ public class AnalysisColumnMetadata {
     protected AnalysisColumnMetadata() {
     }
 
-    public AnalysisColumnMetadata(Long id, String catalogName, String schemaName, String tableName,
-                                  String columnName, String businessName, Boolean fuzzyMatchable,
-                                  Boolean visible) {
+    /**
+     * Takes the address as one {@link QualifiedColumn} rather than four loose
+     * strings. That is the point of this class after the multi-catalog change
+     * — the four parts are only meaningful together — and it means every row
+     * written here has had its identifiers validated by
+     * {@code LakehouseIdentifiers} on the way in, since QualifiedColumn's
+     * compact constructor does that.
+     */
+    public AnalysisColumnMetadata(Long id, QualifiedColumn column, String businessName,
+                                  Boolean fuzzyMatchable, Boolean visible) {
         this.id = id;
-        this.catalogName = catalogName;
-        this.schemaName = schemaName;
-        this.tableName = tableName;
-        this.columnName = columnName;
+        this.catalogName = column.table().catalog();
+        this.schemaName = column.table().schema();
+        this.tableName = column.table().table();
+        this.columnName = column.column();
         this.businessName = businessName;
         this.fuzzyMatchable = fuzzyMatchable;
         this.visible = visible;

@@ -3,6 +3,7 @@ package gov.rajasthan.smart.srse.metadata;
 import gov.rajasthan.smart.srse.decision.DecisionExceptionHandler;
 import gov.rajasthan.smart.srse.lakehouse.LakehouseBrowseService;
 import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService;
+import gov.rajasthan.smart.srse.lakehouse.QualifiedColumn;
 import gov.rajasthan.smart.srse.security.MockJwtService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -53,7 +54,8 @@ class AnalysisColumnMetadataControllerTest {
     void listReturnsAllRegisteredEntries() throws Exception {
         when(repository.findAllByOrderByCatalogNameAscSchemaNameAscTableNameAscColumnNameAsc())
                 .thenReturn(List.of(new AnalysisColumnMetadata(
-                        1L, CATALOG, SCHEMA, "tbl_txn_bankdtl", "bank_id", "Bank ID", true, true)));
+                        1L, new QualifiedColumn(CATALOG, SCHEMA, "tbl_txn_bankdtl", "bank_id"),
+                        "Bank ID", true, true)));
 
         mockMvc.perform(get("/api/analysis/column-metadata"))
                 .andExpect(status().isOk())
@@ -72,8 +74,7 @@ class AnalysisColumnMetadataControllerTest {
                 CATALOG, SCHEMA, "tbl_txn_bankdtl", "account_no")).thenReturn(Optional.empty());
         when(repository.save(any())).thenAnswer(inv -> {
             AnalysisColumnMetadata e = inv.getArgument(0);
-            return new AnalysisColumnMetadata(9L, e.getCatalogName(), e.getSchemaName(),
-                    e.getTableName(), e.getColumnName(), e.getBusinessName(),
+            return new AnalysisColumnMetadata(9L, e.toQualifiedColumn(), e.getBusinessName(),
                     e.isFuzzyMatchable(), e.isVisible());
         });
 
@@ -102,7 +103,8 @@ class AnalysisColumnMetadataControllerTest {
         when(repository.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
                 CATALOG, SCHEMA, "tbl_txn_bankdtl", "m_id"))
                 .thenReturn(Optional.of(new AnalysisColumnMetadata(
-                        4L, CATALOG, SCHEMA, "tbl_txn_bankdtl", "m_id", null, false, false)));
+                        4L, new QualifiedColumn(CATALOG, SCHEMA, "tbl_txn_bankdtl", "m_id"),
+                        null, false, false)));
         when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
         mockMvc.perform(put("/api/analysis/column-metadata")

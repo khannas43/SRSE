@@ -49,6 +49,12 @@ const BROWSE_FETCHERS: CascadeFetchers = {
     browseTables(catalog, schema).then((names) => names.map((name) => ({ name }))),
 };
 
+/** Registering an already-registered table re-tags its layer rather than duplicating it. */
+function registerButtonLabel(saving: boolean, alreadyRegistered: boolean): string {
+  if (saving) return "Registering…";
+  return alreadyRegistered ? "Update layer" : "+ Register table";
+}
+
 function qualified(v: CascadeValue, column?: string): string {
   const base = `${v.catalog}.${v.schema}.${v.table}`;
   return column ? `${base}.${column}` : base;
@@ -229,8 +235,8 @@ function ConnectionsPanel() {
             restart. <strong style={{ color: "var(--srse-text)" }}>Operational</strong> edits are tested and saved
             but only take effect after a manual backend restart.
             <br />
-            The Presto URL is now <strong style={{ color: "var(--srse-text)" }}>catalog-agnostic</strong>:
-            <code> jdbc:presto://host:8080</code> is enough. Any trailing <code>/catalog/schema</code> is
+            The Presto URL is now <strong style={{ color: "var(--srse-text)" }}>catalog-agnostic</strong>:{" "}
+            <code>jdbc:presto://host:8080</code> is enough. Any trailing <code>/catalog/schema</code> is
             only a default — SRSE addresses every table by its full{" "}
             <code>catalog.schema.table</code>, so one connection reaches all registered catalogs
             (including both the Silver and Gold layers).
@@ -620,7 +626,7 @@ function MappingsPanel({
       )}
 
       <p className="srse-text-muted" style={{ marginTop: 0, lineHeight: 1.5 }}>
-        Live expressions must be <strong>fully qualified</strong> —
+        Live expressions must be <strong>fully qualified</strong> —{" "}
         <code>catalog.schema.table.column</code>. The connection no longer pins a single catalog and
         schema, so a bare <code>table.column</code> only resolves if the JDBC URL still carries a
         default. Use <em>Pick from lakehouse…</em> to build one from the live schema rather than typing it.
@@ -1040,7 +1046,7 @@ function LakehouseRegistryPanel({
           disabled={saving || !isCascadeComplete(cascade)}
           onClick={onRegister}
         >
-          {saving ? "Registering…" : alreadyRegistered ? "Update layer" : "+ Register table"}
+          {registerButtonLabel(saving, alreadyRegistered)}
         </button>
       </div>
 
