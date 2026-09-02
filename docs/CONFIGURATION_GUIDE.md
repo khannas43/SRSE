@@ -564,11 +564,81 @@ The pre-push hook runs the same scan and blocks push on failure.
 - Check logs: `docker compose logs db2`
 - Confirm password matches: `SRSE_DB2_PASSWORD=srse_local_pw` (local compose default).
 
-### Presto OOM during seed
+### Presto OOM — "Internal Server Error" on Preview, or a seed that stops mid-run
 
-- Presto JVM is configured for 4 GB in `docker/presto/jvm.config`.
-- Increase Docker Desktop memory allocation if seed crashes mid-run.
-- Re-run seed: `docker compose run --rm seed`
+The single most likely cause of a `500` from `/api/decision/preview` or an
+Analysis match that dies partway. Presto is a **single-node local stand-in with a
+4 GB heap** (`docker/presto/jvm.config`); a large enough query will exhaust it.
+A wide fuzzy match across two large tables is more than enough — the join is
+evaluated before any display cap applies, so "only 20,000 rows shown" says
+nothing about how much Presto had to hold.
+
+**Recognising it.** The confusing part is that `docker compose ps` keeps showing
+Presto as **`Up`** while every query fails. `jvm.config` sets both
+`HeapDumpOnOutOfMemoryError` and `ExitOnOutOfMemoryError`, so on OOM the JVM
+first writes a multi-GB heap dump and only then exits — for those minutes the
+container is running but answering nothing. Confirm with:
+
+```bash
+docker compose logs presto | grep -i outofmemory
+docker compose exec -T presto curl -s --max-time 5 http://localhost:8080/v1/info
+```
+
+An empty response from the second command with a healthy-looking container is
+the signature. `/api/health/planes` reports it as
+`analytical: error: ... Error executing query`.
+
+**Recovering.**
+
+```bash
+docker compose restart presto
+docker compose up seed          # repopulate if the seed was interrupted
+```
+
+Presto now carries `restart: unless-stopped`, so once the JVM actually exits
+Docker brings it back on its own — previously it stayed dead and every request
+failed until someone restarted it by hand. The heap dump is kept (it survives a
+restart in the container's writable layer, retrievable with `docker cp`); it is
+the reason recovery is not instant.
+
+**Avoiding it.** Give Docker Desktop more memory, raise `-Xmx` in
+`docker/presto/jvm.config`, or constrain the query — add a second match column,
+raise the fuzzy threshold, or apply the age filter. Note that SRSE deliberately
+does not cap match output server-side (see `RecordMatchService`), so the query
+timeout is the only backstop.
+
+### Metastore exits on restart, taking Presto's Iceberg catalog with it
+
+**Fixed** — recorded here because the symptom is confusing and may appear in
+older stacks. The `apache/hive:3.1.3` entrypoint ran
+`schematool -initSchema` unconditionally and exited 1 when the schema already
+existed:
+
+```
+Error: FUNCTION 'NUCLEUS_ASCII' already exists. (state=X0Y68,code=30000)
+Schema initialization failed!
+```
+
+Because the Derby metastore lives in the container's writable layer, this made
+the stock behaviour correct exactly once: `docker compose up` worked, and every
+later `start`/`restart` failed. Presto then reports every Iceberg query as a
+missing schema or table, which looks like a Presto fault rather than a
+metastore one.
+
+`docker/hive/metastore-entrypoint.sh` now checks `schematool -info` and only
+initialises when there is no schema, then delegates to the image's own
+entrypoint. If you are on an older checkout, recreate the container to recover:
+
+```bash
+docker compose rm -sf metastore && docker compose up -d metastore
+```
+
+**Note the trade-off:** the metastore has no volume, so *recreating* the
+container (as opposed to restarting it) discards all Iceberg table metadata.
+Presto will then show empty schemas until `docker compose up seed` repopulates
+them — and any table you created by hand, such as the `iceberg_silver` fixture
+in [Section 4.3](#43-register-a-lakehouse-table-required-before-the-analysis-tab-works),
+must be recreated too. Restarts are safe; recreates are not.
 
 ### `analytical: down` after stack is up
 
