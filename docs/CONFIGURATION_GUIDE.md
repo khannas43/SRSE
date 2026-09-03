@@ -674,6 +674,45 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 | 50000 | DB2 | Stop other DB2 containers |
 | 9010/9011 | MinIO | Remapped to avoid clash with SonarQube on 9000 |
 
+### `500 Query failed: User defined type is not supported`
+
+Reported from a client deployment. This message comes from the **lakehouse
+engine, not from SRSE** — it is watsonx.data/Presto refusing to map a column
+type, and it appears in none of SRSE's own dependencies. SRSE's SQL is valid;
+the engine cannot represent one of the types involved.
+
+The error response now includes the failing query, e.g.
+
+```
+Query failed: User defined type is not supported — failing query:
+SELECT COUNT(*) FROM <catalog>.<schema>.<table> WHERE (...gender IN (?) ...)
+```
+
+Use it to narrow things down, in this order:
+
+1. **Which query failed?** A Preview runs two — a `COUNT(*)` and a breakdown
+   (`district`, `gender`, `age_band`). If only the breakdown fails, the culprit
+   is one of those three columns, most likely the one configured via
+   `SRSE_AGE_BAND_COLUMN`.
+2. **Is it the table rather than the columns?** Run
+   `SELECT * FROM <catalog>.<schema>.<table> LIMIT 1` in a Presto client. If
+   that fails too, some column in the table has an unmappable type and *every*
+   query against it will fail regardless of what SRSE selects.
+3. **Which column?** `DESCRIBE <catalog>.<schema>.<table>` and look for a type
+   that is not a plain scalar — a Hive `UNIONTYPE`, a custom SerDe type, or a
+   DB2 **distinct/structured type** surfaced through a federated connector.
+   Government DB2 schemas frequently define distinct types (e.g. a domain type
+   over `VARCHAR`), and those are a common cause of exactly this message.
+
+**Fixing it is a data-engineering step, not an SRSE change.** Expose the column
+as a plain scalar in the Golden Layer — cast it in the view/materialisation that
+builds the layer — in the same way Tier-3 fields are pre-materialised (see
+`CLAUDE.md`). Once the column is a scalar, map the field to it as normal.
+
+If instead the offending column is one SRSE never needs, remapping the affected
+field to a different column is enough — unless step 2 showed the whole table is
+unreadable, in which case the upstream cast is required.
+
 ### `503` — "Field 'x' has no physical mapping for this environment yet"
 
 The Golden Layer column names have not been bound yet: the LIVE mapping is still

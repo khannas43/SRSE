@@ -1,6 +1,8 @@
 package gov.rajasthan.smart.srse.config;
 
 import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.BadSqlGrammarException;
+import org.springframework.jdbc.UncategorizedSQLException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -53,7 +55,31 @@ public class DataAccessExceptionHandler {
                             + "Underlying error: " + rootMessage(ex));
         }
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body("Query failed: " + rootMessage(ex));
+                .body("Query failed: " + rootMessage(ex) + failingSql(ex));
+    }
+
+    /**
+     * Appends the SQL that failed, when the exception carries it.
+     *
+     * <p>Without this, a message like "User defined type is not supported" — a
+     * Presto type-mapping failure — names neither the table nor the columns
+     * involved, and there is no way to tell WHICH of the queries a Preview runs
+     * (the count or the breakdown) produced it. Reported from a client
+     * deployment where exactly that left the team with nothing to go on.
+     *
+     * <p>Safe to return: the compiler emits only parameterised SQL (CLAUDE.md's
+     * injection-safety rule), so officer-supplied values are always bound as
+     * {@code ?} and never appear here — this exposes physical identifiers, which
+     * the Admin page already shows, and nothing else.
+     */
+    private static String failingSql(DataAccessException ex) {
+        String sql = null;
+        if (ex instanceof UncategorizedSQLException uncategorized) {
+            sql = uncategorized.getSql();
+        } else if (ex instanceof BadSqlGrammarException badGrammar) {
+            sql = badGrammar.getSql();
+        }
+        return sql != null && !sql.isBlank() ? " — failing query: " + sql : "";
     }
 
     /**

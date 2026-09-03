@@ -93,4 +93,45 @@ class DataAccessExceptionHandlerTest {
 
         assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, res.getStatusCode());
     }
+
+    /**
+     * The reported case: "User defined type is not supported" is a Presto
+     * type-mapping failure that names neither the table nor the columns. Without
+     * the SQL there is no way to tell which of Preview's two queries produced it,
+     * so the team had nothing to act on.
+     */
+    @Test
+    void queryFailureIncludesTheFailingSqlSoItCanBeDiagnosed() {
+        String sql = "SELECT COUNT(*) FROM gold.beneficiary WHERE (gold.beneficiary.gender IN (?))";
+        ResponseEntity<String> res = handler.dataAccessFailure(new UncategorizedSQLException(
+                "StatementCallback", sql, new SQLException("User defined type is not supported")));
+
+        assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, res.getStatusCode());
+        assertTrue(res.getBody().contains("User defined type is not supported"), res.getBody());
+        assertTrue(res.getBody().contains("gold.beneficiary"), res.getBody());
+        assertTrue(res.getBody().contains("failing query"), res.getBody());
+    }
+
+    /** Officer values are bound, so the echoed SQL exposes identifiers only — never data. */
+    @Test
+    void echoedSqlContainsPlaceholdersNotBoundValues() {
+        String sql = "SELECT COUNT(*) FROM t WHERE t.gender IN (?) AND t.age BETWEEN ? AND ?";
+        ResponseEntity<String> res = handler.dataAccessFailure(new UncategorizedSQLException(
+                "StatementCallback", sql, new SQLException("boom")));
+
+        assertTrue(res.getBody().contains("IN (?)"), res.getBody());
+        assertFalse(res.getBody().contains("FEMALE"), res.getBody());
+    }
+
+    /** An outage must not be buried under a SQL dump — connectivity wins. */
+    @Test
+    void connectivityFailureDoesNotAppendSql() {
+        SQLException sql = new SQLException("Error executing query", null, 0,
+                new SocketException("Socket closed"));
+        ResponseEntity<String> res = handler.dataAccessFailure(
+                new UncategorizedSQLException("cb", "SELECT COUNT(*) FROM t", sql));
+
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, res.getStatusCode());
+        assertFalse(res.getBody().contains("failing query"), res.getBody());
+    }
 }
