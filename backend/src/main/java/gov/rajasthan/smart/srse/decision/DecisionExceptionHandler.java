@@ -34,6 +34,17 @@ public class DecisionExceptionHandler {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ex.getMessage());
     }
 
+    /**
+     * The environment is not finished being configured — the field exists but
+     * nobody has bound it to a real column. 503 rather than 400: the officer's
+     * request was fine, the deployment is not ready to answer it, and retrying
+     * after an admin fixes the mapping is exactly the right thing to do.
+     */
+    @ExceptionHandler(FieldResolver.UnconfiguredFieldException.class)
+    public ResponseEntity<String> notConfigured(FieldResolver.UnconfiguredFieldException ex) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(ex.getMessage());
+    }
+
     @ExceptionHandler(IllegalStateException.class)
     public ResponseEntity<String> conflict(IllegalStateException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(ex.getMessage());

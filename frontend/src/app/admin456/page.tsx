@@ -49,6 +49,20 @@ const BROWSE_FETCHERS: CascadeFetchers = {
     browseTables(catalog, schema).then((names) => names.map((name) => ({ name }))),
 };
 
+/**
+ * True while a mapping is still the shipped CHANGE_ME placeholder, i.e. nobody
+ * has bound this field to a real column for this environment.
+ *
+ * Matched as a whole identifier, case-insensitively, mirroring
+ * FieldColumnMapping.isPlaceholder on the backend — a real column such as
+ * `change_me_flag` must not be flagged. Keep the two in step: the backend now
+ * REFUSES to resolve a placeholder, so anything marked here is a field that
+ * will fail a simulation until it is set.
+ */
+function isPlaceholderMapping(expression: string | null | undefined): boolean {
+  return !!expression && /\bCHANGE_ME\b/i.test(expression);
+}
+
 /** Registering an already-registered table re-tags its layer rather than duplicating it. */
 function registerButtonLabel(saving: boolean, alreadyRegistered: boolean): string {
   if (saving) return "Registering…";
@@ -469,6 +483,7 @@ function MappingRowEditor({
 
   const effectiveValue = dobMode ? buildDobAgeExpression(dobColumn) : value;
   const dirty = effectiveValue !== (row.physicalExpression ?? "");
+  const unconfigured = isPlaceholderMapping(row.physicalExpression);
 
   const onPickError = useCallback((message: string) => setError(message), []);
 
@@ -501,6 +516,15 @@ function MappingRowEditor({
       <td>{row.displayLabel}</td>
       <td className="srse-text-muted" style={{ fontSize: "0.8rem" }}>
         {row.fieldKey}
+        {unconfigured && (
+          <div
+            className="srse-text-danger"
+            style={{ fontSize: "0.7rem", marginTop: "0.2rem", fontWeight: 600 }}
+            title="Still the shipped CHANGE_ME placeholder — simulations using this field will fail until it is bound to a real column."
+          >
+            ⚠ not configured
+          </div>
+        )}
       </td>
       <td>
         {isAgeField && (
@@ -591,12 +615,21 @@ function MappingsPanel({
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
+    // Clear before fetching. Without this the mode switch re-renders with the
+    // NEW dataMode but the OLD rows still in state; those rows mount under the
+    // new key and seed MappingRowEditor's mount-only useState from the previous
+    // mode's expressions. The correct rows then arrive under the SAME key, so
+    // React reuses the components and the inputs never re-seed — leaving Live
+    // showing synthetic values. Keying by mode alone does not fix that; the
+    // stale intermediate render has to not happen at all.
+    setRows([]);
     listMappings(dataMode)
       .then(setRows)
       .catch((err: unknown) => setError(errorMessage(err)));
   }, [dataMode, refreshKey]);
 
   const refresh = () => setRefreshKey((k) => k + 1);
+  const unconfiguredCount = rows.filter((r) => isPlaceholderMapping(r.physicalExpression)).length;
 
   return (
     <section className="srse-card">
@@ -622,6 +655,20 @@ function MappingsPanel({
       ) : (
         <p className="srse-text-success" style={{ marginTop: 0 }}>
           Live-mode edits take effect immediately (cache is evicted on save) — no restart needed.
+        </p>
+      )}
+
+      {/*
+        A deployment that never replaced the shipped CHANGE_ME placeholders used
+        to fail at query time with "table change_me does not exist", naming an
+        object that appears nowhere on this page. Surface the real state here so
+        the work left to do is visible before anyone runs a simulation.
+      */}
+      {dataMode === "LIVE" && unconfiguredCount > 0 && (
+        <p className="srse-text-danger" style={{ marginTop: 0, fontWeight: 600 }}>
+          ⚠ {unconfiguredCount} of {rows.length} live fields are still unconfigured (
+          <code>CHANGE_ME</code> placeholders). Simulations using them will fail with a
+          &quot;not configured&quot; error until each is bound to a real column below.
         </p>
       )}
 
@@ -651,7 +698,20 @@ function MappingsPanel({
           </thead>
           <tbody>
             {rows.map((row) => (
-              <MappingRowEditor key={row.fieldKey} row={row} dataMode={dataMode} onSaved={refresh} />
+              // Key includes dataMode deliberately. Field keys are IDENTICAL
+              // across Synthetic and Live, so keying on fieldKey alone let React
+              // reuse each row component across a mode switch — and because
+              // MappingRowEditor seeds its input from useState (mount-only), the
+              // inputs kept showing the PREVIOUS mode's expressions. Switching to
+              // Live therefore displayed synthetic values, and pressing Save
+              // would have written a synthetic expression as the Live mapping.
+              // Including the mode forces a remount so the inputs re-seed.
+              <MappingRowEditor
+                key={`${dataMode}-${row.fieldKey}`}
+                row={row}
+                dataMode={dataMode}
+                onSaved={refresh}
+              />
             ))}
           </tbody>
         </table>

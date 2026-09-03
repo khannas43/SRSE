@@ -26,6 +26,21 @@ import jakarta.persistence.UniqueConstraint;
 )
 public class FieldColumnMapping {
 
+    /**
+     * The token the checked-in seed uses for a LIVE mapping nobody has bound
+     * yet (e.g. {@code CHANGE_ME.age_years}). Matched as a whole identifier and
+     * case-insensitively, so a genuine column such as {@code change_me_flag}
+     * is not mistaken for it — Presto lower-cases unquoted identifiers, so the
+     * placeholder is just as likely to surface as {@code change_me}.
+     */
+    private static final java.util.regex.Pattern PLACEHOLDER =
+            java.util.regex.Pattern.compile("(?i)\\bCHANGE_ME\\b");
+
+    /** True if {@code physicalExpression} is still an unconfigured placeholder. */
+    public static boolean isPlaceholder(String physicalExpression) {
+        return physicalExpression != null && PLACEHOLDER.matcher(physicalExpression).find();
+    }
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

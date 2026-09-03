@@ -1,6 +1,7 @@
 package gov.rajasthan.smart.srse.metadata;
 
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
+import gov.rajasthan.smart.srse.compiler.FieldResolver.UnconfiguredFieldException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.cache.annotation.Cacheable;
@@ -15,6 +16,10 @@ import org.springframework.stereotype.Component;
  * CONTRACT (do not violate):
  *  - Allow-list gate: only catalogued + active + mapped-for-this-environment
  *    field keys resolve; anything else throws {@link UnknownFieldException}.
+ *  - A field whose mapping is still the shipped CHANGE_ME placeholder throws
+ *    {@link UnconfiguredFieldException} rather than resolving, so an
+ *    unconfigured environment fails with an actionable message instead of
+ *    emitting the placeholder into SQL as a table name.
  *  - Physical expressions come from {@link FieldColumnMapping} for the configured
  *    {@link DataMode} — never from officer input as SQL identifiers.
  *  - Results are Caffeine-cached ({@code fieldMappings}) since lookups happen on
@@ -43,8 +48,18 @@ public class MetadataFieldResolver implements FieldResolver {
                 .orElseThrow(() -> new UnknownFieldException(fieldKey));
 
         // entry present and active — look up environment-specific binding
-        return mappingRepository.findByFieldKeyAndDataMode(entry.getFieldKey(), dataMode)
+        String physicalExpression = mappingRepository
+                .findByFieldKeyAndDataMode(entry.getFieldKey(), dataMode)
                 .map(FieldColumnMapping::getPhysicalExpression)
                 .orElseThrow(() -> new UnknownFieldException(fieldKey));
+
+        // Stop the shipped CHANGE_ME placeholder before it reaches SQL. Without
+        // this the query ran against a table literally named CHANGE_ME and the
+        // officer got a "table does not exist" error naming an object nobody
+        // had configured — see UnconfiguredFieldException.
+        if (FieldColumnMapping.isPlaceholder(physicalExpression)) {
+            throw new UnconfiguredFieldException(fieldKey, physicalExpression);
+        }
+        return physicalExpression;
     }
 }

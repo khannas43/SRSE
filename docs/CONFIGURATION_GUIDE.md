@@ -674,9 +674,35 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 | 50000 | DB2 | Stop other DB2 containers |
 | 9010/9011 | MinIO | Remapped to avoid clash with SonarQube on 9000 |
 
-### Client Dev: field mappings show `CHANGE_ME`
+### `503` — "Field 'x' has no physical mapping for this environment yet"
 
-Golden Layer column names are not yet configured. Update `field-catalog-seed.yml` or use Admin → Field mappings once Lovadeep confirms physical names.
+The Golden Layer column names have not been bound yet: the LIVE mapping is still
+the shipped `CHANGE_ME` placeholder. Expected on a fresh client deployment —
+nothing is broken, the environment is simply not finished being configured.
+
+Fix it in either place:
+
+- **Admin page** (no redeploy) — `/admin456` → *Field → catalog/schema/table/column
+  mappings* → switch to **Live**. Every unbound field is flagged
+  **⚠ not configured**, with a count at the top of the panel. Use
+  *Pick from lakehouse…* to build each fully-qualified reference.
+- **`field-catalog-seed.yml`** — replace the `CHANGE_ME.*` entries. Note the seed
+  only inserts rows that do not exist yet, so this affects new deployments; an
+  environment that has already booted must be corrected through the Admin page.
+
+**If you are on an older build**, the same misconfiguration surfaced very
+differently and far less helpfully:
+
+```
+Decision service error 500: Query failed:
+Table silver_data.jan_aadhaar_txn.change_me does not exist
+```
+
+The placeholder was emitted into SQL as a table name, and Presto resolved it
+against the connection's default catalog/schema. The table it names has never
+been configured anywhere — it is the literal placeholder — so it does not appear
+in the Admin registry and searching for it leads nowhere. The resolver now
+refuses to hand a placeholder to the compiler, so this cannot happen.
 
 ### RajSewadwar auth rejects requests
 
