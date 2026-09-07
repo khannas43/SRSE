@@ -420,8 +420,13 @@ In client Dev, Hibernate `ddl-auto=update` is **disabled** (Spring profile `clie
 Table shapes match the JPA entities under `backend/src/main/java/gov/rajasthan/smart/srse/`.
 
 > **Upgrading a database that already has these tables** — client Dev *and* any local
-> stack whose DB2 volume predates the change. Run
-> [`docs/migrations/001-qualify-analysis-column-metadata.sql`](migrations/001-qualify-analysis-column-metadata.sql).
+> stack whose DB2 volume predates the change. Run the migrations it has not had yet,
+> in order:
+>
+> | | | Needed on |
+> |---|---|---|
+> | [`001-qualify-analysis-column-metadata.sql`](migrations/001-qualify-analysis-column-metadata.sql) | Keys `analysis_column_metadata` by the full catalog/schema/table/column address, and adds `registered_table` | client Dev **and** local |
+> | [`002-add-compare-as.sql`](migrations/002-add-compare-as.sql) | Adds `analysis_column_metadata.compare_as`, the per-column override for comparing columns of different types | **client Dev only** — the column is nullable, so `ddl-auto: update` adds it on local |
 >
 > Do not assume `ddl-auto: update` handles it — **it cannot, and it does not say so.**
 > It adds nullable columns happily (which is how `visible` appears on its own) but DB2
