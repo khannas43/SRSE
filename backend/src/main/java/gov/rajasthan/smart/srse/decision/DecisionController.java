@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -46,6 +47,31 @@ public class DecisionController {
                 ? executionService.breakdown(req.ruleset())
                 : List.of();
         return new PreviewResponse(totalCount, breakdown);
+    }
+
+    /**
+     * Hard-capped row-level drill-down into the cohort a ruleset selects.
+     *
+     * <p>THE ONLY ENDPOINT IN SRSE THAT RETURNS ROW-LEVEL BENEFICIARY DATA.
+     * Everything else on this controller answers in aggregates. It exists so
+     * an officer can sanity-check WHO a ruleset is selecting — a count alone
+     * cannot show that a threshold is catching the wrong people — and it is
+     * bounded by {@code SRSE_COHORT_CAP} (default 1000) no matter what the
+     * caller asks for. The cap is not negotiable through the API: a caller
+     * requesting more gets the cap, and the response says so.
+     *
+     * <p>The guardrail was written and unit-tested but had no route, so the
+     * capability CLAUDE.md documents was unreachable. Reachable now, with the
+     * cap enforced in {@link ExecutionService} where it always was.
+     */
+    @PostMapping("/cohort")
+    public CohortResponse cohort(@RequestBody CohortRequest req) {
+        int appliedLimit = executionService.effectiveCohortLimit(req.limit());
+        List<Map<String, Object>> rows = executionService.cohortSample(req.ruleset(), appliedLimit);
+        // "capped" means the sample filled its limit, so the cohort is probably
+        // larger than what came back — the distinction between a cohort of
+        // exactly 1000 and 40 lakh truncated to 1000. /preview has the total.
+        return new CohortResponse(rows, appliedLimit, rows.size() >= appliedLimit);
     }
 
     /**

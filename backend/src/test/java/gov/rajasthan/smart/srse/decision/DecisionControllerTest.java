@@ -18,6 +18,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.hamcrest.Matchers.containsString;
@@ -190,4 +191,71 @@ class DecisionControllerTest {
                 .andExpect(status().isConflict())
                 .andExpect(content().string(containsString("has not been evaluated yet")));
     }
+
+    // ---- cohort drill-down: the only row-level endpoint ----
+
+    private static final String COHORT_BODY = """
+            {"ruleset":{"root":{"type":"PREDICATE","fieldKey":"age_years","operator":"GTE","value":18}},
+             "limit":25}
+            """;
+
+    @Test
+    void cohortReturnsRowsWithTheLimitThatWasApplied() throws Exception {
+        when(executionService.effectiveCohortLimit(25)).thenReturn(25);
+        when(executionService.cohortSample(any(), eq(25))).thenReturn(List.of(
+                Map.of("district", "Jaipur", "age_years", 22),
+                Map.of("district", "Jodhpur", "age_years", 34)));
+
+        mockMvc.perform(post("/api/decision/cohort")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(COHORT_BODY))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows.length()").value(2))
+                .andExpect(jsonPath("$.rows[0].district").value("Jaipur"))
+                .andExpect(jsonPath("$.appliedLimit").value(25))
+                // Fewer rows than asked for: this IS the whole cohort.
+                .andExpect(jsonPath("$.capped").value(false));
+    }
+
+    /**
+     * The cap is not negotiable through the API. A caller asking for a million
+     * rows gets the cap, and the response says the sample was truncated so the
+     * count cannot be misread as the cohort's real size.
+     */
+    @Test
+    void cohortRequestAboveTheCapIsCappedAndSaysSo() throws Exception {
+        when(executionService.effectiveCohortLimit(1_000_000)).thenReturn(1000);
+        when(executionService.cohortSample(any(), eq(1000)))
+                .thenReturn(java.util.Collections.nCopies(1000, Map.of("district", "Jaipur")));
+
+        mockMvc.perform(post("/api/decision/cohort")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"ruleset":{"root":{"type":"PREDICATE","fieldKey":"age_years",
+                                 "operator":"GTE","value":18}},"limit":1000000}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.appliedLimit").value(1000))
+                .andExpect(jsonPath("$.capped").value(true));
+
+        // The service is never asked for more than the cap.
+        verify(executionService).cohortSample(any(), eq(1000));
+    }
+
+    /** No limit means "as many as the cap allows", never "unbounded". */
+    @Test
+    void cohortWithNoLimitFallsBackToTheCap() throws Exception {
+        when(executionService.effectiveCohortLimit(null)).thenReturn(1000);
+        when(executionService.cohortSample(any(), eq(1000))).thenReturn(List.of());
+
+        mockMvc.perform(post("/api/decision/cohort")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"ruleset":{"root":{"type":"PREDICATE","fieldKey":"age_years",
+                                 "operator":"GTE","value":18}}}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.appliedLimit").value(1000));
+    }
+
 }

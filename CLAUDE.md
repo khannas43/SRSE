@@ -171,6 +171,11 @@ so those comparisons did not return zero rows — they failed the whole query
 ## Guardrails on execution
 
 - Cohort drill-down **hard-capped** (`SRSE_COHORT_CAP`, default 1000); never full populations.
+  `POST /api/decision/cohort` is the only endpoint in SRSE that returns row-level
+  beneficiary data; the cap is applied in `ExecutionService` and cannot be raised
+  by a caller argument. The response states the limit it used and whether the
+  sample was truncated, so 1000 rows of a 40-lakh cohort cannot be misread as the
+  cohort itself. No officer UI calls it yet.
 - Query **timeout** enforced.
 - Breakdown dimensions fixed: district, gender, age_band.
 - Count query returns **aggregates only** — never row-level data.

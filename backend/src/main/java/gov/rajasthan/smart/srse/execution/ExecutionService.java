@@ -97,6 +97,18 @@ public class ExecutionService {
      * AND IT IS ALWAYS BOUNDED: effective limit = min(requested, cohortCap).
      * Never raise the cap via a caller argument.
      */
+    /**
+     * The limit a drill-down would actually run with, so a caller can state it
+     * alongside the rows without re-deriving the cap and risking drift.
+     *
+     * <p>A null or non-positive request means "as many as the cap allows",
+     * never "unbounded" — there is deliberately no way to express the latter.
+     */
+    public int effectiveCohortLimit(Integer requestedLimit) {
+        int cap = guardrails.cohortCap();
+        return (requestedLimit == null || requestedLimit <= 0) ? cap : Math.min(requestedLimit, cap);
+    }
+
     public List<Map<String, Object>> cohortSample(Ast.PredicateSpec spec, int requestedLimit) {
         int effectiveLimit = Math.min(requestedLimit, guardrails.cohortCap());
         CompiledQuery q = compiler.compile(spec);
