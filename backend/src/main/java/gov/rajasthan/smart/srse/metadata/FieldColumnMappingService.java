@@ -41,6 +41,25 @@ public class FieldColumnMappingService {
     }
 
     /**
+     * Unbinds a field for ONE environment, leaving the field itself in the
+     * catalogue and the other environment's binding untouched.
+     *
+     * <p>The field then has no physical column for this DataMode and stops
+     * resolving, which is the honest state — the Admin page shows it as not
+     * configured, exactly like a CHANGE_ME placeholder, and a rule using it
+     * fails with a message naming the field rather than a phantom table. Use
+     * it to retire a binding without retiring the field; to remove the field
+     * everywhere, delete the field itself.
+     *
+     * <p>Idempotent: unbinding what is already unbound is a no-op, so a
+     * double-click cannot 404.
+     */
+    @CacheEvict(cacheNames = "fieldMappings", allEntries = true)
+    public void delete(String fieldKey, DataMode dataMode) {
+        repository.findByFieldKeyAndDataMode(fieldKey, dataMode).ifPresent(repository::delete);
+    }
+
+    /**
      * Bootstrap-only insert used by {@link FieldCatalogSeedRunner}: creates the
      * row if (and only if) it doesn't exist yet. Unlike {@link #upsert}, this
      * never overwrites an existing row — so an admin edit made via

@@ -1,6 +1,7 @@
 package gov.rajasthan.smart.srse.metadata;
 
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -57,6 +58,18 @@ public class FieldColumnMappingController {
         FieldColumnMapping saved = mappingService.upsert(fieldKey, dataMode, req.physicalExpression());
         return new MappingRowResponse(entry.getFieldKey(), entry.getDisplayLabel(),
                 saved.getPhysicalExpression(), FieldColumnMapping.tableOf(saved.getPhysicalExpression()));
+    }
+
+    /**
+     * Unbinds the field for this environment. The field stays in the
+     * catalogue and the other environment's binding is untouched — see
+     * {@link FieldColumnMappingService#delete}.
+     */
+    @DeleteMapping("/{fieldKey}")
+    public void delete(@PathVariable String fieldKey, @RequestParam DataMode dataMode) {
+        catalogRepository.findByFieldKey(fieldKey)
+                .orElseThrow(() -> new FieldResolver.UnknownFieldException(fieldKey));
+        mappingService.delete(fieldKey, dataMode);
     }
 
     public record UpsertMappingRequest(String physicalExpression) {

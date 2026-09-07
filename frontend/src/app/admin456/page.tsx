@@ -8,6 +8,7 @@ import {
   browseTables,
   createField,
   deleteField,
+  deleteMapping,
   getConnections,
   listFields,
   listMappings,
@@ -68,6 +69,15 @@ const BROWSE_FETCHERS: CascadeFetchers = {
  */
 function isPlaceholderMapping(expression: string | null | undefined): boolean {
   return !!expression && /\bCHANGE_ME\b/i.test(expression);
+}
+
+/**
+ * True when the field has no usable binding for this environment — either the
+ * shipped CHANGE_ME placeholder, or nothing at all because the binding was
+ * deleted. Both fail a simulation identically, so both are flagged the same.
+ */
+function isUnconfiguredMapping(expression: string | null | undefined): boolean {
+  return !expression?.trim() || isPlaceholderMapping(expression);
 }
 
 /** Registering an already-registered table re-tags its layer rather than duplicating it. */
@@ -737,15 +747,18 @@ function ColumnPickerForMapping({
 function MappingRowEditor({
   row,
   dataMode,
-  onSaved,
+  onChanged,
+  onError,
 }: Readonly<{
   row: MappingRow;
   dataMode: DataMode;
-  onSaved: (physicalExpression: string) => void;
+  onChanged: () => void;
+  onError: (message: string) => void;
 }>) {
   const isAgeField = row.fieldKey === "age_years";
   const existingDobColumn = isAgeField ? parseDobAgeExpression(row.physicalExpression ?? "") : null;
 
+  const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(row.physicalExpression ?? "");
   const [dobMode, setDobMode] = useState(existingDobColumn !== null);
   const [dobColumn, setDobColumn] = useState(existingDobColumn ?? "");
@@ -755,7 +768,22 @@ function MappingRowEditor({
 
   const effectiveValue = dobMode ? buildDobAgeExpression(dobColumn) : value;
   const dirty = effectiveValue !== (row.physicalExpression ?? "");
-  const unconfigured = isPlaceholderMapping(row.physicalExpression);
+  const unconfigured = isUnconfiguredMapping(row.physicalExpression);
+
+  // Re-seed from the row so Cancel really is a cancel, matching the registry
+  // and field-catalogue rows.
+  function startEditing() {
+    setValue(row.physicalExpression ?? "");
+    setDobMode(existingDobColumn !== null);
+    setDobColumn(existingDobColumn ?? "");
+    setError(null);
+    setEditing(true);
+  }
+
+  function cancelEditing() {
+    setPicking(false);
+    setEditing(false);
+  }
 
   const onPickError = useCallback((message: string) => setError(message), []);
 
@@ -775,7 +803,9 @@ function MappingRowEditor({
     setError(null);
     try {
       await upsertMapping(row.fieldKey, dataMode, effectiveValue);
-      onSaved(effectiveValue);
+      setPicking(false);
+      setEditing(false);
+      onChanged();
     } catch (err: unknown) {
       setError(errorMessage(err));
     } finally {
@@ -799,7 +829,15 @@ function MappingRowEditor({
         )}
       </td>
       <td>
-        {isAgeField && (
+        {!editing && (
+          <div
+            style={{ fontFamily: "monospace", fontSize: "0.8rem" }}
+            className={row.physicalExpression ? undefined : "srse-text-muted"}
+          >
+            {row.physicalExpression || "— not mapped —"}
+          </div>
+        )}
+        {editing && isAgeField && (
           <label
             className="srse-checkbox-label"
             htmlFor={`dob-mode-${row.fieldKey}`}
@@ -816,7 +854,7 @@ function MappingRowEditor({
             Compute from Date of Birth
           </label>
         )}
-        {isAgeField && dobMode ? (
+        {editing && isAgeField && dobMode ? (
           <input
             value={dobColumn}
             placeholder="e.g. iceberg_gold.golden_layer.tbl_beneficiary.date_of_birth"
@@ -825,24 +863,28 @@ function MappingRowEditor({
             style={{ width: 340, fontFamily: "monospace" }}
           />
         ) : (
-          <input
-            value={value}
-            placeholder="e.g. iceberg_gold.golden_layer.tbl_beneficiary.age_years"
-            onChange={(e) => setValue(e.target.value)}
-            className="srse-input"
-            style={{ width: 340, fontFamily: "monospace" }}
-          />
+          editing && (
+            <input
+              value={value}
+              placeholder="e.g. iceberg_gold.golden_layer.tbl_beneficiary.age_years"
+              onChange={(e) => setValue(e.target.value)}
+              className="srse-input"
+              style={{ width: 340, fontFamily: "monospace" }}
+            />
+          )
         )}
 
-        <button
-          type="button"
-          className="srse-btn srse-btn-ghost srse-btn-sm"
-          style={{ marginTop: "0.35rem" }}
-          onClick={() => setPicking((v) => !v)}
-        >
-          {picking ? "Close picker" : "Pick from lakehouse…"}
-        </button>
-        {picking && (
+        {editing && (
+          <button
+            type="button"
+            className="srse-btn srse-btn-ghost srse-btn-sm"
+            style={{ marginTop: "0.35rem" }}
+            onClick={() => setPicking((v) => !v)}
+          >
+            {picking ? "Close picker" : "Pick from lakehouse…"}
+          </button>
+        )}
+        {editing && picking && (
           <ColumnPickerForMapping
             idPrefix={`map-pick-${row.fieldKey}`}
             onPick={applyPick}
@@ -850,7 +892,7 @@ function MappingRowEditor({
           />
         )}
 
-        {isAgeField && dobMode && (
+        {editing && isAgeField && dobMode && (
           <>
             <div className="srse-text-muted" style={{ fontSize: "0.75rem", marginTop: "0.3rem", fontFamily: "monospace" }}>
               → {buildDobAgeExpression(dobColumn || "…")}
@@ -862,15 +904,40 @@ function MappingRowEditor({
         )}
       </td>
       <td>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-          <button
-            type="button"
-            className="srse-btn srse-btn-sm"
-            disabled={!dirty || saving || (dobMode && !dobColumn.trim())}
-            onClick={onSave}
-          >
-            {saving ? "Saving…" : "Save"}
-          </button>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", flexWrap: "wrap" }}>
+          {editing ? (
+            <>
+              <button
+                type="button"
+                className="srse-btn srse-btn-sm"
+                disabled={!dirty || saving || (dobMode && !dobColumn.trim())}
+                onClick={onSave}
+              >
+                {saving ? "Saving…" : "Save"}
+              </button>
+              <button
+                type="button"
+                className="srse-btn srse-btn-ghost srse-btn-sm"
+                disabled={saving}
+                onClick={cancelEditing}
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <>
+              <button type="button" className="srse-btn srse-btn-ghost srse-btn-sm" onClick={startEditing}>
+                Edit
+              </button>
+              <ConfirmDeleteButton
+                idleLabel="Delete"
+                confirmLabel="Yes, unbind"
+                title="Removes this field's binding for this environment only. The field stays in the catalogue and the other environment is untouched — rules using it will fail until it is bound again."
+                onConfirm={() => deleteMapping(row.fieldKey, dataMode).then(onChanged)}
+                onError={onError}
+              />
+            </>
+          )}
           {error && <span className="srse-text-danger">{error}</span>}
         </div>
       </td>
@@ -911,7 +978,7 @@ function MappingsPanel({
   }, [refreshKey]);
 
   const refresh = () => setRefreshKey((k) => k + 1);
-  const unconfiguredCount = rows.filter((r) => isPlaceholderMapping(r.physicalExpression)).length;
+  const unconfiguredCount = rows.filter((r) => isUnconfiguredMapping(r.physicalExpression)).length;
 
   // Every field of one environment must resolve against the SAME flat table —
   // the flat-catalogue contract — because the query's FROM clause is derived
@@ -922,7 +989,7 @@ function MappingsPanel({
   const mappedTables = Array.from(
     new Set(
       rows
-        .filter((r) => !isPlaceholderMapping(r.physicalExpression))
+        .filter((r) => !isUnconfiguredMapping(r.physicalExpression))
         .map((r) => r.tableName)
         .filter((t): t is string => !!t),
     ),
@@ -957,11 +1024,11 @@ function MappingsPanel({
         object that appears nowhere on this page. Surface the real state here so
         the work left to do is visible before anyone runs a simulation.
       */}
-      {dataMode === "LIVE" && unconfiguredCount > 0 && (
+      {unconfiguredCount > 0 && (
         <p className="srse-text-danger" style={{ marginTop: 0, fontWeight: 600 }}>
-          ⚠ {unconfiguredCount} of {rows.length} live fields are still unconfigured (
-          <code>CHANGE_ME</code> placeholders). Simulations using them will fail with a
-          &quot;not configured&quot; error until each is bound to a real column below.
+          ⚠ {unconfiguredCount} of {rows.length} {dataMode === "LIVE" ? "live" : "synthetic"} fields
+          are unconfigured — either still a <code>CHANGE_ME</code> placeholder or not bound at all.
+          Simulations using them will fail until each is bound to a real column below.
         </p>
       )}
 
@@ -1015,7 +1082,8 @@ function MappingsPanel({
                 key={`${dataMode}-${row.fieldKey}`}
                 row={row}
                 dataMode={dataMode}
-                onSaved={refresh}
+                onChanged={refresh}
+                onError={setError}
               />
             ))}
           </tbody>

@@ -16,8 +16,10 @@ import java.util.Optional;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -47,6 +49,11 @@ class FieldColumnMappingControllerTest {
 
     @MockBean
     private MockJwtService mockJwtService;
+
+    private static FieldCatalogEntry entry(String fieldKey) {
+        return new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
+                1L, fieldKey, "Label", FieldTier.TIER_1, FieldDataType.STRING, "Group", null, true, false));
+    }
 
     @Test
     void listShowsNullPhysicalExpressionWhenFieldHasNoMappingYet() throws Exception {
@@ -96,4 +103,31 @@ class FieldColumnMappingControllerTest {
                         .content("{\"physicalExpression\": \"x\"}"))
                 .andExpect(status().isBadRequest());
     }
+
+    /**
+     * Unbinding is per ENVIRONMENT: the field stays in the catalogue and the
+     * other mode's binding is untouched, so an admin can retire a synthetic
+     * binding without touching live.
+     */
+    @Test
+    void deleteUnbindsOneModeOnly() throws Exception {
+        when(catalogRepository.findByFieldKey("district")).thenReturn(Optional.of(entry("district")));
+
+        mockMvc.perform(delete("/api/metadata/mappings/district").param("dataMode", "SYNTHETIC"))
+                .andExpect(status().isOk());
+
+        verify(mappingService).delete("district", DataMode.SYNTHETIC);
+        verify(mappingService, never()).delete("district", DataMode.LIVE);
+    }
+
+    @Test
+    void deleteOfAnUnknownFieldIsABadRequest() throws Exception {
+        when(catalogRepository.findByFieldKey("bogus")).thenReturn(Optional.empty());
+
+        mockMvc.perform(delete("/api/metadata/mappings/bogus").param("dataMode", "LIVE"))
+                .andExpect(status().isBadRequest());
+
+        verify(mappingService, never()).delete(any(), any());
+    }
+
 }

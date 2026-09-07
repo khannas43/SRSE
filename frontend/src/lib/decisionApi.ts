@@ -419,6 +419,22 @@ export async function upsertMapping(
 
 export type LakehouseColumnInfo = { name: string; dataType: string };
 
+/**
+ * Unbinds a field for ONE environment. The field stays in the catalogue and the
+ * other environment's binding is untouched, so this retires a binding without
+ * retiring the field — after it, the row shows as not configured, exactly like
+ * an untouched CHANGE_ME placeholder.
+ */
+export async function deleteMapping(fieldKey: string, dataMode: DataMode): Promise<void> {
+  const res = await authorizedFetch(
+    `${API_BASE}/api/metadata/mappings/${encodeURIComponent(fieldKey)}?dataMode=${encodeURIComponent(dataMode)}`,
+    { method: "DELETE", credentials: "include" },
+  );
+  if (!res.ok) {
+    throw new Error(`Metadata service error ${res.status}: ${await res.text()}`);
+  }
+}
+
 export type TableRegistration = {
   id: number;
   catalog: string;
