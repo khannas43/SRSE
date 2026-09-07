@@ -9,15 +9,24 @@ import gov.rajasthan.smart.srse.lakehouse.QualifiedColumn;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Component;
 
 /**
- * JPA-backed {@link FieldResolver}, active whenever DATA_MODE=live — regardless
- * of Spring profile, so any environment (including client-dev) pointed at real
- * on-prem Presto/DB2 gets real Golden Layer bindings from {@link FieldColumnMapping}
- * rather than {@link StubFieldResolver}'s hardcoded synthetic column names.
+ * JPA-backed {@link FieldResolver} — the only one, for every DATA_MODE.
+ *
+ * <p>It used to cover LIVE only, with a hardcoded {@code StubFieldResolver}
+ * standing in for SYNTHETIC. That made the Admin page lie in synthetic mode:
+ * the mapping editor wrote to {@link FieldColumnMapping} and the engine read a
+ * Java {@code Map}, so an admin could edit and save a synthetic binding and
+ * nothing whatsoever would change — and a field added through "Add field"
+ * could not resolve at all, because the stub had never heard of it. Both modes
+ * now read the same table, keyed by {@link DataMode}, which is what the stub's
+ * own javadoc had listed as the build task.
+ *
+ * <p>The synthetic bindings live in {@code field-catalog-seed.yml} and are
+ * inserted at boot by {@link FieldCatalogSeedRunner}, so a fresh database comes
+ * up with exactly the bindings the stub used to hardcode.
  *
  * CONTRACT (do not violate):
  *  - Allow-list gate: only catalogued + active + mapped-for-this-environment
@@ -35,7 +44,6 @@ import org.springframework.stereotype.Component;
  *    every rule compile (CLAUDE.md: Metadata / mapping service, JPA + Caffeine).
  */
 @Component
-@ConditionalOnProperty(name = "srse.data-mode", havingValue = "live")
 public class MetadataFieldResolver implements FieldResolver {
 
     private static final Logger log = LoggerFactory.getLogger(MetadataFieldResolver.class);

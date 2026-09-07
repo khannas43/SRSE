@@ -929,16 +929,12 @@ function MappingsPanel({
         </label>
       </div>
 
-      {dataMode === "SYNTHETIC" ? (
-        <p className="srse-text-muted" style={{ marginTop: 0 }}>
-          Synthetic-mode mappings are informational only — local dev resolution uses the built-in
-          bindings in <code>StubFieldResolver</code>, not this table.
-        </p>
-      ) : (
-        <p className="srse-text-success" style={{ marginTop: 0 }}>
-          Live-mode edits take effect immediately (cache is evicted on save) — no restart needed.
-        </p>
-      )}
+      <p className="srse-text-success" style={{ marginTop: 0 }}>
+        Edits take effect immediately (cache is evicted on save) — no restart needed.{" "}
+        {dataMode === "SYNTHETIC"
+          ? "You are editing the bindings the local synthetic stack resolves against."
+          : "You are editing the bindings the deployed Golden Layer resolves against."}
+      </p>
 
       {/*
         A deployment that never replaced the shipped CHANGE_ME placeholders used

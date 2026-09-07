@@ -215,3 +215,9 @@ so those comparisons did not return zero rows — they failed the whole query
 | Operational DB2 | local container | on-prem DB2 (SRSE schema) |
 | Auth | mock JWT issuer | RajSewadwar SSO |
 | Field mapping | synthetic columns | real Golden Layer columns |
+
+Both modes resolve field bindings the same way, through `field_column_mapping`
+keyed by `DataMode` (`MetadataFieldResolver`). There is no longer a hardcoded
+synthetic resolver: the Admin mapping editor is authoritative in synthetic mode
+too, so an edit there takes effect immediately and a newly added field
+resolves. Synthetic bindings are seeded from `field-catalog-seed.yml` at boot.
