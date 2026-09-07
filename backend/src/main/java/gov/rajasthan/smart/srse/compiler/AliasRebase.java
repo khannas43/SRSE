@@ -1,5 +1,8 @@
 package gov.rajasthan.smart.srse.compiler;
 
+import java.util.LinkedHashSet;
+import java.util.Set;
+
 /**
  * Rewrites a field-catalogue physical expression so its column references
  * resolve against a JOIN alias instead of the catalogue's own table.
@@ -46,19 +49,50 @@ public final class AliasRebase {
 
     public static String ontoAlias(String expression, String alias) {
         StringBuilder out = new StringBuilder(expression.length() + 16);
+        scan(expression, alias, out, null);
+        return out.toString();
+    }
+
+    /**
+     * The column names {@link #ontoAlias} would rebase — the last segment of
+     * every qualified chain in the expression.
+     *
+     * <p>Lets a caller ask "can this expression even apply to that table?"
+     * before emitting it. The Analysis tab's age filter needs exactly that: it
+     * applies the catalogue's {@code age_years} expression to both sides of an
+     * ad-hoc join, and the two sides are arbitrary registered tables — a
+     * member-id mapping table has no {@code date_of_birth}, and rebasing onto
+     * it produced SQL Presto rejected outright.
+     *
+     * <p>Shares {@link #scan} with {@code ontoAlias} rather than re-parsing, so
+     * the set returned is exactly the set that would be rewritten: bare
+     * identifiers ({@code current_date}, function names) and anything inside a
+     * quoted literal are excluded here for the same reason they are left
+     * untouched there.
+     */
+    public static Set<String> referencedColumns(String expression) {
+        Set<String> columns = new LinkedHashSet<>();
+        scan(expression, "unused", new StringBuilder(expression.length() + 16), columns);
+        return columns;
+    }
+
+    /**
+     * One pass over the expression, rewriting into {@code out} and recording
+     * every rebased column into {@code columns} when it is non-null.
+     */
+    private static void scan(String expression, String alias, StringBuilder out, Set<String> columns) {
         int i = 0;
         while (i < expression.length()) {
             char c = expression.charAt(i);
             if (c == '\'') {
                 i = copyQuotedLiteral(expression, i, out);
             } else if (isIdentifierStart(c)) {
-                i = rewriteIdentifierChain(expression, i, alias, out);
+                i = rewriteIdentifierChain(expression, i, alias, out, columns);
             } else {
                 out.append(c);
                 i++;
             }
         }
-        return out.toString();
     }
 
     /**
@@ -93,7 +127,8 @@ public final class AliasRebase {
      *
      * @return the index just past the chain.
      */
-    private static int rewriteIdentifierChain(String s, int start, String alias, StringBuilder out) {
+    private static int rewriteIdentifierChain(String s, int start, String alias, StringBuilder out,
+                                             Set<String> columns) {
         int i = start;
         int lastSegmentStart = start;
         boolean qualified = false;
@@ -110,6 +145,9 @@ public final class AliasRebase {
         }
         if (qualified) {
             out.append(alias).append('.').append(s, lastSegmentStart, i);
+            if (columns != null) {
+                columns.add(s.substring(lastSegmentStart, i));
+            }
         } else {
             out.append(s, start, i);
         }

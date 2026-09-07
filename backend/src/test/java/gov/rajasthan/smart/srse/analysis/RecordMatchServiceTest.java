@@ -80,6 +80,10 @@ class RecordMatchServiceTest {
         lenient().when(columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
                         anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(Optional.empty());
+        // Default: both sides carry whatever column the age expression names.
+        // That is what every age test below assumed before the filter learned
+        // to check — the tests that care about a side WITHOUT it say so.
+        lenient().when(registry.hasColumns(any(), any())).thenReturn(true);
         service = new RecordMatchService(jdbc, registry, guardrails, fieldResolver, columnMetadata, objectMapper);
     }
 
@@ -450,6 +454,77 @@ class RecordMatchServiceTest {
                 ArgumentCaptor.forClass(java.util.Collection.class);
         verify(registry, times(2)).describeColumns(any(), columns.capture());
         assertEquals(List.of("district", "gender"), List.copyOf(columns.getAllValues().get(0)));
+    }
+
+    // ---- age filter on sides that cannot carry it ----
+
+    /**
+     * The two sides of a match are arbitrary registered tables and typically
+     * only one is a person table. Reported from a client deployment: matching
+     * a member-id mapping table against the golden citizen table emitted
+     * date_diff(... CAST(src.date_of_birth AS DATE) ...) against a table with
+     * no date_of_birth, and Presto rejected the whole query — so setting an
+     * age filter made the match impossible to run rather than narrower.
+     */
+    @Test
+    void ageFilterSkipsASideWithoutTheDateOfBirthColumn() throws Exception {
+        FieldResolver dobResolver = fieldKey -> {
+            if ("age_years".equals(fieldKey)) {
+                return "date_diff('year', CAST(golden.gold.citizen_360.date_of_birth AS DATE), current_date)";
+            }
+            throw new FieldResolver.UnknownFieldException(fieldKey);
+        };
+        service = new RecordMatchService(jdbc, registry, guardrails, dobResolver, columnMetadata, objectMapper);
+        when(registry.hasColumns(eq(new QualifiedTable(CATALOG, SCHEMA, "tbl_txn_member_id")), any()))
+                .thenReturn(false);
+        when(registry.hasColumns(eq(new QualifiedTable(CATALOG, SCHEMA, "citizen_360")), any()))
+                .thenReturn(true);
+
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(exact("tbl_txn_member_id", "member_id")),
+                List.of(exact("citizen_360", "jan_member_id")),
+                false, null, new AgeFilterSpec(75, 100, "YEARS")));
+
+        assertTrue(c.sql().contains("CAST(tgt.date_of_birth AS DATE)"), c.sql());
+        assertFalse(c.sql().contains("src.date_of_birth"), c.sql());
+    }
+
+    /**
+     * The params must follow the clauses that were actually emitted. Four were
+     * previously bound unconditionally, so the moment one side stopped being
+     * emitted the surviving clause would have silently read the wrong pair —
+     * a filter that runs and returns the wrong cohort, which is worse than one
+     * that fails.
+     */
+    @Test
+    void ageFilterBindsOnlyTheBoundsItEmitted() throws Exception {
+        when(registry.hasColumns(eq(new QualifiedTable(CATALOG, SCHEMA, "tbl_txn_member_id")), any()))
+                .thenReturn(false);
+
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(exact("tbl_txn_member_id", "member_id")),
+                List.of(exact("beneficiary", "member_id")),
+                false, null, new AgeFilterSpec(75, 100, "YEARS")));
+
+        assertArrayEquals(new Object[]{75.0, 100.0}, c.params());
+    }
+
+    /**
+     * Silently returning an unfiltered cohort to an officer who asked for
+     * 75-100 is the worst outcome available, so this fails loudly instead.
+     */
+    @Test
+    void ageFilterOnTwoTablesThatCannotCarryItIsRejected() {
+        when(registry.hasColumns(any(), any())).thenReturn(false);
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> service.match(new RecordMatchRequest(
+                        List.of(exact("tbl_txn_member_id", "member_id")),
+                        List.of(exact("tbl_txn_bankdtl", "member_id")),
+                        false, null, new AgeFilterSpec(75, 100, "YEARS"))));
+
+        assertTrue(e.getMessage().contains("age filter cannot be applied"), e.getMessage());
+        assertTrue(e.getMessage().contains("age_years"), e.getMessage());
     }
 
     // ---- CSV download: the same match, streamed straight to a file ----

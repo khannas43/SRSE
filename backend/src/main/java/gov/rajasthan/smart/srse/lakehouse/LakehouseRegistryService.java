@@ -9,6 +9,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 /**
@@ -146,6 +147,27 @@ public class LakehouseRegistryService {
                 })
                 .filter(RegisteredColumn::visible)
                 .toList();
+    }
+
+    /**
+     * Whether a REGISTERED table physically carries all of these columns.
+     *
+     * <p>Deliberately NOT filtered by visibility, unlike {@link #listColumns}:
+     * this answers a question about the table's shape, not about what an
+     * officer may pick. The Analysis tab's age filter uses it to decide whether
+     * the catalogue's age expression can apply to a side at all, and an admin
+     * hiding {@code date_of_birth} from the picker must not silently drop an
+     * age filter that the data fully supports.
+     *
+     * <p>Compared case-insensitively — the column names come from an admin's
+     * hand-typed mapping, while the lakehouse reports its own casing.
+     */
+    public boolean hasColumns(QualifiedTable table, Collection<String> columns) {
+        validateRegistered(table);
+        Set<String> live = browse.listColumns(table).stream()
+                .map(c -> c.name().toLowerCase(java.util.Locale.ROOT))
+                .collect(java.util.stream.Collectors.toSet());
+        return columns.stream().allMatch(c -> live.contains(c.toLowerCase(java.util.Locale.ROOT)));
     }
 
     // ---- gates ----

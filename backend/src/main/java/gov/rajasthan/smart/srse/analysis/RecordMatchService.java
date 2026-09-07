@@ -211,7 +211,7 @@ public class RecordMatchService {
 
         String dedupAlias = appendDedupSelect(select, outerColumns, req);
         appendMatchScoreSelect(select, outerColumns, req, pairs);
-        appendAgeFilter(where, params, req);
+        appendAgeFilter(where, params, req, sides);
 
         if (where.length() == 0) {
             where.append("TRUE");
@@ -350,7 +350,28 @@ public class RecordMatchService {
         outerColumns.add("match_score_pct");
     }
 
-    private void appendAgeFilter(StringBuilder where, List<Object> params, RecordMatchRequest req) {
+    /**
+     * Applies the age filter to each side that can actually carry it.
+     *
+     * <p>It used to go onto BOTH aliases unconditionally, which assumed every
+     * table in the lakehouse has the catalogue's date-of-birth column. The two
+     * sides of a match are arbitrary registered tables, and typically only one
+     * is a person table: matching a member-id mapping table against the golden
+     * citizen table emitted
+     * {@code date_diff('year', CAST(src.date_of_birth AS DATE), current_date)}
+     * against a table with no such column, and Presto rejected the whole query
+     * — so an age filter made the match impossible to run rather than
+     * narrower.
+     *
+     * <p>A side that does not carry the column is skipped, not silently
+     * dropped from the result: the join already ties the two sides to the same
+     * person, so filtering the side that HAS the date of birth constrains both.
+     * If neither side carries it the filter is meaningless and this fails
+     * loudly — silently returning an unfiltered cohort to an officer who asked
+     * for 75-100 would be the worst outcome available.
+     */
+    private void appendAgeFilter(StringBuilder where, List<Object> params, RecordMatchRequest req,
+                                 Sides sides) {
         if (req.ageFilter() == null) {
             return;
         }
@@ -359,20 +380,43 @@ public class RecordMatchService {
         // see AliasRebase for why taking "everything after the last dot" was
         // wrong for a Tier-2 (DOB-derived) age expression.
         String ageExpression = fields.resolveColumn("age_years");
+        Set<String> ageColumns = AliasRebase.referencedColumns(ageExpression);
         double divisor = ageDivisor(req.ageFilter().unit());
         double minYears = req.ageFilter().minAge() / divisor;
         double maxYears = req.ageFilter().maxAge() / divisor;
 
-        // Must NOT hardcode a leading " AND ": when every criterion pair is
-        // exact, nothing has written to `where` yet and an unconditional AND
-        // emitted "WHERE  AND date_diff(...)" — invalid SQL. Same guarded
-        // append the fuzzy path already uses.
-        appendWhereClause(where, AliasRebase.ontoAlias(ageExpression, "src") + " BETWEEN ? AND ?");
-        appendWhereClause(where, AliasRebase.ontoAlias(ageExpression, "tgt") + " BETWEEN ? AND ?");
-        params.add(minYears);
-        params.add(maxYears);
-        params.add(minYears);
-        params.add(maxYears);
+        boolean applied = false;
+        // List.of, not Map.of: the clause order is the emitted SQL's order, and
+        // Map.of does not define one — the echoed query would differ run to run.
+        for (Map.Entry<String, QualifiedTable> side : List.of(
+                Map.entry("src", sides.sourceTable()),
+                Map.entry("tgt", sides.targetTable()))) {
+            if (!registry.hasColumns(side.getValue(), ageColumns)) {
+                continue;
+            }
+            // Must NOT hardcode a leading " AND ": when every criterion pair is
+            // exact, nothing has written to `where` yet and an unconditional AND
+            // emitted "WHERE  AND date_diff(...)" — invalid SQL. Same guarded
+            // append the fuzzy path already uses.
+            appendWhereClause(where,
+                    AliasRebase.ontoAlias(ageExpression, side.getKey()) + " BETWEEN ? AND ?");
+            // Bound HERE, beside the clause they belong to. Four params were
+            // previously added whatever was emitted, so the moment one side
+            // stopped being emitted the remaining clause would have silently
+            // read the wrong pair.
+            params.add(minYears);
+            params.add(maxYears);
+            applied = true;
+        }
+
+        if (!applied) {
+            throw new IllegalArgumentException(
+                    "The age filter cannot be applied: neither " + sides.sourceTable().qualifiedName()
+                            + " nor " + sides.targetTable().qualifiedName() + " has "
+                            + String.join(", ", ageColumns)
+                            + ". Match against a table that carries it, or remap the 'age_years' field "
+                            + "on the Admin page to a column these tables have.");
+        }
     }
 
     /** Appends one AND-ed clause, adding the connector only when something precedes it. */

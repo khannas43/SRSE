@@ -2,6 +2,8 @@ package gov.rajasthan.smart.srse.compiler;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Set;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class AliasRebaseTest {
@@ -74,4 +76,42 @@ class AliasRebaseTest {
     void copiesAnUnterminatedLiteralVerbatim() {
         assertEquals("concat('oops", AliasRebase.ontoAlias("concat('oops", "src"));
     }
+
+    // ---- referencedColumns: what ontoAlias would rebase ----
+
+    /**
+     * The age filter asks this before emitting, to find out whether a table can
+     * carry the expression at all — so what comes back must be exactly what
+     * ontoAlias would rewrite, no more.
+     */
+    @Test
+    void referencedColumnsFindsTheColumnOfAPlainQualifiedBinding() {
+        assertEquals(Set.of("age_years"),
+                AliasRebase.referencedColumns("iceberg_gold.golden.tbl_ben.age_years"));
+    }
+
+    @Test
+    void referencedColumnsFindsTheDobInsideATier2Expression() {
+        assertEquals(Set.of("date_of_birth"), AliasRebase.referencedColumns(
+                "date_diff('year', CAST(golden.gold.citizen_360.date_of_birth AS DATE), current_date)"));
+    }
+
+    /**
+     * Bare identifiers are function names and keywords, not columns — requiring
+     * a table to have a column called "current_date" would disable the filter
+     * everywhere.
+     */
+    @Test
+    void referencedColumnsIgnoresBareIdentifiersAndQuotedLiterals() {
+        Set<String> columns = AliasRebase.referencedColumns(
+                "date_diff('year', beneficiary.date_of_birth, current_date)");
+
+        assertEquals(Set.of("date_of_birth"), columns);
+    }
+
+    @Test
+    void referencedColumnsIsEmptyForAnExpressionWithNoQualifiedReference() {
+        assertEquals(Set.of(), AliasRebase.referencedColumns("current_date"));
+    }
+
 }
