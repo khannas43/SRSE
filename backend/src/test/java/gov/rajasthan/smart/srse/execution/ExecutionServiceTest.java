@@ -111,8 +111,17 @@ class ExecutionServiceTest {
         assertArrayEquals(new Object[]{18}, paramsCap.getValue());
     }
 
+    /**
+     * The cap must reach the SQL as a LITERAL. Presto's grammar has no
+     * placeholder in LIMIT — {@code LIMIT ?} is rejected with
+     * "SYNTAX_ERROR: mismatched input '?'" — so binding it, as this did until
+     * the endpoint existed to expose it, made the drill-down impossible to run
+     * at all. Asserting on the literal is the point of this test: a mocked
+     * JdbcTemplate parses nothing, which is exactly how the broken form
+     * survived.
+     */
     @Test
-    void cohortSampleCapsLimitAndAppendsItAsLastParam() {
+    void cohortSampleCapsLimitAndEmitsItAsALiteralNotAPlaceholder() {
         when(jdbc.queryForList(anyString(), any(Object[].class)))
                 .thenReturn(List.of(Map.of("id", 1)));
 
@@ -129,11 +138,24 @@ class ExecutionServiceTest {
         String sql = sqlCap.getValue();
         assertTrue(sql.contains("SELECT * FROM beneficiary"), sql);
         assertTrue(sql.contains("WHERE"), sql);
-        assertTrue(sql.contains("LIMIT ?"), sql);
+        assertTrue(sql.contains("LIMIT 1000"), sql);
+        assertFalse(sql.contains("LIMIT ?"), sql);
         assertTrue(sql.contains("beneficiary.age_years >= ?"), sql);
 
-        // predicate params first, effective (capped) limit last
-        assertArrayEquals(new Object[]{18, 1000}, paramsCap.getValue());
+        // Officer values are still bound — only the server-computed cap is not.
+        assertArrayEquals(new Object[]{18}, paramsCap.getValue());
+    }
+
+    /** A non-positive request means "as many as the cap allows", never LIMIT -5. */
+    @Test
+    void cohortSampleTreatsANonPositiveLimitAsTheCap() {
+        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of());
+
+        service.cohortSample(ageGte18(), 0);
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).queryForList(sqlCap.capture(), any(Object[].class));
+        assertTrue(sqlCap.getValue().contains("LIMIT 1000"), sqlCap.getValue());
     }
 
     @Test
@@ -166,9 +188,11 @@ class ExecutionServiceTest {
 
         service.cohortSample(ageGte18(), 25);
 
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<Object[]> paramsCap = ArgumentCaptor.forClass(Object[].class);
-        verify(jdbc).queryForList(anyString(), paramsCap.capture());
-        assertArrayEquals(new Object[]{18, 25}, paramsCap.getValue());
+        verify(jdbc).queryForList(sqlCap.capture(), paramsCap.capture());
+        assertTrue(sqlCap.getValue().contains("LIMIT 25"), sqlCap.getValue());
+        assertArrayEquals(new Object[]{18}, paramsCap.getValue());
     }
 
     // ---- fully-qualified Golden Layer mappings ----

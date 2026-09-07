@@ -9,7 +9,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -110,14 +109,23 @@ public class ExecutionService {
     }
 
     public List<Map<String, Object>> cohortSample(Ast.PredicateSpec spec, int requestedLimit) {
-        int effectiveLimit = Math.min(requestedLimit, guardrails.cohortCap());
+        int effectiveLimit = effectiveCohortLimit(requestedLimit);
         CompiledQuery q = compiler.compile(spec);
-        String sql = ("SELECT * FROM " + resolveTable() + " WHERE %s LIMIT ?")
+        // The LIMIT is INTERPOLATED, not bound. Presto's grammar has no
+        // placeholder there — "LIMIT ?" is rejected outright with
+        // "SYNTAX_ERROR: mismatched input '?'" — unlike most SQL engines,
+        // which is why this went unnoticed: the method had no HTTP route, and
+        // its unit test mocks JdbcTemplate, so nothing ever parsed the SQL.
+        //
+        // This does NOT weaken CLAUDE.md's injection rule. That rule is about
+        // officer VALUES, which are still every one of them bound below. This
+        // is a server-computed int, already clamped by effectiveCohortLimit to
+        // (0, cohortCap] — a primitive int cannot carry SQL text, and no
+        // caller-supplied string reaches the statement.
+        String sql = ("SELECT * FROM " + resolveTable() + " WHERE %s LIMIT " + effectiveLimit)
                 .formatted(q.predicateSql());
-        List<Object> params = new ArrayList<>(q.params());
-        params.add(effectiveLimit);   // LIMIT ? is last in the SQL
         applyTimeout();
-        return jdbc.queryForList(sql, params.toArray());
+        return jdbc.queryForList(sql, q.params().toArray());
     }
 
     /**
