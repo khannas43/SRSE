@@ -234,6 +234,23 @@ export async function listColumnMetadata(): Promise<ColumnMetadata[]> {
   return res.json();
 }
 
+/**
+ * Drops the override for one column, reverting it to the defaults every
+ * uncurated column of a registered table already has — visible, auto-derived
+ * label, name-substring fuzzy guess. Also the way to clear an orphaned row
+ * whose table is no longer registered.
+ */
+export async function deleteColumnMetadata(ref: TableRef, column: string): Promise<void> {
+  const params = new URLSearchParams({ ...ref, column });
+  const res = await authorizedFetch(`${API_BASE}/api/analysis/column-metadata?${params}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
+  }
+}
+
 export async function upsertColumnMetadata(
   ref: TableRef,
   column: string,

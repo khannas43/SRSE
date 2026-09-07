@@ -102,6 +102,37 @@ class LakehouseRegistryServiceTest {
         assertEquals("GOLD", saved.getLayer());
     }
 
+    @Test
+    void updateLayerRetagsAndNormalisesInPlace() {
+        RegisteredTable existing = new RegisteredTable(7L, CATALOG, SCHEMA, TABLE, "SILVER");
+        when(registrations.findById(7L)).thenReturn(Optional.of(existing));
+        when(registrations.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        RegisteredTable saved = service.updateLayer(7L, "gold");
+
+        assertEquals(7L, saved.getId());
+        assertEquals("GOLD", saved.getLayer());
+        assertEquals(TABLE, saved.getTableName());
+    }
+
+    /** Clearing the tag is a legitimate edit, not a no-op. */
+    @Test
+    void updateLayerCanClearTheTag() {
+        when(registrations.findById(7L))
+                .thenReturn(Optional.of(new RegisteredTable(7L, CATALOG, SCHEMA, TABLE, "SILVER")));
+        when(registrations.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        assertNull(service.updateLayer(7L, "  ").getLayer());
+    }
+
+    @Test
+    void updateLayerOfAnUnknownRegistrationThrows() {
+        when(registrations.findById(404L)).thenReturn(Optional.empty());
+
+        assertThrows(IllegalArgumentException.class, () -> service.updateLayer(404L, "GOLD"));
+        verify(registrations, never()).save(any());
+    }
+
     /** Registering a table exposes all its columns; metadata only decorates. */
     @Test
     void listColumnsReturnsEveryLiveColumnWhenNoneAreCurated() {

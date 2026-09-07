@@ -22,6 +22,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.never;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -128,6 +130,61 @@ class AnalysisColumnMetadataControllerTest {
                                 + "\"table\":\"tbl_txn_doc_engine\",\"column\":\"m_id\","
                                 + "\"businessName\":null,\"fuzzyMatchable\":false}"))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void deleteDropsTheOverride() throws Exception {
+        AnalysisColumnMetadata existing = new AnalysisColumnMetadata(
+                4L, new QualifiedColumn(CATALOG, SCHEMA, "tbl_txn_bankdtl", "m_id"), "M ID", false, false);
+        when(repository.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
+                CATALOG, SCHEMA, "tbl_txn_bankdtl", "m_id")).thenReturn(Optional.of(existing));
+
+        mockMvc.perform(delete("/api/analysis/column-metadata")
+                        .param("catalog", CATALOG)
+                        .param("schema", SCHEMA)
+                        .param("table", "tbl_txn_bankdtl")
+                        .param("column", "m_id"))
+                .andExpect(status().isOk());
+
+        verify(repository).delete(existing);
+    }
+
+    /**
+     * The rows this cleans up are precisely the orphans of an unregistered
+     * table, so gating the delete on registration would make them permanent.
+     */
+    @Test
+    void deleteIsNotGatedOnTheTableStillBeingRegistered() throws Exception {
+        when(repository.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
+                CATALOG, "gone_schema", "tbl_gone", "m_id"))
+                .thenReturn(Optional.of(new AnalysisColumnMetadata(
+                        7L, new QualifiedColumn(CATALOG, "gone_schema", "tbl_gone", "m_id"),
+                        null, false, false)));
+
+        mockMvc.perform(delete("/api/analysis/column-metadata")
+                        .param("catalog", CATALOG)
+                        .param("schema", "gone_schema")
+                        .param("table", "tbl_gone")
+                        .param("column", "m_id"))
+                .andExpect(status().isOk());
+
+        verify(registry, never()).validateRegistered(any(), any(), any());
+    }
+
+    /** Idempotent, so a double-click on Delete cannot turn into a 404. */
+    @Test
+    void deleteOfAnAbsentOverrideIsANoOp() throws Exception {
+        when(repository.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
+                CATALOG, SCHEMA, "tbl_txn_bankdtl", "m_id")).thenReturn(Optional.empty());
+
+        mockMvc.perform(delete("/api/analysis/column-metadata")
+                        .param("catalog", CATALOG)
+                        .param("schema", SCHEMA)
+                        .param("table", "tbl_txn_bankdtl")
+                        .param("column", "m_id"))
+                .andExpect(status().isOk());
+
+        verify(repository, never()).delete(any());
     }
 
     @Test

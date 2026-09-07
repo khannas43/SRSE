@@ -316,6 +316,22 @@ export async function updateField(
   return res.json();
 }
 
+/**
+ * Deactivates a field. The row is kept and flagged inactive rather than
+ * physically deleted, so saved scenarios that reference the field key still
+ * resolve; it simply stops being offered in the rule builder and the mapping
+ * table. Re-adding the same key through createField brings it back.
+ */
+export async function deleteField(fieldKey: string): Promise<void> {
+  const res = await authorizedFetch(`${API_BASE}/api/metadata/fields/${encodeURIComponent(fieldKey)}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Metadata service error ${res.status}: ${await res.text()}`);
+  }
+}
+
 export async function getConnections(): Promise<ConnectionsInfo> {
   const res = await authorizedFetch(`${API_BASE}/api/admin/connections`, { credentials: "include" });
   if (!res.ok) {
@@ -462,6 +478,28 @@ export async function registerTable(req: {
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    throw new Error(`Admin service error ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
+}
+
+/**
+ * Edits an existing registration's layer tag in place. Only the layer is
+ * editable — the catalog/schema/table triple is the registration's identity
+ * and everything downstream refers to a table by that address, so retargeting
+ * is unregister + register (see LakehouseRegistryService.updateLayer).
+ */
+export async function updateTableRegistration(
+  id: number,
+  layer: string | null,
+): Promise<TableRegistration> {
+  const res = await authorizedFetch(`${API_BASE}/api/admin/lakehouse/registrations/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ layer }),
   });
   if (!res.ok) {
     throw new Error(`Admin service error ${res.status}: ${await res.text()}`);

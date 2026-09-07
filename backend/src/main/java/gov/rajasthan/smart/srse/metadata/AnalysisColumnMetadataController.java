@@ -3,10 +3,12 @@ package gov.rajasthan.smart.srse.metadata;
 import gov.rajasthan.smart.srse.lakehouse.LakehouseBrowseService;
 import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService;
 import gov.rajasthan.smart.srse.lakehouse.QualifiedColumn;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -58,6 +60,24 @@ public class AnalysisColumnMetadataController {
                 existingId, new QualifiedColumn(req.catalog(), req.schema(), req.table(), req.column()),
                 req.businessName(), req.fuzzyMatchable(), req.visible()));
         return ColumnMetadataResponse.from(saved);
+    }
+
+    /**
+     * Drops the override, reverting the column to its defaults — visible, with
+     * an auto-derived label and a name-substring guess for fuzzy eligibility.
+     *
+     * <p>Deliberately NOT gated on the table still being registered. Curated
+     * rows outlive an unregister (so re-registering restores the admin's
+     * intent — including the columns they had hidden), which means the orphans
+     * this cleans up are exactly the ones whose table is no longer registered.
+     * Idempotent: deleting an override that isn't there is a no-op, so a
+     * double-click cannot 404.
+     */
+    @DeleteMapping
+    public void delete(@RequestParam String catalog, @RequestParam String schema,
+                       @RequestParam String table, @RequestParam String column) {
+        repository.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(catalog, schema, table, column)
+                .ifPresent(repository::delete);
     }
 
     public record UpsertColumnMetadataRequest(String catalog, String schema, String table, String column,

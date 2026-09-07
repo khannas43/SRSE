@@ -7,17 +7,22 @@ import {
   browseSchemas,
   browseTables,
   createField,
+  deleteField,
   getConnections,
+  listFields,
   listMappings,
   listRegistrations,
   registerTable,
   unregisterTable,
   updateAnalyticalConnection,
+  updateField,
   updateOperationalConnection,
+  updateTableRegistration,
   upsertMapping,
   type ConnectionPlaneInfo,
   type ConnectionsInfo,
   type DataMode,
+  type FieldCatalogEntry,
   type FieldDataType,
   type FieldTier,
   type LakehouseColumnInfo,
@@ -25,6 +30,7 @@ import {
   type TableRegistration,
 } from "@/lib/decisionApi";
 import {
+  deleteColumnMetadata,
   listColumnMetadata,
   upsertColumnMetadata,
   type ColumnMetadata,
@@ -84,6 +90,72 @@ function StatusBadge({ status }: Readonly<{ status: string }>) {
     <span className={up ? "srse-badge srse-badge-success" : "srse-badge srse-badge-danger"}>
       <span className="srse-badge-dot" />
       {status}
+    </span>
+  );
+}
+
+/**
+ * Two-click delete: the first click arms it, the second commits.
+ *
+ * Deliberately not `window.confirm` — a native modal blocks the whole page
+ * (and any automated smoke-test driving this screen), and arming inline keeps
+ * the row the admin is about to remove visible while they decide.
+ */
+function ConfirmDeleteButton({
+  idleLabel,
+  confirmLabel,
+  title,
+  onConfirm,
+  onError,
+}: Readonly<{
+  idleLabel: string;
+  confirmLabel: string;
+  title?: string;
+  onConfirm: () => Promise<void>;
+  onError: (message: string) => void;
+}>) {
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function run() {
+    setBusy(true);
+    try {
+      await onConfirm();
+      setArmed(false);
+    } catch (err: unknown) {
+      onError(errorMessage(err));
+      setArmed(false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!armed) {
+    return (
+      <button
+        type="button"
+        className="srse-btn srse-btn-ghost srse-btn-sm"
+        title={title}
+        onClick={() => setArmed(true)}
+      >
+        {idleLabel}
+      </button>
+    );
+  }
+
+  return (
+    <span style={{ display: "inline-flex", gap: "0.35rem", alignItems: "center" }}>
+      <button type="button" className="srse-btn srse-btn-danger srse-btn-sm" disabled={busy} onClick={run}>
+        {busy ? "Working…" : confirmLabel}
+      </button>
+      <button
+        type="button"
+        className="srse-btn srse-btn-ghost srse-btn-sm"
+        disabled={busy}
+        onClick={() => setArmed(false)}
+      >
+        Cancel
+      </button>
     </span>
   );
 }
@@ -382,6 +454,205 @@ function AddFieldForm({ onCreated }: Readonly<{ onCreated: () => void }>) {
   );
 }
 
+/**
+ * One catalogue field, editable in place.
+ *
+ * The field KEY is fixed once created: mappings, saved rulesets and the
+ * officer-facing palette all address a field by that key, so renaming it here
+ * would strand them. Everything an officer actually sees — label, tier, type,
+ * group, allowed values, fuzzy eligibility — is editable.
+ */
+function FieldCatalogRowEditor({
+  field,
+  onChanged,
+  onError,
+}: Readonly<{
+  field: FieldCatalogEntry;
+  onChanged: () => void;
+  onError: (message: string) => void;
+}>) {
+  const [editing, setEditing] = useState(false);
+  const [displayLabel, setDisplayLabel] = useState(field.displayLabel);
+  const [tier, setTier] = useState<FieldTier>(field.tier);
+  const [dataType, setDataType] = useState<FieldDataType>(field.dataType);
+  const [groupName, setGroupName] = useState(field.groupName ?? "");
+  const [allowedValues, setAllowedValues] = useState((field.allowedValues ?? []).join(", "));
+  const [fuzzyMatchable, setFuzzyMatchable] = useState(field.fuzzyMatchable);
+  const [saving, setSaving] = useState(false);
+
+  // Re-seed from the row rather than keeping half-typed edits around, so
+  // Cancel really is a cancel.
+  function startEditing() {
+    setDisplayLabel(field.displayLabel);
+    setTier(field.tier);
+    setDataType(field.dataType);
+    setGroupName(field.groupName ?? "");
+    setAllowedValues((field.allowedValues ?? []).join(", "));
+    setFuzzyMatchable(field.fuzzyMatchable);
+    setEditing(true);
+  }
+
+  async function onSave() {
+    setSaving(true);
+    try {
+      await updateField(field.fieldKey, {
+        fieldKey: field.fieldKey,
+        displayLabel: displayLabel.trim(),
+        tier,
+        dataType,
+        groupName: groupName.trim(),
+        allowedValues: allowedValues
+          .split(",")
+          .map((v) => v.trim())
+          .filter(Boolean),
+        fuzzyMatchable,
+      });
+      setEditing(false);
+      onChanged();
+    } catch (err: unknown) {
+      onError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!editing) {
+    return (
+      <tr>
+        <td className="srse-text-muted" style={{ fontSize: "0.8rem", fontFamily: "monospace" }}>
+          {field.fieldKey}
+        </td>
+        <td>{field.displayLabel}</td>
+        <td className="srse-text-muted" style={{ fontSize: "0.78rem" }}>
+          {field.tier} · {field.dataType}
+        </td>
+        <td className="srse-text-muted" style={{ fontSize: "0.78rem" }}>
+          {field.groupName || "—"}
+        </td>
+        <td className="srse-text-muted" style={{ fontSize: "0.78rem" }}>
+          {field.allowedValues.length > 0 ? field.allowedValues.join(", ") : "—"}
+        </td>
+        <td className="srse-text-muted" style={{ fontSize: "0.78rem" }}>
+          {field.fuzzyMatchable ? "Yes" : "—"}
+        </td>
+        <td>
+          <div style={{ display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
+            <button type="button" className="srse-btn srse-btn-ghost srse-btn-sm" onClick={startEditing}>
+              Edit
+            </button>
+            <ConfirmDeleteButton
+              idleLabel="Delete"
+              confirmLabel="Yes, delete"
+              title="Stops offering this field in the rule builder and drops it from the mapping table below. Saved scenarios that already use it still resolve, and re-adding the same key brings it back."
+              onConfirm={() => deleteField(field.fieldKey).then(onChanged)}
+              onError={onError}
+            />
+          </div>
+        </td>
+      </tr>
+    );
+  }
+
+  return (
+    <tr>
+      <td className="srse-text-muted" style={{ fontSize: "0.8rem", fontFamily: "monospace" }}>
+        {field.fieldKey}
+        <div className="srse-text-muted" style={{ fontSize: "0.7rem" }}>
+          key is fixed
+        </div>
+      </td>
+      <td>
+        <input
+          aria-label={`Display label for ${field.fieldKey}`}
+          value={displayLabel}
+          onChange={(e) => setDisplayLabel(e.target.value)}
+          className="srse-input"
+          style={{ width: 170 }}
+        />
+      </td>
+      <td>
+        <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
+          <select
+            aria-label={`Tier for ${field.fieldKey}`}
+            value={tier}
+            onChange={(e) => setTier(e.target.value as FieldTier)}
+            className="srse-select"
+          >
+            {TIER_OPTIONS.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label={`Data type for ${field.fieldKey}`}
+            value={dataType}
+            onChange={(e) => setDataType(e.target.value as FieldDataType)}
+            className="srse-select"
+          >
+            {DATA_TYPE_OPTIONS.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </div>
+      </td>
+      <td>
+        <input
+          aria-label={`Group for ${field.fieldKey}`}
+          value={groupName}
+          onChange={(e) => setGroupName(e.target.value)}
+          className="srse-input"
+          style={{ width: 130 }}
+        />
+      </td>
+      <td>
+        <input
+          aria-label={`Allowed values for ${field.fieldKey}`}
+          value={allowedValues}
+          placeholder="comma-separated"
+          onChange={(e) => setAllowedValues(e.target.value)}
+          className="srse-input"
+          style={{ width: 200 }}
+        />
+      </td>
+      <td>
+        <label className="srse-checkbox-label" htmlFor={`field-fuzzy-${field.fieldKey}`}>
+          <input
+            id={`field-fuzzy-${field.fieldKey}`}
+            type="checkbox"
+            checked={fuzzyMatchable}
+            onChange={(e) => setFuzzyMatchable(e.target.checked)}
+          />
+          {" "}
+          Fuzzy
+        </label>
+      </td>
+      <td>
+        <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+          <button
+            type="button"
+            className="srse-btn srse-btn-sm"
+            disabled={saving || !displayLabel.trim()}
+            onClick={onSave}
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+          <button
+            type="button"
+            className="srse-btn srse-btn-ghost srse-btn-sm"
+            disabled={saving}
+            onClick={() => setEditing(false)}
+          >
+            Cancel
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
 // Presto date_diff('year', dob, current_date) — the exact Tier-2 pattern
 // CLAUDE.md's own worked example uses for age. Built here so an admin only
 // ever has to know the DOB column name for THEIR environment, never Presto
@@ -611,6 +882,7 @@ function MappingsPanel({
 }: Readonly<{ registrations: TableRegistration[] }>) {
   const [dataMode, setDataMode] = useState<DataMode>("SYNTHETIC");
   const [rows, setRows] = useState<MappingRow[]>([]);
+  const [fields, setFields] = useState<FieldCatalogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -627,6 +899,15 @@ function MappingsPanel({
       .then(setRows)
       .catch((err: unknown) => setError(errorMessage(err)));
   }, [dataMode, refreshKey]);
+
+  // The catalogue is mode-independent, but it shares refreshKey: deleting a
+  // field has to drop it from the mapping table above in the same beat, since
+  // the backend stops listing mappings for a deactivated field.
+  useEffect(() => {
+    listFields()
+      .then(setFields)
+      .catch((err: unknown) => setError(errorMessage(err)));
+  }, [refreshKey]);
 
   const refresh = () => setRefreshKey((k) => k + 1);
   const unconfiguredCount = rows.filter((r) => isPlaceholderMapping(r.physicalExpression)).length;
@@ -718,6 +999,45 @@ function MappingsPanel({
       </div>
 
       <h3 className="srse-subheading" style={{ fontSize: "0.95rem" }}>
+        Field catalogue
+      </h3>
+      <p className="srse-text-muted" style={{ marginTop: 0, lineHeight: 1.5 }}>
+        What officers see in the rule builder&apos;s parameter palette. Editing a field changes its
+        label, tier, type, group, allowed values and fuzzy eligibility everywhere at once; the field
+        key itself is fixed, because mappings and saved rulesets address the field by it. Deleting
+        withdraws the field from the palette and from the mapping table above — saved scenarios that
+        already use it keep resolving.
+      </p>
+
+      {fields.length > 0 && (
+        <div style={{ overflowX: "auto", marginBottom: "1rem" }}>
+          <table className="srse-table">
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th>Label</th>
+                <th>Tier · Type</th>
+                <th>Group</th>
+                <th>Allowed values</th>
+                <th>Fuzzy</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {fields.map((field) => (
+                <FieldCatalogRowEditor
+                  key={field.fieldKey}
+                  field={field}
+                  onChanged={refresh}
+                  onError={setError}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <h3 className="srse-subheading" style={{ fontSize: "0.95rem" }}>
         Register a new field
       </h3>
       <AddFieldForm onCreated={refresh} />
@@ -727,10 +1047,13 @@ function MappingsPanel({
 
 function ColumnMetadataRowEditor({
   row,
-  onSaved,
+  orphaned,
+  onChanged,
 }: Readonly<{
   row: ColumnMetadata;
-  onSaved: (updated: ColumnMetadata) => void;
+  /** True once the table this row curates is no longer registered. */
+  orphaned: boolean;
+  onChanged: () => void;
 }>) {
   const [businessName, setBusinessName] = useState(row.businessName ?? "");
   const [fuzzyMatchable, setFuzzyMatchable] = useState(row.fuzzyMatchable);
@@ -751,14 +1074,14 @@ function ColumnMetadataRowEditor({
     setSaving(true);
     setError(null);
     try {
-      const updated = await upsertColumnMetadata(
+      await upsertColumnMetadata(
         { catalog: row.catalog, schema: row.schema, table: row.table },
         row.column,
         businessName.trim() || null,
         fuzzyMatchable,
         visible,
       );
-      onSaved(updated);
+      onChanged();
     } catch (err: unknown) {
       setError(errorMessage(err));
     } finally {
@@ -770,6 +1093,21 @@ function ColumnMetadataRowEditor({
     <tr>
       <td className="srse-text-muted" style={{ fontSize: "0.78rem", fontFamily: "monospace" }}>
         {row.catalog} › {row.schema} › {row.table}
+        {/*
+          Settings outlive an unregister on purpose — re-registering the table
+          restores the admin's intent, hidden columns included, rather than
+          silently re-exposing them. That leaves rows pointing at tables nobody
+          can reach any more, so say so and offer the delete that clears them.
+        */}
+        {orphaned && (
+          <div
+            className="srse-text-danger"
+            style={{ fontSize: "0.7rem", marginTop: "0.2rem", fontWeight: 600 }}
+            title="This table is not registered, so the setting has no effect. Register the table again to reapply it, or delete the row."
+          >
+            ⚠ table not registered
+          </div>
+        )}
       </td>
       <td className="srse-text-muted" style={{ fontSize: "0.8rem", fontFamily: "monospace" }}>
         {row.column}
@@ -808,10 +1146,22 @@ function ColumnMetadataRowEditor({
         </label>
       </td>
       <td>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
           <button type="button" className="srse-btn srse-btn-sm" disabled={!dirty || saving} onClick={onSave}>
             {saving ? "Saving…" : "Save"}
           </button>
+          <ConfirmDeleteButton
+            idleLabel="Delete"
+            confirmLabel="Yes, delete"
+            title="Removes this override. The column stays available to officers with an auto-derived label and default fuzzy matching."
+            onConfirm={() =>
+              deleteColumnMetadata(
+                { catalog: row.catalog, schema: row.schema, table: row.table },
+                row.column,
+              ).then(onChanged)
+            }
+            onError={setError}
+          />
           {error && <span className="srse-text-danger">{error}</span>}
         </div>
       </td>
@@ -941,18 +1291,19 @@ function RegisterColumnMetadataForm({
 
 function ColumnMetadataPanel({
   registrations,
-}: Readonly<{ registrations: TableRegistration[] }>) {
-  const [rows, setRows] = useState<ColumnMetadata[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
-
-  useEffect(() => {
-    listColumnMetadata()
-      .then(setRows)
-      .catch((err: unknown) => setError(errorMessage(err)));
-  }, [refreshKey]);
-
-  const refresh = () => setRefreshKey((k) => k + 1);
+  rows,
+  error,
+  onChanged,
+}: Readonly<{
+  registrations: TableRegistration[];
+  rows: ColumnMetadata[];
+  error: string | null;
+  onChanged: () => void;
+}>) {
+  const registeredTables = useMemo(
+    () => new Set(registrations.map((r) => r.qualifiedName)),
+    [registrations],
+  );
 
   return (
     <section className="srse-card">
@@ -961,7 +1312,7 @@ function ColumnMetadataPanel({
         Registering a table above exposes <strong>all</strong> of its columns to officers. Use this table
         to give individual columns a business name, mark them fuzzy-matchable, or hide them. Columns with
         no entry here stay visible and fall back to an auto-derived label and a name-substring guess for
-        fuzzy matching.
+        fuzzy matching — which is exactly what <strong>Delete</strong> reverts a column to.
       </p>
 
       {error && <p className="srse-text-danger">{error}</p>}
@@ -984,7 +1335,8 @@ function ColumnMetadataPanel({
                 <ColumnMetadataRowEditor
                   key={`${row.catalog}.${row.schema}.${row.table}.${row.column}`}
                   row={row}
-                  onSaved={refresh}
+                  orphaned={!registeredTables.has(`${row.catalog}.${row.schema}.${row.table}`)}
+                  onChanged={onChanged}
                 />
               ))}
             </tbody>
@@ -995,8 +1347,121 @@ function ColumnMetadataPanel({
       <h3 className="srse-subheading" style={{ fontSize: "0.95rem" }}>
         Register column metadata
       </h3>
-      <RegisterColumnMetadataForm registrations={registrations} onCreated={refresh} />
+      <RegisterColumnMetadataForm registrations={registrations} onCreated={onChanged} />
     </section>
+  );
+}
+
+/**
+ * One registered table, editable in place.
+ *
+ * Only the layer tag is editable. The catalog/schema/table triple IS the
+ * address every mapping, column-metadata row and saved ruleset refers to, so
+ * "editing" a registration into a different table would silently orphan all of
+ * them — retargeting is Delete + register, which is why both buttons are here.
+ */
+function RegistrationRow({
+  registration,
+  curatedColumnCount,
+  onChanged,
+  onError,
+}: Readonly<{
+  registration: TableRegistration;
+  curatedColumnCount: number;
+  onChanged: () => void;
+  onError: (message: string) => void;
+}>) {
+  const [editing, setEditing] = useState(false);
+  const [layer, setLayer] = useState(registration.layer ?? "");
+  const [saving, setSaving] = useState(false);
+
+  function startEditing() {
+    setLayer(registration.layer ?? "");
+    setEditing(true);
+  }
+
+  async function onSave() {
+    setSaving(true);
+    try {
+      await updateTableRegistration(registration.id, layer.trim() || null);
+      setEditing(false);
+      onChanged();
+    } catch (err: unknown) {
+      onError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <tr>
+      <td style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{registration.catalog}</td>
+      <td style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{registration.schema}</td>
+      <td style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{registration.table}</td>
+      <td>
+        {editing ? (
+          <input
+            aria-label={`Layer for ${registration.qualifiedName}`}
+            list="srse-layer-suggestions"
+            placeholder="SILVER / GOLD"
+            value={layer}
+            onChange={(e) => setLayer(e.target.value)}
+            className="srse-input"
+            style={{ width: 130 }}
+          />
+        ) : (
+          <>
+            {registration.layer ? (
+              <span className="srse-badge">{registration.layer}</span>
+            ) : (
+              <span className="srse-text-muted">—</span>
+            )}
+          </>
+        )}
+      </td>
+      <td>
+        <div style={{ display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
+          {editing ? (
+            <>
+              <button type="button" className="srse-btn srse-btn-sm" disabled={saving} onClick={onSave}>
+                {saving ? "Saving…" : "Save"}
+              </button>
+              <button
+                type="button"
+                className="srse-btn srse-btn-ghost srse-btn-sm"
+                disabled={saving}
+                onClick={() => setEditing(false)}
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="srse-btn srse-btn-ghost srse-btn-sm"
+                onClick={startEditing}
+                title="Re-tag this table's layer. The catalog/schema/table address itself cannot be edited — delete and register the other table instead."
+              >
+                Edit
+              </button>
+              <ConfirmDeleteButton
+                idleLabel="Delete"
+                confirmLabel="Yes, unregister"
+                title="Officers stop seeing this table. Nothing in the lakehouse is touched, and its column settings are kept in case you register it again."
+                onConfirm={() => unregisterTable(registration.id).then(onChanged)}
+                onError={onError}
+              />
+              {curatedColumnCount > 0 && (
+                <span className="srse-text-muted" style={{ fontSize: "0.72rem" }}>
+                  {curatedColumnCount} column setting{curatedColumnCount === 1 ? "" : "s"}
+                </span>
+              )}
+            </>
+          )}
+        </div>
+      </td>
+    </tr>
   );
 }
 
@@ -1012,11 +1477,13 @@ function ColumnMetadataPanel({
  */
 function LakehouseRegistryPanel({
   registrations,
+  columnMetadata,
   loading,
   error,
   onChanged,
 }: Readonly<{
   registrations: TableRegistration[];
+  columnMetadata: ColumnMetadata[];
   loading: boolean;
   error: string | null;
   onChanged: () => void;
@@ -1027,6 +1494,17 @@ function LakehouseRegistryPanel({
   const [formError, setFormError] = useState<string | null>(null);
 
   const onCascadeError = useCallback((message: string) => setFormError(message), []);
+
+  // How many column settings each table carries, so unregistering says what
+  // curation it is putting out of reach (the rows are kept, not deleted).
+  const curatedByTable = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const m of columnMetadata) {
+      const key = `${m.catalog}.${m.schema}.${m.table}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [columnMetadata]);
 
   const alreadyRegistered = useMemo(
     () =>
@@ -1051,16 +1529,6 @@ function LakehouseRegistryPanel({
     }
   }
 
-  async function onUnregister(id: number) {
-    setFormError(null);
-    try {
-      await unregisterTable(id);
-      onChanged();
-    } catch (err: unknown) {
-      setFormError(errorMessage(err));
-    }
-  }
-
   return (
     <section className="srse-card">
       <h2 className="srse-card-title">Lakehouse registry — Catalog › Schema › Table</h2>
@@ -1068,7 +1536,10 @@ function LakehouseRegistryPanel({
         Browse the live lakehouse and register the tables SRSE may use. Officers only ever see registered
         tables. Registering exposes all of the table&apos;s columns — hide individual ones below. Tag each
         table with its layer (e.g. <code>SILVER</code> / <code>GOLD</code>) so the same table name in two
-        layers stays distinguishable.
+        layers stays distinguishable.{" "}
+        <strong>Edit</strong> re-tags that layer; <strong>Delete</strong> withdraws the table from officers
+        without touching anything in the lakehouse, and keeps its column settings in case you register it
+        again.
       </p>
 
       {error && <p className="srse-text-danger">{error}</p>}
@@ -1139,24 +1610,13 @@ function LakehouseRegistryPanel({
             </thead>
             <tbody>
               {registrations.map((r) => (
-                <tr key={r.id}>
-                  <td style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{r.catalog}</td>
-                  <td style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{r.schema}</td>
-                  <td style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{r.table}</td>
-                  <td>
-                    {r.layer ? <span className="srse-badge">{r.layer}</span> : <span className="srse-text-muted">—</span>}
-                  </td>
-                  <td>
-                    <button
-                      type="button"
-                      className="srse-btn srse-btn-ghost srse-btn-sm"
-                      onClick={() => onUnregister(r.id)}
-                      title="Officers stop seeing this table. Nothing in the lakehouse is touched."
-                    >
-                      Unregister
-                    </button>
-                  </td>
-                </tr>
+                <RegistrationRow
+                  key={r.id}
+                  registration={r}
+                  curatedColumnCount={curatedByTable.get(r.qualifiedName) ?? 0}
+                  onChanged={onChanged}
+                  onError={setFormError}
+                />
               ))}
             </tbody>
           </table>
@@ -1167,11 +1627,16 @@ function LakehouseRegistryPanel({
 }
 
 export default function AdminPage() {
-  // Registrations are loaded once here and passed down, because three panels
-  // need the same list and it must refresh together when one of them changes it.
+  // Registrations and column settings are loaded once here and passed down:
+  // several panels need the same two lists, and they have to refresh TOGETHER.
+  // Unregistering a table, for instance, changes no column-settings row but
+  // does turn every one of them into an orphan — a panel refreshing only its
+  // own list would keep showing the stale verdict.
   const [registrations, setRegistrations] = useState<TableRegistration[]>([]);
+  const [columnMetadata, setColumnMetadata] = useState<ColumnMetadata[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [metadataError, setMetadataError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
@@ -1183,6 +1648,15 @@ export default function AdminPage() {
       })
       .catch((err: unknown) => setError(errorMessage(err)))
       .finally(() => setLoading(false));
+  }, [refreshKey]);
+
+  useEffect(() => {
+    listColumnMetadata()
+      .then((m) => {
+        setColumnMetadata(m);
+        setMetadataError(null);
+      })
+      .catch((err: unknown) => setMetadataError(errorMessage(err)));
   }, [refreshKey]);
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
@@ -1198,12 +1672,18 @@ export default function AdminPage() {
       <ConnectionsPanel />
       <LakehouseRegistryPanel
         registrations={registrations}
+        columnMetadata={columnMetadata}
         loading={loading}
         error={error}
         onChanged={refresh}
       />
       <MappingsPanel registrations={registrations} />
-      <ColumnMetadataPanel registrations={registrations} />
+      <ColumnMetadataPanel
+        registrations={registrations}
+        rows={columnMetadata}
+        error={metadataError}
+        onChanged={refresh}
+      />
     </main>
   );
 }

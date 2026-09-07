@@ -20,6 +20,7 @@ import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -141,6 +142,44 @@ class LakehouseAdminControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"catalog\":\"" + CATALOG + "\",\"schema\":\"" + SCHEMA + "\","
                                 + "\"table\":\"tbl_typo\",\"layer\":null}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void editsTheLayerOfAnExistingRegistration() throws Exception {
+        when(registry.updateLayer(5L, "gold"))
+                .thenReturn(new RegisteredTable(5L, CATALOG, SCHEMA, TABLE, "GOLD"));
+
+        mockMvc.perform(put("/api/admin/lakehouse/registrations/{id}", 5)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"layer\":\"gold\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(5))
+                .andExpect(jsonPath("$.layer").value("GOLD"))
+                .andExpect(jsonPath("$.qualifiedName").value(CATALOG + "." + SCHEMA + "." + TABLE));
+    }
+
+    /** Clearing the tag is an edit like any other, not a missing-field error. */
+    @Test
+    void editCanClearTheLayerTag() throws Exception {
+        when(registry.updateLayer(5L, null))
+                .thenReturn(new RegisteredTable(5L, CATALOG, SCHEMA, TABLE, null));
+
+        mockMvc.perform(put("/api/admin/lakehouse/registrations/{id}", 5)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"layer\":null}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.layer").doesNotExist());
+    }
+
+    @Test
+    void editOfAnUnknownRegistrationIsABadRequest() throws Exception {
+        when(registry.updateLayer(404L, "GOLD"))
+                .thenThrow(new IllegalArgumentException("No such registration: 404"));
+
+        mockMvc.perform(put("/api/admin/lakehouse/registrations/{id}", 404)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"layer\":\"GOLD\"}"))
                 .andExpect(status().isBadRequest());
     }
 

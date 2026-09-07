@@ -75,6 +75,23 @@ public class LakehouseRegistryService {
                 new RegisteredTable(null, catalog, schema, table, normaliseLayer(layer)));
     }
 
+    /**
+     * Re-tags an existing registration's layer, addressed by id.
+     *
+     * <p>Only the layer is editable. The catalog/schema/table triple IS the
+     * registration's identity — every mapping, column-metadata row and saved
+     * ruleset refers to a table by that address, not by this row's id, so
+     * "editing" a registration into a different table would silently orphan
+     * all of them. Pointing SRSE at another table is unregister + register.
+     */
+    @Transactional
+    public RegisteredTable updateLayer(long id, String layer) {
+        RegisteredTable existing = registrations.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("No such registration: " + id));
+        existing.setLayer(normaliseLayer(layer));
+        return registrations.save(existing);
+    }
+
     @Transactional
     public void unregister(long id) {
         registrations.deleteById(id);

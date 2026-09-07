@@ -37,10 +37,24 @@ public class FieldCatalogController {
                 .toList();
     }
 
+    /**
+     * Adds a field, or revives one that was previously deactivated.
+     *
+     * <p>{@code field_key} is UNIQUE, and {@link #deactivate} keeps the row so
+     * saved scenarios referring to the key still resolve — so a plain insert of
+     * a re-added key hit the unique index and surfaced as a 500. Reusing the
+     * existing row instead makes delete-then-re-add work, and an attempt to add
+     * a key that is still live is a 409 rather than a constraint violation.
+     */
     @PostMapping("/fields")
     public FieldCatalogEntryResponse create(@RequestBody FieldCatalogRequest req) {
+        FieldCatalogEntry existing = repository.findByFieldKey(req.fieldKey()).orElse(null);
+        if (existing != null && existing.isActive()) {
+            throw new IllegalStateException("Field key already exists: " + req.fieldKey());
+        }
         FieldCatalogEntry saved = repository.save(new FieldCatalogEntry(new FieldCatalogEntry.FieldCatalogEntryData(
-                null, req.fieldKey(), req.displayLabel(), req.tier(), req.dataType(),
+                existing == null ? null : existing.getId(),
+                req.fieldKey(), req.displayLabel(), req.tier(), req.dataType(),
                 req.groupName(), joinAllowedValues(req.allowedValues()), true, req.fuzzyMatchable())));
         return FieldCatalogEntryResponse.from(saved);
     }

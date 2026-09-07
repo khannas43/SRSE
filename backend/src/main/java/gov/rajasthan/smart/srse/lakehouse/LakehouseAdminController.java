@@ -4,6 +4,7 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -68,12 +69,26 @@ public class LakehouseAdminController {
                 registry.register(req.catalog(), req.schema(), req.table(), req.layer()));
     }
 
+    /**
+     * Edits a registration in place. Only the layer tag is editable — see
+     * {@link LakehouseRegistryService#updateLayer} for why the address itself
+     * is not.
+     */
+    @PutMapping("/registrations/{id}")
+    public RegistrationResponse updateRegistration(@PathVariable long id,
+                                                   @RequestBody UpdateRegistrationRequest req) {
+        return RegistrationResponse.from(registry.updateLayer(id, req.layer()));
+    }
+
     @DeleteMapping("/registrations/{id}")
     public void unregister(@PathVariable long id) {
         registry.unregister(id);
     }
 
     public record RegisterTableRequest(String catalog, String schema, String table, String layer) {
+    }
+
+    public record UpdateRegistrationRequest(String layer) {
     }
 
     public record RegistrationResponse(Long id, String catalog, String schema, String table,
