@@ -42,7 +42,8 @@ public class FieldColumnMappingController {
                             .findByFieldKeyAndDataMode(entry.getFieldKey(), dataMode)
                             .map(FieldColumnMapping::getPhysicalExpression)
                             .orElse(null);
-                    return new MappingRowResponse(entry.getFieldKey(), entry.getDisplayLabel(), physicalExpression);
+                    return new MappingRowResponse(entry.getFieldKey(), entry.getDisplayLabel(),
+                            physicalExpression, FieldColumnMapping.tableOf(physicalExpression));
                 })
                 .toList();
     }
@@ -54,12 +55,20 @@ public class FieldColumnMappingController {
         FieldCatalogEntry entry = catalogRepository.findByFieldKey(fieldKey)
                 .orElseThrow(() -> new FieldResolver.UnknownFieldException(fieldKey));
         FieldColumnMapping saved = mappingService.upsert(fieldKey, dataMode, req.physicalExpression());
-        return new MappingRowResponse(entry.getFieldKey(), entry.getDisplayLabel(), saved.getPhysicalExpression());
+        return new MappingRowResponse(entry.getFieldKey(), entry.getDisplayLabel(),
+                saved.getPhysicalExpression(), FieldColumnMapping.tableOf(saved.getPhysicalExpression()));
     }
 
     public record UpsertMappingRequest(String physicalExpression) {
     }
 
-    public record MappingRowResponse(String fieldKey, String displayLabel, String physicalExpression) {
+    /**
+     * @param tableName the table this binding selects FROM, or null when the
+     *                  binding is an expression. Travels to the Admin page so
+     *                  it can warn when one environment's fields disagree about
+     *                  the table — see {@link FieldColumnMapping#tableOf}.
+     */
+    public record MappingRowResponse(String fieldKey, String displayLabel, String physicalExpression,
+                                     String tableName) {
     }
 }

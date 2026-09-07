@@ -127,6 +127,12 @@ export type MappingRow = {
   fieldKey: string;
   displayLabel: string;
   physicalExpression: string | null;
+  /**
+   * The table this binding selects FROM, or null when the binding is an
+   * expression. Derived server-side (FieldColumnMapping.tableOf) so the page
+   * does not have to reimplement the rule the query builder uses.
+   */
+  tableName: string | null;
 };
 
 export type UpdateConnectionRequest = {

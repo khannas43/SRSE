@@ -1,6 +1,7 @@
 package gov.rajasthan.smart.srse.execution;
 
 import gov.rajasthan.smart.srse.compiler.Ast;
+import gov.rajasthan.smart.srse.metadata.FieldColumnMapping;
 import gov.rajasthan.smart.srse.compiler.CompiledQuery;
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.compiler.RuleCompiler;
@@ -140,12 +141,14 @@ public class ExecutionService {
         // compared, and a coercion cast around it would strip to nonsense.
         // See FieldResolver.resolveRawColumn.
         String resolved = fields.resolveRawColumn(BREAKDOWN_DISTRICT);
-        int lastDot = resolved.lastIndexOf('.');
-        if (lastDot < 0) {
+        String table = FieldColumnMapping.tableOf(resolved);
+        if (table == null) {
             throw new IllegalStateException(
-                    "Expected a table-qualified column for '" + BREAKDOWN_DISTRICT + "', got: " + resolved);
+                    "Expected a table-qualified column for '" + BREAKDOWN_DISTRICT + "', got: " + resolved
+                            + ". The whole query's FROM clause is derived from this one binding, so it has"
+                            + " to be a plain catalog.schema.table.column reference, not an expression.");
         }
-        return resolved.substring(0, lastDot);
+        return table;
     }
 
     private void applyTimeout() {

@@ -913,6 +913,21 @@ function MappingsPanel({
   const refresh = () => setRefreshKey((k) => k + 1);
   const unconfiguredCount = rows.filter((r) => isPlaceholderMapping(r.physicalExpression)).length;
 
+  // Every field of one environment must resolve against the SAME flat table —
+  // the flat-catalogue contract — because the query's FROM clause is derived
+  // from a single binding. When they disagree, the WHERE names columns of a
+  // table the FROM never mentioned and Presto answers "User defined type is not
+  // supported", an error that mentions neither the table nor the mapping. Catch
+  // it here, where the fix is one row away, instead of at simulation time.
+  const mappedTables = Array.from(
+    new Set(
+      rows
+        .filter((r) => !isPlaceholderMapping(r.physicalExpression))
+        .map((r) => r.tableName)
+        .filter((t): t is string => !!t),
+    ),
+  );
+
   return (
     <section className="srse-card">
       <h2 className="srse-card-title">Field → catalog/schema/table/column mappings</h2>
@@ -947,6 +962,18 @@ function MappingsPanel({
           ⚠ {unconfiguredCount} of {rows.length} live fields are still unconfigured (
           <code>CHANGE_ME</code> placeholders). Simulations using them will fail with a
           &quot;not configured&quot; error until each is bound to a real column below.
+        </p>
+      )}
+
+      {mappedTables.length > 1 && (
+        <p className="srse-text-danger" style={{ marginTop: 0, fontWeight: 600 }}>
+          ⚠ These fields do not all point at the same table:{" "}
+          <code>{mappedTables.join("</code>, <code>")}</code>. Every field of one environment must
+          resolve against the same flat table — the query&apos;s <code>FROM</code> comes from one
+          binding, so a mismatch makes Presto fail with{" "}
+          <em>&quot;User defined type is not supported&quot;</em>, which names neither the table nor
+          the field. Qualify them all the same way (a bare <code>table.column</code> and a fully
+          qualified <code>catalog.schema.table.column</code> count as different tables).
         </p>
       )}
 

@@ -41,6 +41,38 @@ public class FieldColumnMapping {
         return physicalExpression != null && PLACEHOLDER.matcher(physicalExpression).find();
     }
 
+    /**
+     * The table a plain {@code [catalog.schema.]table.column} binding selects
+     * from, or null when the binding is an EXPRESSION rather than a column
+     * reference (a Tier-2 {@code date_diff(...)} form has no single table to
+     * take, and its last dot is inside the expression).
+     *
+     * <p>Exists because every field of one environment must resolve against
+     * the SAME flat table — that is the flat-catalogue contract (CLAUDE.md),
+     * and {@code ExecutionService} relies on it when it derives the FROM
+     * clause from one field's binding. When the bindings disagree, the query
+     * names a table in FROM that its WHERE columns do not belong to, and
+     * Presto reports it as "User defined type is not supported": an error that
+     * mentions neither the table nor the mapping and sends the reader looking
+     * at column types instead of at the Admin page.
+     */
+    public static String tableOf(String physicalExpression) {
+        if (physicalExpression == null) {
+            return null;
+        }
+        String trimmed = physicalExpression.trim();
+        for (int i = 0; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            // Anything that is not part of a dotted identifier chain — a
+            // paren, quote, space, operator — makes this an expression.
+            if (!Character.isLetterOrDigit(c) && c != '_' && c != '.') {
+                return null;
+            }
+        }
+        int lastDot = trimmed.lastIndexOf('.');
+        return lastDot <= 0 ? null : trimmed.substring(0, lastDot);
+    }
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

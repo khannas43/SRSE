@@ -17,9 +17,9 @@ services:
     environment:
       # NOT 'local': the 'local' profile's ddl-auto=update + 3s Hikari
       # fail-fast timeout are dev-container conveniences that would be
-      # dangerous pointed at a real on-prem DB2 schema. Resolver selection
-      # (Stub vs Metadata) is keyed off DATA_MODE, not Spring profile, so
-      # this still gets the real Golden Layer field resolver.
+      # dangerous pointed at a real on-prem DB2 schema. Field bindings come
+      # from field_column_mapping keyed by DATA_MODE (not by Spring profile),
+      # so this resolves against the real Golden Layer columns.
       - SPRING_PROFILES_ACTIVE=client-dev
       - DATA_MODE=live
       - SRSE_DB2_URL=${CLIENT_DB2_URL}
