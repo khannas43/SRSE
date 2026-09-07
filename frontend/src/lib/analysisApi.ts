@@ -135,6 +135,28 @@ export function listAnalysisColumns(ref: TableRef): Promise<RegisteredColumn[]> 
   );
 }
 
+/**
+ * The COMPLETE match result as a CSV blob, streamed from the backend.
+ *
+ * Deliberately a second request rather than a re-serialisation of what the
+ * grid holds: above the display limit the browser never held the rows in the
+ * first place, and building the file from the screen would hand the officer a
+ * silently truncated export. The cost is that the match query runs again —
+ * which is why this is on an explicit download click, never automatic.
+ */
+export async function downloadRecordMatchCsv(req: RecordMatchRequest): Promise<Blob> {
+  const res = await authorizedFetch(`${API_BASE}/api/analysis/match.csv`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
+  }
+  return res.blob();
+}
+
 export type RecordMatchStreamHandlers = {
   onMeta: (meta: { columns: string[]; sql: string }) => void;
   onRow: (row: Record<string, unknown>) => void;

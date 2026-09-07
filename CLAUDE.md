@@ -174,6 +174,16 @@ so those comparisons did not return zero rows — they failed the whole query
 - Query **timeout** enforced.
 - Breakdown dimensions fixed: district, gender, age_band.
 - Count query returns **aggregates only** — never row-level data.
+- The Analysis match is deliberately **uncapped server-side** (an earlier top-500
+  pre-sample made matches unfindable at crore scale). Large results are handled
+  where they actually hurt — the browser: past **10,000 rows** the grid, its
+  filters and the charts are not rendered and the buffered rows are dropped, and
+  the result is offered as a CSV download instead. That download
+  (`POST /api/analysis/match.csv`) re-runs the match and streams straight from
+  Presto to the file, so it is the COMPLETE result — never a re-serialisation of
+  what the screen was holding. Reading the NDJSON stream still stops at 200,000
+  rows, after which the on-screen count is a lower bound (`200000+`) but the CSV
+  remains complete.
 
 ## Reference
 

@@ -20,14 +20,19 @@ import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
+import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.io.UncheckedIOException;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.StringJoiner;
 
 /**
  * Cross-table fuzzy/exact record matching for the Analysis tab.
@@ -79,6 +84,10 @@ import java.util.Set;
  *    blocked match is {@link GuardrailProperties#queryTimeoutSeconds()}.
  *    Results stream to the client as they're produced (see below), so a
  *    timeout mid-match still leaves whatever rows already streamed visible.
+ *    The browser stops RENDERING past its own limit and offers the result as
+ *    a download instead; that limit is a display decision and lives there, not
+ *    here. {@link #matchCsv} is what makes it safe to draw — the rows past the
+ *    limit are still reachable, as a file, uncapped.
  *  - {@link #match} returns a {@link StreamingResponseBody}: request
  *    validation and SQL/param construction happen synchronously (so bad
  *    requests still fail fast with a normal exception before any response
@@ -126,6 +135,25 @@ public class RecordMatchService {
         Sides sides = validateRequest(req);
         MatchQuery query = buildMatchQuery(req, sides);
         return streamResults(query);
+    }
+
+    /**
+     * The same match, streamed straight out as CSV.
+     *
+     * <p>Exists because the browser is where a large result actually hurts.
+     * The NDJSON stream is parsed into row objects the grid holds and
+     * recomputes over, which is bounded on the client at
+     * {@code MAX_DISPLAYED_ROWS} — so past that point the officer could see a
+     * count but never get the rows. This path never materialises a row in
+     * JavaScript at all: the bytes go from Presto to the file.
+     *
+     * <p>Validation and SQL construction still happen synchronously, so a bad
+     * request 400s before a single byte of the download is written.
+     */
+    public StreamingResponseBody matchCsv(RecordMatchRequest req) {
+        Sides sides = validateRequest(req);
+        MatchQuery query = buildMatchQuery(req, sides);
+        return streamCsv(query);
     }
 
     /**
@@ -400,6 +428,63 @@ public class RecordMatchService {
                 writeLine(outputStream, Map.of("type", "error", "message", message));
             }
         };
+    }
+
+    /**
+     * Streams the result as CSV, one row at a time, holding nothing.
+     *
+     * <p>Unlike {@link #streamResults}, a failure part-way is NOT caught and
+     * reported in-band. NDJSON can carry an {@code error} event because the
+     * client parses events; a CSV cannot say anything a spreadsheet would not
+     * read as data, and a file that simply stops looks exactly like a
+     * complete one. Letting the exception abort the response instead means the
+     * client's fetch rejects and the officer is told the export failed, rather
+     * than quietly filing a truncated result.
+     */
+    private StreamingResponseBody streamCsv(MatchQuery query) {
+        return outputStream -> {
+            Writer writer = new BufferedWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8));
+            // UTF-8 BOM: without it Excel reads the file in the local ANSI
+            // codepage and mangles every Devanagari name in it.
+            writer.write('\uFEFF');
+            writeCsvRow(writer, query.columns().stream().map(Object.class::cast).toList());
+
+            jdbc.setQueryTimeout(guardrails.queryTimeoutSeconds());
+            ColumnMapRowMapper rowMapper = new ColumnMapRowMapper();
+            jdbc.query(query.sql(), query.params().toArray(), (RowCallbackHandler) rs -> {
+                Map<String, Object> row = rowMapper.mapRow(rs, 0);
+                try {
+                    writeCsvRow(writer, query.columns().stream().map(row::get).toList());
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+            writer.flush();
+        };
+    }
+
+    private static void writeCsvRow(Writer writer, List<Object> values) throws IOException {
+        StringJoiner line = new StringJoiner(",");
+        for (Object value : values) {
+            line.add(csvField(value));
+        }
+        // CRLF, the line ending RFC 4180 specifies and the one Excel expects
+        // for a quoted field that itself contains a newline.
+        writer.write(line.toString());
+        writer.write("\r\n");
+    }
+
+    /** Quotes only when it has to, and doubles any quote inside — RFC 4180. */
+    private static String csvField(Object value) {
+        if (value == null) {
+            return "";
+        }
+        String text = String.valueOf(value);
+        if (text.indexOf('"') < 0 && text.indexOf(',') < 0
+                && text.indexOf('\n') < 0 && text.indexOf('\r') < 0) {
+            return text;
+        }
+        return '"' + text.replace("\"", "\"\"") + '"';
     }
 
     private record MatchQuery(String sql, List<Object> params, List<String> columns) {

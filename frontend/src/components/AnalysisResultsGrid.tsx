@@ -66,6 +66,16 @@ type AnalysisResultsGridProps = Readonly<{
   streaming?: boolean;
   totalRows?: number | null;
   totalRowsIsPartial?: boolean;
+  /**
+   * The result outgrew what the tab will render. The table, filters and the
+   * "export what I'm looking at" CSV are all withheld — there is nothing on
+   * screen for them to act on — and the whole result is offered as a download
+   * instead.
+   */
+  tooManyToDisplay?: boolean;
+  displayLimit?: number;
+  /** Streams the COMPLETE result from the backend; see the page's handler. */
+  onDownloadFullCsv?: () => Promise<void>;
   highlightDuplicates: boolean;
   dedupAvailable: boolean;
   dedupEnabled: boolean;
@@ -84,12 +94,22 @@ function MatchRowCountCaption({
   streaming,
   totalRows,
   totalRowsIsPartial,
+  tooManyToDisplay,
 }: Readonly<{
   rowsLength: number;
   streaming: boolean;
   totalRows: number | null | undefined;
   totalRowsIsPartial: boolean | undefined;
+  tooManyToDisplay?: boolean;
 }>) {
+  if (tooManyToDisplay) {
+    return (
+      <>
+        {totalRows == null ? "Counting" : totalRows.toLocaleString()}
+        {totalRowsIsPartial ? "+" : ""} matching rows{streaming ? " (still counting…)" : ""}
+      </>
+    );
+  }
   if (streaming || totalRows == null || totalRows <= rowsLength) {
     return (
       <>
@@ -107,6 +127,91 @@ function MatchRowCountCaption({
   );
 }
 
+/**
+ * What the officer gets instead of the table once the result outgrows what the
+ * tab will render: the count, the reason, and the whole result as a file.
+ *
+ * The download is not the grid's own CSV — that one serialises the rows on
+ * screen, and there are none here. It re-runs the match on the backend and
+ * streams it straight to disk, so what lands in the file is the complete
+ * result rather than the part the browser was willing to keep.
+ */
+function TooManyRowsPanel({
+  totalRows,
+  totalRowsIsPartial,
+  displayLimit,
+  streaming,
+  onDownloadFullCsv,
+}: Readonly<{
+  totalRows: number | null | undefined;
+  totalRowsIsPartial: boolean | undefined;
+  displayLimit: number | undefined;
+  streaming: boolean;
+  onDownloadFullCsv?: () => Promise<void>;
+}>) {
+  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function download() {
+    if (!onDownloadFullCsv) return;
+    setDownloading(true);
+    setError(null);
+    try {
+      await onDownloadFullCsv();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  const limitLabel = (displayLimit ?? 10000).toLocaleString();
+
+  return (
+    <div
+      style={{
+        border: "1px solid var(--srse-border)",
+        borderRadius: "var(--srse-radius-sm)",
+        background: "var(--srse-bg)",
+        padding: "1.25rem",
+      }}
+    >
+      <p style={{ marginTop: 0, marginBottom: "0.5rem", fontWeight: 600 }}>
+        Too many rows to display
+      </p>
+      <p className="srse-text-muted" style={{ marginTop: 0, lineHeight: 1.5 }}>
+        This match returned more than {limitLabel} rows
+        {totalRows != null && ` (${totalRows.toLocaleString()}${totalRowsIsPartial ? "+" : ""})`}, so
+        the results grid, its filters and the charts are not rendered — a table that size cannot be
+        sorted or scrolled usefully, and holding it has crashed the tab before now. Download the CSV
+        to work with the full result, or narrow the match (add a matching column, tighten a fuzzy
+        threshold, or set an age filter) to bring it back on screen.
+      </p>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className="srse-btn srse-btn-primary"
+          onClick={download}
+          disabled={downloading || streaming || !onDownloadFullCsv}
+          title={
+            streaming
+              ? "Wait for the count to finish"
+              : "Runs the match again on the server and streams every row into the file"
+          }
+        >
+          {downloading ? "Preparing CSV…" : "⬇ Download all rows (CSV)"}
+        </button>
+        {downloading && (
+          <span className="srse-text-muted" style={{ fontSize: "0.8rem" }}>
+            The match runs again to build the file — this can take as long as the match itself did.
+          </span>
+        )}
+        {error && <span className="srse-text-danger">{error}</span>}
+      </div>
+    </div>
+  );
+}
+
 export function AnalysisResultsGrid({
   columns,
   rows,
@@ -114,6 +219,9 @@ export function AnalysisResultsGrid({
   streaming,
   totalRows,
   totalRowsIsPartial,
+  tooManyToDisplay,
+  displayLimit,
+  onDownloadFullCsv,
   highlightDuplicates,
   dedupAvailable,
   dedupEnabled,
@@ -193,10 +301,11 @@ export function AnalysisResultsGrid({
               streaming={!!streaming}
               totalRows={totalRows}
               totalRowsIsPartial={totalRowsIsPartial}
+              tooManyToDisplay={tooManyToDisplay}
             />
           </span>
         </div>
-        {rows.length > 0 && (
+        {rows.length > 0 && !tooManyToDisplay && (
           <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
             {dedupAvailable && (
               <label className="srse-checkbox-label" htmlFor="hide-duplicate-records" title="Hides older duplicate rows, keeping the latest by last-updated date">
@@ -231,9 +340,21 @@ export function AnalysisResultsGrid({
         )}
       </div>
 
-      {rows.length === 0 ? (
+      {tooManyToDisplay && (
+        <TooManyRowsPanel
+          totalRows={totalRows}
+          totalRowsIsPartial={totalRowsIsPartial}
+          displayLimit={displayLimit}
+          streaming={!!streaming}
+          onDownloadFullCsv={onDownloadFullCsv}
+        />
+      )}
+
+      {!tooManyToDisplay && rows.length === 0 ? (
         <p className="srse-text-muted">No matching rows. Run a match to see results.</p>
-      ) : (
+      ) : null}
+
+      {!tooManyToDisplay && rows.length > 0 && (
         <>
           <div style={{ overflowX: "auto" }}>
             <table className="srse-table">

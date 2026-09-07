@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  downloadRecordMatchCsv,
   listAnalysisCatalogs,
   listAnalysisColumns,
   listAnalysisSchemas,
@@ -84,7 +85,22 @@ function detectLastUpdatedColumn(columns: RegisteredColumn[]): string | null {
   return null;
 }
 
-const MAX_DISPLAYED_ROWS = 20000;
+/**
+ * Above this the grid is not rendered at all and the result is offered as a
+ * CSV download instead. The rows already buffered are dropped at that point,
+ * so the tab's memory does not grow with a result it has decided not to show
+ * — and the CSV is streamed fresh from the backend, never rebuilt from what
+ * the screen happens to be holding, so it is the COMPLETE result.
+ */
+const MAX_DISPLAYED_ROWS = 10000;
+
+/**
+ * Reading stops here even though rows are no longer being kept: the count
+ * shown to the officer comes from having read the stream, and a match with
+ * crores of rows would otherwise stream for as long as the timeout allows.
+ * Past this the count is reported as a lower bound ("200000+"); the CSV
+ * download is still complete, since the backend re-runs the query uncapped.
+ */
 const MAX_ROWS_TO_PARSE = 200000;
 
 function updateRowById(rows: CriterionRow[], id: string, patch: Partial<CriterionRow>): CriterionRow[] {
@@ -317,6 +333,9 @@ export default function AnalysisPage() {
   // reintroduction of that backend guardrail: the true total is still
   // counted and shown even when not every row is rendered.
   const [matchTotalRows, setMatchTotalRows] = useState<number | null>(null);
+  // Set the moment the result outgrows MAX_DISPLAYED_ROWS: the grid switches
+  // to the CSV-only panel and the buffered rows are released.
+  const [matchTooManyToDisplay, setMatchTooManyToDisplay] = useState(false);
   // True when we stopped reading before the stream finished naturally, so
   // matchTotalRows (if set at all) is a lower bound, not an exact count.
   const [matchCountIsPartial, setMatchCountIsPartial] = useState(false);
@@ -325,6 +344,11 @@ export default function AnalysisPage() {
   // and disables CSV/column-visibility until the result is actually complete.
   const matchStreaming = matchStatus === "loading";
 
+  // The request the displayed result actually came from. The CSV download must
+  // use THIS, not a freshly built one: the officer may have edited the criteria
+  // since running the match, and a file that quietly answers a different
+  // question than the count on screen is worse than no file.
+  const lastRunRequestRef = useRef<RecordMatchRequest | null>(null);
   const pendingRowsRef = useRef<Record<string, unknown>[]>([]);
   const flushIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const rowsSeenRef = useRef(0);
@@ -439,8 +463,33 @@ export default function AnalysisPage() {
     if (pendingRowsRef.current.length > 0) {
       const batch = pendingRowsRef.current;
       pendingRowsRef.current = [];
-      setMatchRows((prev) => [...prev, ...batch]);
+      // A flush already in flight when the limit was crossed must not put the
+      // dropped rows back.
+      setMatchRows((prev) => (rowsSeenRef.current > MAX_DISPLAYED_ROWS ? [] : [...prev, ...batch]));
     }
+  }
+
+  /**
+   * Streams the COMPLETE result to a file. Built from a fresh backend request,
+   * not from `matchRows` — above MAX_DISPLAYED_ROWS the browser deliberately
+   * never held the rows, and even below it the grid holds only what it was
+   * given. The match query therefore runs again, which is why this is on an
+   * explicit click.
+   */
+  async function downloadFullCsv() {
+    const req = lastRunRequestRef.current;
+    if (!req) {
+      throw new Error("Run a match first.");
+    }
+    const blob = await downloadRecordMatchCsv(req);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `analysis-match-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, "-")}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
   async function runMatch(withDedup: boolean) {
@@ -449,6 +498,7 @@ export default function AnalysisPage() {
       setMatchError("Pick at least one Source table + column and one matching Target table + column.");
       return;
     }
+    lastRunRequestRef.current = req;
     setMatchStatus("loading");
     setMatchError(null);
     setMatchColumns([]);
@@ -456,6 +506,7 @@ export default function AnalysisPage() {
     setMatchSql("");
     setMatchTotalRows(null);
     setMatchCountIsPartial(false);
+    setMatchTooManyToDisplay(false);
     pendingRowsRef.current = [];
     rowsSeenRef.current = 0;
     if (flushIntervalRef.current !== null) {
@@ -476,6 +527,14 @@ export default function AnalysisPage() {
             rowsSeenRef.current += 1;
             if (rowsSeenRef.current <= MAX_DISPLAYED_ROWS) {
               pendingRowsRef.current.push(row);
+            } else if (rowsSeenRef.current === MAX_DISPLAYED_ROWS + 1) {
+              // One row over the line is enough to know the grid is out. Drop
+              // what was buffered rather than rendering a slice the officer
+              // would mistake for the whole result — from here the answer is
+              // the count on screen and the CSV, and both are complete.
+              pendingRowsRef.current = [];
+              setMatchTooManyToDisplay(true);
+              setMatchRows([]);
             }
             if (rowsSeenRef.current >= MAX_ROWS_TO_PARSE) {
               setMatchCountIsPartial(true);
@@ -665,6 +724,9 @@ export default function AnalysisPage() {
             streaming={matchStreaming}
             totalRows={matchTotalRows}
             totalRowsIsPartial={matchCountIsPartial}
+            tooManyToDisplay={matchTooManyToDisplay}
+            displayLimit={MAX_DISPLAYED_ROWS}
+            onDownloadFullCsv={downloadFullCsv}
             highlightDuplicates={highlightDuplicates}
             dedupAvailable={!!dedupColumn}
             dedupEnabled={dedupEnabled}

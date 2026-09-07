@@ -452,6 +452,104 @@ class RecordMatchServiceTest {
         assertEquals(List.of("district", "gender"), List.copyOf(columns.getAllValues().get(0)));
     }
 
+    // ---- CSV download: the same match, streamed straight to a file ----
+
+    /** Executes the CSV body against a sink and returns exactly what was written. */
+    private String csvOutput(RecordMatchRequest req) throws Exception {
+        StreamingResponseBody body = service.matchCsv(req);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        body.writeTo(out);
+        return out.toString(StandardCharsets.UTF_8);
+    }
+
+    /** Feeds one fabricated row through whatever RowCallbackHandler is registered. */
+    private void stubOneRow(Map<String, Object> row) throws Exception {
+        ResultSetMetaData md = mock(ResultSetMetaData.class);
+        when(md.getColumnCount()).thenReturn(row.size());
+        List<String> names = List.copyOf(row.keySet());
+        for (int i = 0; i < names.size(); i++) {
+            when(md.getColumnLabel(i + 1)).thenReturn(names.get(i));
+        }
+        ResultSet rs = mock(ResultSet.class);
+        when(rs.getMetaData()).thenReturn(md);
+        for (int i = 0; i < names.size(); i++) {
+            when(rs.getObject(i + 1)).thenReturn(row.get(names.get(i)));
+        }
+        doAnswer(inv -> {
+            ((RowCallbackHandler) inv.getArgument(2)).processRow(rs);
+            return null;
+        }).when(jdbc).query(anyString(), any(Object[].class), any(RowCallbackHandler.class));
+    }
+
+    @Test
+    void csvWritesAHeaderRowAndTheValues() throws Exception {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("source_district", "Jaipur");
+        row.put("target_district", "Jaipur");
+        stubOneRow(row);
+
+        String csv = csvOutput(exactMatchRequest());
+
+        assertTrue(csv.contains("source_district,target_district\r\n"), csv);
+        assertTrue(csv.contains("Jaipur,Jaipur\r\n"), csv);
+        verify(jdbc).setQueryTimeout(30);
+    }
+
+    /**
+     * Without the BOM Excel reads the file in the local ANSI codepage and
+     * mangles every Devanagari name in it — which is most of this data.
+     */
+    @Test
+    void csvStartsWithAUtf8Bom() throws Exception {
+        stubOneRow(new LinkedHashMap<>(Map.of("source_district", "जयपुर")));
+
+        String csv = csvOutput(exactMatchRequest());
+
+        assertEquals('﻿', csv.charAt(0));
+        assertTrue(csv.contains("जयपुर"), csv);
+    }
+
+    /** RFC 4180: quote when it has to, double the quotes inside, null is empty. */
+    @Test
+    void csvQuotesSeparatorsQuotesAndNewlines() throws Exception {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("source_district", "Jaipur, Rajasthan");
+        row.put("target_district", "He said \"hello\"");
+        stubOneRow(row);
+
+        String csv = csvOutput(exactMatchRequest());
+
+        assertTrue(csv.contains("\"Jaipur, Rajasthan\""), csv);
+        assertTrue(csv.contains("\"He said \"\"hello\"\"\""), csv);
+    }
+
+    /**
+     * The download is the only route to the rows once the grid bows out, so it
+     * must be built from the query — not from anything the screen holds — and
+     * carry no row cap of its own.
+     */
+    @Test
+    void csvRunsTheSameUncappedQueryAsTheGrid() throws Exception {
+        stubOneRow(new LinkedHashMap<>(Map.of("source_district", "Jaipur")));
+
+        csvOutput(exactMatchRequest());
+
+        ArgumentCaptor<String> sqlCap = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).query(sqlCap.capture(), any(Object[].class), any(RowCallbackHandler.class));
+        assertTrue(sqlCap.getValue().contains("src.district = tgt.district"), sqlCap.getValue());
+        assertFalse(sqlCap.getValue().toUpperCase().contains("LIMIT"), sqlCap.getValue());
+    }
+
+    /** A rejected criterion must stop the download before a byte is written. */
+    @Test
+    void csvValidatesBeforeStreaming() {
+        doThrow(new IllegalArgumentException("Table is not registered for SRSE: a.b.c"))
+                .when(registry).describeColumns(any(), any());
+
+        assertThrows(IllegalArgumentException.class, () -> service.matchCsv(exactMatchRequest()));
+        verify(jdbc, never()).query(anyString(), any(Object[].class), any(RowCallbackHandler.class));
+    }
+
     // ---- mixed column types (CLAUDE.md: two tables rarely agree on a type) ----
 
     /**

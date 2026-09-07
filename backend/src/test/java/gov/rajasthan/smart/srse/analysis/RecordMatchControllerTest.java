@@ -21,6 +21,7 @@ import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -88,4 +89,38 @@ class RecordMatchControllerTest {
                         .content(body))
                 .andExpect(status().isBadRequest());
     }
+
+    @Test
+    void matchCsvStreamsAnAttachment() throws Exception {
+        StreamingResponseBody body = out ->
+                out.write("source_district,target_district\r\nJaipur,Jaipur\r\n".getBytes(StandardCharsets.UTF_8));
+        when(matchService.matchCsv(any())).thenReturn(body);
+
+        MvcResult mvcResult = mockMvc.perform(post("/api/analysis/match.csv")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(REQUEST_BODY))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        mockMvc.perform(asyncDispatch(mvcResult))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Content-Disposition", containsString("attachment")))
+                .andExpect(content().contentTypeCompatibleWith("text/csv"))
+                .andExpect(content().string(containsString("Jaipur,Jaipur")));
+    }
+
+    /**
+     * Validation runs before the download starts, so a bad request is a plain
+     * 400 rather than a file that turns out to be an error message.
+     */
+    @Test
+    void invalidCsvRequestReturns400() throws Exception {
+        when(matchService.matchCsv(any())).thenThrow(new IllegalArgumentException("bad request"));
+
+        mockMvc.perform(post("/api/analysis/match.csv")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(REQUEST_BODY))
+                .andExpect(status().isBadRequest());
+    }
+
 }
