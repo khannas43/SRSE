@@ -11,6 +11,7 @@ import {
   runRecordMatchStream,
   type AgeUnit,
   type ColumnMetadata,
+  type CompareAs,
   type RecordMatchRequest,
   type RegisteredColumn,
   type TableRef,
@@ -94,6 +95,52 @@ function removeRowById(rows: CriterionRow[], id: string): CriterionRow[] {
   return rows.length <= 1 ? rows : rows.filter((r) => r.id !== id);
 }
 
+/**
+ * Display-only mirror of the backend's SqlTypeFamily. Used to warn an officer
+ * that the two sides of a pair are stored differently — the query itself is
+ * built by TypeCoercion on the server, which is the authority. Anything this
+ * cannot classify simply produces no hint rather than a wrong one.
+ */
+function typeFamilyOf(dataType: string | undefined): "text" | "number" | "other" {
+  if (!dataType) return "other";
+  const base = dataType.trim().toLowerCase().split(/[( ]/)[0];
+  if (["varchar", "char", "character", "string"].includes(base)) return "text";
+  if (
+    ["bigint", "integer", "int", "smallint", "tinyint", "double", "real", "float", "decimal", "numeric"]
+      .includes(base)
+  ) {
+    return "number";
+  }
+  return "other";
+}
+
+function dataTypeOf(row: CriterionRow): string | undefined {
+  return row.columns.find((c) => c.name === row.column)?.dataType;
+}
+
+/**
+ * "These two are stored differently, and here is how they will be compared" —
+ * shown only for a text-vs-number pair, which is the one SRSE actually casts
+ * and the one that used to fail the query outright.
+ */
+function mixedTypeHint(
+  row: CriterionRow,
+  paired: CriterionRow | undefined,
+  compareAsFor: (ref: TableRef, column: string) => CompareAs,
+): string | null {
+  if (!paired || !row.column || !paired.column) return null;
+  const own = typeFamilyOf(dataTypeOf(row));
+  const other = typeFamilyOf(dataTypeOf(paired));
+  if (own === "other" || other === "other" || own === other) return null;
+
+  const override =
+    compareAsFor(row.ref, row.column) !== "AUTO"
+      ? compareAsFor(row.ref, row.column)
+      : compareAsFor(paired.ref, paired.column);
+  const mode = override === "TEXT" ? "text" : "numbers";
+  return `Types differ (${dataTypeOf(row)} vs ${dataTypeOf(paired)}) — compared as ${mode}.`;
+}
+
 type CriterionBoxProps = Readonly<{
   title: string;
   boxId: string;
@@ -102,6 +149,7 @@ type CriterionBoxProps = Readonly<{
   pairedRows?: CriterionRow[];
   isFuzzyMatchable: (ref: TableRef, column: string) => boolean;
   businessNameFor: (ref: TableRef, column: string) => string | null;
+  compareAsFor: (ref: TableRef, column: string) => CompareAs;
   onTableChange: (rowId: string, ref: CascadeValue) => void;
   onColumnChange: (rowId: string, column: string) => void;
   onFuzzyChange: (rowId: string, value: number) => void;
@@ -129,6 +177,7 @@ function CriterionBox({
   pairedRows,
   isFuzzyMatchable,
   businessNameFor,
+  compareAsFor,
   onTableChange,
   onColumnChange,
   onFuzzyChange,
@@ -184,6 +233,22 @@ function CriterionBox({
                 </option>
               ))}
             </select>
+            {dataTypeOf(row) && (
+              <div className="srse-text-muted" style={{ fontSize: "0.7rem", marginTop: "0.2rem" }}>
+                {dataTypeOf(row)}
+              </div>
+            )}
+            {(() => {
+              const hint = mixedTypeHint(row, pairedRows?.[index], compareAsFor);
+              return hint ? (
+                <div
+                  style={{ fontSize: "0.7rem", marginTop: "0.15rem", color: "var(--srse-warning)" }}
+                  title="SRSE casts the pair so the match can run at all. Set 'Compare as' on the Admin page to force the other reading."
+                >
+                  {hint}
+                </div>
+              ) : null;
+            })()}
           </div>
           {showFuzzy && rowShowsFuzzy(row, index, pairedRows, isFuzzyMatchable) && (
             <div style={{ flex: "0 1 100px" }}>
@@ -284,6 +349,10 @@ export default function AnalysisPage() {
 
   function businessNameFor(ref: TableRef, column: string): string | null {
     return columnMetadata.get(metadataKey(ref, column))?.businessName ?? null;
+  }
+
+  function compareAsFor(ref: TableRef, column: string): CompareAs {
+    return columnMetadata.get(metadataKey(ref, column))?.compareAs ?? "AUTO";
   }
 
   async function handleTableChange(
@@ -473,6 +542,7 @@ export default function AnalysisPage() {
           pairedRows={targetRows}
           isFuzzyMatchable={isFuzzyMatchable}
           businessNameFor={businessNameFor}
+          compareAsFor={compareAsFor}
           onTableChange={(rowId, ref) => handleTableChange(setSourceRows, rowId, ref)}
           onColumnChange={(rowId, column) => handleColumnChange(setSourceRows, rowId, column)}
           onFuzzyChange={(rowId, value) => handleFuzzyChange(setSourceRows, rowId, value)}
@@ -487,6 +557,7 @@ export default function AnalysisPage() {
           showFuzzy={false}
           isFuzzyMatchable={isFuzzyMatchable}
           businessNameFor={businessNameFor}
+          compareAsFor={compareAsFor}
           onTableChange={(rowId, ref) => handleTableChange(setTargetRows, rowId, ref)}
           onColumnChange={(rowId, column) => handleColumnChange(setTargetRows, rowId, column)}
           onFuzzyChange={(rowId, value) => handleFuzzyChange(setTargetRows, rowId, value)}

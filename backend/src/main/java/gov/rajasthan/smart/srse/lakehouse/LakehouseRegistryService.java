@@ -6,9 +6,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.function.Function;
 
 /**
@@ -190,17 +190,37 @@ public class LakehouseRegistryService {
      * construction, one walk covers them all.
      */
     public void validateColumns(QualifiedTable table, Collection<String> columns) {
+        describeColumns(table, columns);
+    }
+
+    /**
+     * The same two gates as {@link #validateColumns}, handing back what the
+     * check already looked up: each requested column with its LIVE type.
+     *
+     * <p>Exists so a caller that needs the types — the Analysis match, which
+     * has to know whether two columns are comparable before it can emit the
+     * join (see {@code TypeCoercion}) — does not walk the catalog/schema/table
+     * hierarchy a second time to find out. The walk is the expensive part;
+     * validating and describing are the same lookup.
+     *
+     * @return requested column name → its live description, in request order
+     */
+    public Map<String, RegisteredColumn> describeColumns(QualifiedTable table, Collection<String> columns) {
         validateRegistered(table);
-        Set<String> available = listColumns(table.catalog(), table.schema(), table.table()).stream()
-                .map(RegisteredColumn::name)
-                .collect(java.util.stream.Collectors.toSet());
+        Map<String, RegisteredColumn> available = listColumns(
+                table.catalog(), table.schema(), table.table()).stream()
+                .collect(java.util.stream.Collectors.toMap(RegisteredColumn::name, Function.identity()));
+        Map<String, RegisteredColumn> described = new LinkedHashMap<>();
         for (String column : columns) {
             LakehouseIdentifiers.requireSafe("column", column);
-            if (!available.contains(column)) {
+            RegisteredColumn found = available.get(column);
+            if (found == null) {
                 throw new IllegalArgumentException(
                         "Unknown or hidden column: " + table.qualifiedName() + "." + column);
             }
+            described.put(column, found);
         }
+        return described;
     }
 
     /**

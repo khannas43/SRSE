@@ -1,9 +1,12 @@
 package gov.rajasthan.smart.srse.analysis;
 
+import gov.rajasthan.smart.srse.compiler.CompareAs;
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.execution.GuardrailProperties;
 import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService;
+import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService.RegisteredColumn;
 import gov.rajasthan.smart.srse.lakehouse.QualifiedColumn;
+import gov.rajasthan.smart.srse.lakehouse.QualifiedTable;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadata;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadataRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -21,7 +24,9 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -31,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
@@ -406,7 +412,7 @@ class RecordMatchServiceTest {
     @Test
     void criterionRejectedByTheRegistryNeverReachesTheDatabase() {
         doThrow(new IllegalArgumentException("Table is not registered for SRSE: a.b.c"))
-                .when(registry).validateColumns(any(), any());
+                .when(registry).describeColumns(any(), any());
 
         assertThrows(IllegalArgumentException.class, () -> service.match(exactMatchRequest()));
         verify(jdbc, never()).query(anyString(), any(Object[].class), any(RowCallbackHandler.class));
@@ -429,7 +435,9 @@ class RecordMatchServiceTest {
     /**
      * Resolving a table's columns walks the whole catalog/schema/table
      * hierarchy, so the gate is called ONCE per side with all of that side's
-     * columns — not once per criterion.
+     * columns — not once per criterion. It is describeColumns rather than
+     * validateColumns because the same lookup also yields the live types the
+     * emitted SQL depends on.
      */
     @Test
     void gateIsCalledOncePerSideNotOncePerCriterion() throws Exception {
@@ -440,8 +448,123 @@ class RecordMatchServiceTest {
 
         ArgumentCaptor<java.util.Collection<String>> columns =
                 ArgumentCaptor.forClass(java.util.Collection.class);
-        verify(registry, times(2)).validateColumns(any(), columns.capture());
+        verify(registry, times(2)).describeColumns(any(), columns.capture());
         assertEquals(List.of("district", "gender"), List.copyOf(columns.getAllValues().get(0)));
+    }
+
+    // ---- mixed column types (CLAUDE.md: two tables rarely agree on a type) ----
+
+    /**
+     * Stubs the live types the registry reports for one table. Without a stub
+     * a mocked describeColumns returns an empty map, which reads as "types
+     * unknown" — deliberately the same as the pre-coercion behaviour, so every
+     * test above stays about what it was about.
+     */
+    private void stubTypes(String table, String... columnAndType) {
+        Map<String, RegisteredColumn> described = new LinkedHashMap<>();
+        for (int i = 0; i < columnAndType.length; i += 2) {
+            described.put(columnAndType[i], new RegisteredColumn(
+                    columnAndType[i], columnAndType[i + 1], null, false, true));
+        }
+        lenient().when(registry.describeColumns(eq(new QualifiedTable(CATALOG, SCHEMA, table)), any()))
+                .thenReturn(described);
+    }
+
+    private void stubCompareAs(String table, String column, CompareAs mode) {
+        AnalysisColumnMetadata meta = new AnalysisColumnMetadata(
+                1L, new QualifiedColumn(CATALOG, SCHEMA, table, column), null, false, true);
+        meta.setCompareAs(mode);
+        when(columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
+                CATALOG, SCHEMA, table, column)).thenReturn(Optional.of(meta));
+    }
+
+    /**
+     * The reported failure. An account number held as varchar in one table and
+     * bigint in the other made Presto reject the whole query with
+     * "'=' cannot be applied to varchar, bigint" — the officer saw a broken
+     * match, not a match with no rows.
+     */
+    @Test
+    void varcharVersusBigintJoinsThroughACast() throws Exception {
+        stubTypes("txn_bank", "account_no", "varchar(20)");
+        stubTypes("golden_bank", "account_no", "bigint");
+
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(exact("txn_bank", "account_no")),
+                List.of(exact("golden_bank", "account_no")),
+                false, null, null));
+
+        assertTrue(c.sql().contains("TRY_CAST(src.account_no AS DOUBLE) = tgt.account_no"), c.sql());
+    }
+
+    /** Presto coerces integer↔bigint itself; a cast would only add noise. */
+    @Test
+    void twoNumericColumnsAreComparedDirectly() throws Exception {
+        stubTypes("txn_bank", "account_no", "integer");
+        stubTypes("golden_bank", "account_no", "bigint");
+
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(exact("txn_bank", "account_no")),
+                List.of(exact("golden_bank", "account_no")),
+                false, null, null));
+
+        assertTrue(c.sql().contains("src.account_no = tgt.account_no"), c.sql());
+        assertFalse(c.sql().contains("CAST"), c.sql());
+    }
+
+    /** The admin override wins, and one side carrying it is enough. */
+    @Test
+    void aTextOverrideOnOneSideForcesATextComparison() throws Exception {
+        stubTypes("txn_bank", "account_no", "varchar(20)");
+        stubTypes("golden_bank", "account_no", "bigint");
+        stubCompareAs("txn_bank", "account_no", CompareAs.TEXT);
+
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(exact("txn_bank", "account_no")),
+                List.of(exact("golden_bank", "account_no")),
+                false, null, null));
+
+        assertTrue(c.sql().contains("src.account_no = CAST(tgt.account_no AS VARCHAR)"), c.sql());
+    }
+
+    /**
+     * lower() and levenshtein_distance take text only — a numeric side used to
+     * fail with "Unexpected parameters", in the blocking key before the
+     * similarity check was even reached.
+     */
+    @Test
+    void aFuzzyPairCastsANumericSideToTextForBothBlockingAndSimilarity() throws Exception {
+        stubTypes("txn_bank", "father_name", "varchar(60)");
+        stubTypes("golden_bank", "father_name", "bigint");
+
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(fuzzy("txn_bank", "father_name", 80.0)),
+                List.of(exact("golden_bank", "father_name")),
+                false, null, null));
+
+        assertTrue(c.sql().contains("substr(lower(CAST(tgt.father_name AS VARCHAR)), 1, 3)"), c.sql());
+        assertTrue(c.sql().contains(
+                "levenshtein_distance(lower(src.father_name), lower(CAST(tgt.father_name AS VARCHAR)))"),
+                c.sql());
+    }
+
+    /**
+     * The score and the join must be computed over the SAME expressions — a
+     * score built from the raw columns would fail to compile for exactly the
+     * pairs the join had just been fixed to handle.
+     */
+    @Test
+    void theMatchScoreUsesTheSameCoercedReferencesAsTheJoin() throws Exception {
+        stubTypes("txn_bank", "father_name", "varchar(60)");
+        stubTypes("golden_bank", "father_name", "bigint");
+
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(fuzzy("txn_bank", "father_name", 80.0)),
+                List.of(exact("golden_bank", "father_name")),
+                true, null, null));
+
+        assertTrue(c.sql().contains("match_score_pct"), c.sql());
+        assertFalse(c.sql().contains("lower(tgt.father_name)"), c.sql());
     }
 
     // ---- age filter over a Tier-2 (DOB-derived) age mapping ----

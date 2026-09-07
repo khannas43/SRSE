@@ -1,5 +1,6 @@
 package gov.rajasthan.smart.srse.metadata;
 
+import gov.rajasthan.smart.srse.compiler.CompareAs;
 import gov.rajasthan.smart.srse.lakehouse.LakehouseBrowseService;
 import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService;
 import gov.rajasthan.smart.srse.lakehouse.QualifiedColumn;
@@ -56,10 +57,11 @@ public class AnalysisColumnMetadataController {
                         req.catalog(), req.schema(), req.table(), req.column())
                 .map(AnalysisColumnMetadata::getId)
                 .orElse(null);
-        AnalysisColumnMetadata saved = repository.save(new AnalysisColumnMetadata(
+        AnalysisColumnMetadata entity = new AnalysisColumnMetadata(
                 existingId, new QualifiedColumn(req.catalog(), req.schema(), req.table(), req.column()),
-                req.businessName(), req.fuzzyMatchable(), req.visible()));
-        return ColumnMetadataResponse.from(saved);
+                req.businessName(), req.fuzzyMatchable(), req.visible());
+        entity.setCompareAs(req.compareAs());
+        return ColumnMetadataResponse.from(repository.save(entity));
     }
 
     /**
@@ -81,20 +83,27 @@ public class AnalysisColumnMetadataController {
     }
 
     public record UpsertColumnMetadataRequest(String catalog, String schema, String table, String column,
-                                              String businessName, boolean fuzzyMatchable, Boolean visible) {
-        /** Null {@code visible} reads as visible — see {@link AnalysisColumnMetadata}. */
+                                              String businessName, boolean fuzzyMatchable, Boolean visible,
+                                              CompareAs compareAs) {
+        /**
+         * Null {@code visible} reads as visible and null {@code compareAs} as
+         * AUTO — see {@link AnalysisColumnMetadata}. Normalised here so a
+         * client that predates either field still round-trips unchanged.
+         */
         public UpsertColumnMetadataRequest {
             visible = !Boolean.FALSE.equals(visible);
+            compareAs = CompareAs.orAuto(compareAs);
         }
     }
 
     public record ColumnMetadataResponse(String catalog, String schema, String table, String column,
-                                         String businessName, boolean fuzzyMatchable, boolean visible) {
+                                         String businessName, boolean fuzzyMatchable, boolean visible,
+                                         CompareAs compareAs) {
         static ColumnMetadataResponse from(AnalysisColumnMetadata entity) {
             return new ColumnMetadataResponse(
                     entity.getCatalogName(), entity.getSchemaName(), entity.getTableName(),
                     entity.getColumnName(), entity.getBusinessName(),
-                    entity.isFuzzyMatchable(), entity.isVisible());
+                    entity.isFuzzyMatchable(), entity.isVisible(), entity.getCompareAs());
         }
     }
 }

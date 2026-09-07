@@ -1,6 +1,7 @@
 package gov.rajasthan.smart.srse.metadata;
 
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -46,6 +47,7 @@ public class FieldCatalogController {
      * existing row instead makes delete-then-re-add work, and an attempt to add
      * a key that is still live is a 409 rather than a constraint violation.
      */
+    @CacheEvict(cacheNames = "fieldMappings", allEntries = true)
     @PostMapping("/fields")
     public FieldCatalogEntryResponse create(@RequestBody FieldCatalogRequest req) {
         FieldCatalogEntry existing = repository.findByFieldKey(req.fieldKey()).orElse(null);
@@ -59,6 +61,7 @@ public class FieldCatalogController {
         return FieldCatalogEntryResponse.from(saved);
     }
 
+    @CacheEvict(cacheNames = "fieldMappings", allEntries = true)
     @PutMapping("/fields/{fieldKey}")
     public FieldCatalogEntryResponse update(@PathVariable String fieldKey, @RequestBody FieldCatalogRequest req) {
         FieldCatalogEntry existing = repository.findByFieldKey(fieldKey)
@@ -69,6 +72,7 @@ public class FieldCatalogController {
         return FieldCatalogEntryResponse.from(saved);
     }
 
+    @CacheEvict(cacheNames = "fieldMappings", allEntries = true)
     @DeleteMapping("/fields/{fieldKey}")
     public void deactivate(@PathVariable String fieldKey) {
         FieldCatalogEntry existing = repository.findByFieldKey(fieldKey)

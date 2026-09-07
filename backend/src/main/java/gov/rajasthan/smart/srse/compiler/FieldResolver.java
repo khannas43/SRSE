@@ -16,6 +16,22 @@ public interface FieldResolver {
      */
     String resolveColumn(String fieldKey);
 
+    /**
+     * The physical binding exactly as configured, with no comparison coercion
+     * wrapped around it.
+     *
+     * <p>{@link #resolveColumn} may return a cast expression so the column can
+     * be compared against the officer's value (see {@code TypeCoercion}). That
+     * is right for a predicate and wrong for a caller that takes the
+     * expression APART rather than comparing it — {@code ExecutionService}
+     * derives the FROM table by stripping the last dotted segment, and
+     * {@code CAST(cat.sch.tbl.district AS VARCHAR)} would strip to nonsense.
+     * Structural callers ask for the raw form.
+     */
+    default String resolveRawColumn(String fieldKey) {
+        return resolveColumn(fieldKey);
+    }
+
     class UnknownFieldException extends RuntimeException {
         public UnknownFieldException(String fieldKey) {
             super("Unknown or unmapped field key: " + fieldKey);

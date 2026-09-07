@@ -105,6 +105,42 @@ the column must exist *live* and not be hidden. Neither alone is sufficient —
 the registry can name a since-dropped table, and live introspection alone would
 let an officer reach any table on the cluster.
 
+### Cross-type comparison (Analysis match + Rule Engine)
+
+Two tables rarely agree on a type. The same account number is `varchar` in the
+transaction table and `bigint` in the Golden Layer; an income is `varchar` where
+the catalogue calls it a NUMBER. **Presto does not coerce across type families**,
+so those comparisons did not return zero rows — they failed the whole query
+(`'=' cannot be applied to varchar, bigint`; `lower(bigint)` →
+`Unexpected parameters`).
+
+- `compiler/SqlTypeFamily` + `compiler/TypeCoercion` are the single place that
+  decides a cast. **Within** a family nothing is emitted — Presto already
+  coerces integer↔bigint and varchar(20)↔varchar(50), and a cast there would
+  only change results. An **UNKNOWN** type (row/array/map/varbinary) is left
+  exactly as it is rather than guessed at.
+- **Number vs text compares as NUMBERS by default** (`TRY_CAST` on the text
+  side). A value stored as a number has already lost its leading zeros, so
+  `'0123'` and `123` are the same identifier recorded twice; comparing as text
+  would systematically miss exactly the rows being looked for. `TRY_CAST`, never
+  `CAST`: one unparseable row must not fail the match.
+- **Admin override per column** — `analysis_column_metadata.compare_as`
+  (`AUTO`/`NUMBER`/`TEXT`), set on the Admin page. An explicit setting on
+  *either* side wins; if the two sides conflict, TEXT wins (it can represent
+  every value, so it can lose matches but never nulls a side away).
+- **Fuzzy pairs always compare as text** — Levenshtein is a string measure — so
+  a non-text side is cast for the blocking key and the similarity alike.
+- **Rule Engine**: `MetadataFieldResolver.resolveColumn` casts the column to
+  meet the field's declared data type, since the officer's value is already
+  bound over JDBC and cannot move. Only a plain four-part binding is coerced (a
+  Tier-2 expression is already typed); introspection failure falls back to the
+  uncast binding rather than taking a preview down. Callers that take the
+  binding APART rather than comparing it use `resolveRawColumn` — a cast around
+  it would strip to nonsense.
+- Boolean and temporal fields are never coerced: `TRY_CAST` would turn the
+  `'Y'`/`'N'` flags this data is full of into silent NULLs, and a date's text
+  format is anybody's guess. Better to fail loudly than answer wrongly.
+
 ## Java 17 code-style expectations (backend)
 
 - **Records** for AST nodes and immutable DTOs.

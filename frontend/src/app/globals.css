@@ -17,6 +17,10 @@
   --srse-primary-bg: #eaf1fd;
   --srse-success: #1a7f37;
   --srse-success-bg: #eaf7ee;
+  /* Informational, not an error: something the officer should notice and can
+     override on the Admin page (e.g. two match columns stored as different
+     types), as distinct from --srse-danger, which means the action failed. */
+  --srse-warning: #a15c00;
   --srse-danger: #c8102e;
   --srse-danger-bg: #fdecee;
   --srse-radius: 10px;

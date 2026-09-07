@@ -116,7 +116,10 @@ public class ExecutionService {
      * admin-editable live, with no restart, via FieldColumnMappingController.
      */
     private String resolveTable() {
-        String resolved = fields.resolveColumn(BREAKDOWN_DISTRICT);
+        // Raw, not resolveColumn: the binding is being taken apart here, not
+        // compared, and a coercion cast around it would strip to nonsense.
+        // See FieldResolver.resolveRawColumn.
+        String resolved = fields.resolveRawColumn(BREAKDOWN_DISTRICT);
         int lastDot = resolved.lastIndexOf('.');
         if (lastDot < 0) {
             throw new IllegalStateException(

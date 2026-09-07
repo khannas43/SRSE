@@ -1,9 +1,12 @@
 package gov.rajasthan.smart.srse.metadata;
 
+import gov.rajasthan.smart.srse.compiler.CompareAs;
 import gov.rajasthan.smart.srse.lakehouse.QualifiedColumn;
 import gov.rajasthan.smart.srse.lakehouse.QualifiedTable;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -27,11 +30,12 @@ import jakarta.persistence.UniqueConstraint;
  * same physical column can be picked as either in a given match, and the
  * "Source: "/"Target: " prefixing stays a frontend display concern.
  *
- * <p>All three attributes are optional overrides, not requirements. An
+ * <p>Every attribute is an optional override, not a requirement. An
  * unregistered column of a registered table is visible, falls back to an
- * auto-derived display label, and uses a name-substring guess for fuzzy
- * eligibility (see {@code RecordMatchService}) — this table only needs rows
- * for the columns worth curating or hiding.
+ * auto-derived display label, uses a name-substring guess for fuzzy
+ * eligibility (see {@code RecordMatchService}), and is coerced by
+ * {@link CompareAs#AUTO} when compared against a column of another type —
+ * this table only needs rows for the columns worth curating or hiding.
  */
 @Entity
 @Table(
@@ -85,6 +89,16 @@ public class AnalysisColumnMetadata {
      */
     @Column(name = "visible")
     private Boolean visible = Boolean.TRUE;
+
+    /**
+     * How this column is coerced when it is compared against a column of a
+     * different type family — see {@link CompareAs}. Null reads as
+     * {@link CompareAs#AUTO}, so rows written before this column existed keep
+     * the behaviour they already had.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "compare_as", length = 16)
+    private CompareAs compareAs;
 
     protected AnalysisColumnMetadata() {
     }
@@ -140,6 +154,20 @@ public class AnalysisColumnMetadata {
     /** Null reads as visible — see {@link #visible}. */
     public boolean isVisible() {
         return !Boolean.FALSE.equals(visible);
+    }
+
+    /** Never null — an unset column reads as {@link CompareAs#AUTO}. */
+    public CompareAs getCompareAs() {
+        return CompareAs.orAuto(compareAs);
+    }
+
+    /**
+     * Set separately rather than through the constructor: the four-part
+     * address plus the three display flags are already the constructor's
+     * limit, and this is an optional override on top of them.
+     */
+    public void setCompareAs(CompareAs compareAs) {
+        this.compareAs = compareAs;
     }
 
     public QualifiedColumn toQualifiedColumn() {

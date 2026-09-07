@@ -34,6 +34,7 @@ import {
   listColumnMetadata,
   upsertColumnMetadata,
   type ColumnMetadata,
+  type CompareAs,
 } from "@/lib/analysisApi";
 import LakehouseCascade, {
   EMPTY_CASCADE,
@@ -1045,6 +1046,50 @@ function MappingsPanel({
   );
 }
 
+const COMPARE_AS_OPTIONS: { value: CompareAs; label: string; title: string }[] = [
+  {
+    value: "AUTO",
+    label: "Auto",
+    title:
+      "Default. Compared as numbers when one side is numeric and the other is text, so 0123 still matches 123. Two columns of the same type are compared as they always were.",
+  },
+  {
+    value: "NUMBER",
+    label: "Number",
+    title:
+      "Always compare numerically — the text side goes through TRY_CAST. Text that is not a number simply does not match.",
+  },
+  {
+    value: "TEXT",
+    label: "Text",
+    title:
+      "Always compare as text — use when the text form is the truth, e.g. a code with meaningful leading zeros.",
+  },
+];
+
+function CompareAsSelect({
+  id,
+  value,
+  onChange,
+}: Readonly<{ id: string; value: CompareAs; onChange: (value: CompareAs) => void }>) {
+  return (
+    <select
+      id={id}
+      aria-label="Compare as"
+      className="srse-select"
+      value={value}
+      onChange={(e) => onChange(e.target.value as CompareAs)}
+      title={COMPARE_AS_OPTIONS.find((o) => o.value === value)?.title}
+    >
+      {COMPARE_AS_OPTIONS.map((o) => (
+        <option key={o.value} value={o.value} title={o.title}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 function ColumnMetadataRowEditor({
   row,
   orphaned,
@@ -1058,13 +1103,15 @@ function ColumnMetadataRowEditor({
   const [businessName, setBusinessName] = useState(row.businessName ?? "");
   const [fuzzyMatchable, setFuzzyMatchable] = useState(row.fuzzyMatchable);
   const [visible, setVisible] = useState(row.visible);
+  const [compareAs, setCompareAs] = useState<CompareAs>(row.compareAs ?? "AUTO");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const dirty =
     businessName !== (row.businessName ?? "") ||
     fuzzyMatchable !== row.fuzzyMatchable ||
-    visible !== row.visible;
+    visible !== row.visible ||
+    compareAs !== (row.compareAs ?? "AUTO");
 
   // Unique per fully-qualified column — the same table.column can exist in
   // both the Silver and Gold catalog, so the bare pair is not a unique DOM id.
@@ -1080,6 +1127,7 @@ function ColumnMetadataRowEditor({
         businessName.trim() || null,
         fuzzyMatchable,
         visible,
+        compareAs,
       );
       onChanged();
     } catch (err: unknown) {
@@ -1134,6 +1182,9 @@ function ColumnMetadataRowEditor({
         </label>
       </td>
       <td>
+        <CompareAsSelect id={`col-meta-compare-${rowId}`} value={compareAs} onChange={setCompareAs} />
+      </td>
+      <td>
         <label className="srse-checkbox-label" htmlFor={`col-meta-visible-${rowId}`} title="Uncheck to hide this column from officers in the Analysis tab">
           <input
             id={`col-meta-visible-${rowId}`}
@@ -1182,6 +1233,7 @@ function RegisterColumnMetadataForm({
   const [businessName, setBusinessName] = useState("");
   const [fuzzyMatchable, setFuzzyMatchable] = useState(false);
   const [visible, setVisible] = useState(true);
+  const [compareAs, setCompareAs] = useState<CompareAs>("AUTO");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1211,10 +1263,12 @@ function RegisterColumnMetadataForm({
         businessName.trim() || null,
         fuzzyMatchable,
         visible,
+        compareAs,
       );
       setBusinessName("");
       setFuzzyMatchable(false);
       setVisible(true);
+      setCompareAs("AUTO");
       onCreated();
     } catch (err: unknown) {
       setError(errorMessage(err));
@@ -1267,6 +1321,10 @@ function RegisterColumnMetadataForm({
         className="srse-input"
         style={{ width: 220 }}
       />
+      <label className="srse-text-muted" htmlFor="register-col-compare" style={{ fontSize: "0.72rem" }}>
+        Compare as
+      </label>
+      <CompareAsSelect id="register-col-compare" value={compareAs} onChange={setCompareAs} />
       <label className="srse-checkbox-label" htmlFor="register-col-fuzzy" title="Offer approximate (Levenshtein) matching for this column in the Analysis tab">
         <input id="register-col-fuzzy" type="checkbox" checked={fuzzyMatchable} onChange={(e) => setFuzzyMatchable(e.target.checked)} />
         {" "}
@@ -1313,6 +1371,13 @@ function ColumnMetadataPanel({
         to give individual columns a business name, mark them fuzzy-matchable, or hide them. Columns with
         no entry here stay visible and fall back to an auto-derived label and a name-substring guess for
         fuzzy matching — which is exactly what <strong>Delete</strong> reverts a column to.
+        <br />
+        <strong>Compare as</strong> only matters when a match puts this column against one of a{" "}
+        <em>different</em> type — an account number stored <code>varchar</code> in one table and{" "}
+        <code>bigint</code> in another. SRSE casts the pair rather than letting the query fail;{" "}
+        <em>Auto</em> compares such a pair as <strong>numbers</strong> (so <code>0123</code> still
+        matches <code>123</code>), and setting <em>Text</em> on either side forces the text reading
+        instead. Two columns of the same type are unaffected.
       </p>
 
       {error && <p className="srse-text-danger">{error}</p>}
@@ -1326,6 +1391,7 @@ function ColumnMetadataPanel({
                 <th>Column</th>
                 <th>Business name</th>
                 <th>Fuzzy matchable</th>
+                <th>Compare as</th>
                 <th>Visible</th>
                 <th />
               </tr>

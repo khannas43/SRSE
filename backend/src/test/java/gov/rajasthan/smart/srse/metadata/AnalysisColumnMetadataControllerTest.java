@@ -1,11 +1,13 @@
 package gov.rajasthan.smart.srse.metadata;
 
+import gov.rajasthan.smart.srse.compiler.CompareAs;
 import gov.rajasthan.smart.srse.decision.DecisionExceptionHandler;
 import gov.rajasthan.smart.srse.lakehouse.LakehouseBrowseService;
 import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService;
 import gov.rajasthan.smart.srse.lakehouse.QualifiedColumn;
 import gov.rajasthan.smart.srse.security.MockJwtService;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -17,6 +19,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import java.util.List;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -130,6 +133,46 @@ class AnalysisColumnMetadataControllerTest {
                                 + "\"table\":\"tbl_txn_doc_engine\",\"column\":\"m_id\","
                                 + "\"businessName\":null,\"fuzzyMatchable\":false}"))
                 .andExpect(status().isBadRequest());
+    }
+
+    /**
+     * The per-column comparison override has to survive the round trip — it is
+     * what an admin sets when the two sides of a match disagree on type.
+     */
+    @Test
+    void upsertPersistsAndReturnsTheCompareAsOverride() throws Exception {
+        when(repository.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
+                CATALOG, SCHEMA, "tbl_txn_bankdtl", "account_no")).thenReturn(Optional.empty());
+        when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        mockMvc.perform(put("/api/analysis/column-metadata")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"catalog\":\"" + CATALOG + "\",\"schema\":\"" + SCHEMA + "\","
+                                + "\"table\":\"tbl_txn_bankdtl\",\"column\":\"account_no\","
+                                + "\"businessName\":\"Account Number\",\"fuzzyMatchable\":false,"
+                                + "\"compareAs\":\"TEXT\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.compareAs").value("TEXT"));
+
+        ArgumentCaptor<AnalysisColumnMetadata> captor = ArgumentCaptor.forClass(AnalysisColumnMetadata.class);
+        verify(repository).save(captor.capture());
+        assertEquals(CompareAs.TEXT, captor.getValue().getCompareAs());
+    }
+
+    /** A request that omits the field — or predates it — reads as AUTO. */
+    @Test
+    void omittedCompareAsReadsAsAuto() throws Exception {
+        when(repository.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
+                CATALOG, SCHEMA, "tbl_txn_bankdtl", "account_no")).thenReturn(Optional.empty());
+        when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        mockMvc.perform(put("/api/analysis/column-metadata")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"catalog\":\"" + CATALOG + "\",\"schema\":\"" + SCHEMA + "\","
+                                + "\"table\":\"tbl_txn_bankdtl\",\"column\":\"account_no\","
+                                + "\"businessName\":null,\"fuzzyMatchable\":false}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.compareAs").value("AUTO"));
     }
 
     @Test

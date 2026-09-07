@@ -2,10 +2,14 @@ package gov.rajasthan.smart.srse.analysis;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import gov.rajasthan.smart.srse.compiler.AliasRebase;
+import gov.rajasthan.smart.srse.compiler.CompareAs;
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.compiler.FuzzyMatchSql;
+import gov.rajasthan.smart.srse.compiler.SqlTypeFamily;
+import gov.rajasthan.smart.srse.compiler.TypeCoercion;
 import gov.rajasthan.smart.srse.execution.GuardrailProperties;
 import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService;
+import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService.RegisteredColumn;
 import gov.rajasthan.smart.srse.lakehouse.QualifiedTable;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadata;
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadataRepository;
@@ -46,6 +50,13 @@ import java.util.Set;
  *  - Fuzzy-vs-exact per criterion pair is decided by {@link AnalysisColumnMetadataRepository}
  *    (admin-registered override) first, falling back to a name-substring
  *    guess when neither side is registered — see {@link #isFuzzyMatchable}.
+ *  - The two sides of a pair are rarely the same physical type, and Presto
+ *    does not coerce across type families: an account number held varchar in
+ *    one table and bigint in another failed the whole query with "'=' cannot
+ *    be applied to varchar, bigint". Every pair therefore goes through
+ *    {@code TypeCoercion} with the columns' LIVE types (gathered by the same
+ *    registry call that gates them) and the admin's per-column
+ *    {@code CompareAs} setting — see {@link #planPairs}.
  *  - Read-only. No write/DELETE capability. "Dedup" is view-only — it
  *    collapses duplicate rows in the returned grid, never touches the
  *    lakehouse.
@@ -112,17 +123,29 @@ public class RecordMatchService {
     }
 
     public StreamingResponseBody match(RecordMatchRequest req) {
-        validateRequest(req);
-        MatchQuery query = buildMatchQuery(req);
+        Sides sides = validateRequest(req);
+        MatchQuery query = buildMatchQuery(req, sides);
         return streamResults(query);
     }
 
-    private void validateRequest(RecordMatchRequest req) {
-        QualifiedTable sourceTable = validateSide(req.sourceCriteria(), "sourceCriteria");
-        QualifiedTable targetTable = validateSide(req.targetCriteria(), "targetCriteria");
+    /**
+     * Both sides' columns as the LIVE lakehouse describes them, gathered by
+     * the same pass that gates them. The types travel because the SQL depends
+     * on them — see {@link #planPairs}.
+     */
+    private record Sides(QualifiedTable sourceTable, Map<String, RegisteredColumn> sourceColumns,
+                         QualifiedTable targetTable, Map<String, RegisteredColumn> targetColumns) {
+    }
+
+    private Sides validateRequest(RecordMatchRequest req) {
+        QualifiedTable sourceTable = tableOf(req.sourceCriteria(), "sourceCriteria");
+        QualifiedTable targetTable = tableOf(req.targetCriteria(), "targetCriteria");
         if (req.sourceCriteria().size() != req.targetCriteria().size()) {
             throw new IllegalArgumentException("sourceCriteria and targetCriteria must be the same size");
         }
+        Sides sides = new Sides(
+                sourceTable, describeSide(sourceTable, req.sourceCriteria()),
+                targetTable, describeSide(targetTable, req.targetCriteria()));
         if (req.dedup() != null) {
             validateSideMembership(req.dedup().qualifiedTable(), sourceTable, targetTable, "dedup.table");
             registry.validateColumn(req.dedup().qualifiedColumn());
@@ -130,6 +153,7 @@ public class RecordMatchService {
         if (req.ageFilter() != null) {
             validateAgeFilter(req.ageFilter());
         }
+        return sides;
     }
 
     private static void validateAgeFilter(AgeFilterSpec ageFilter) {
@@ -141,18 +165,24 @@ public class RecordMatchService {
         }
     }
 
-    private MatchQuery buildMatchQuery(RecordMatchRequest req) {
+    private MatchQuery buildMatchQuery(RecordMatchRequest req, Sides sides) {
         List<Object> params = new ArrayList<>();
         Set<String> outerColumns = new LinkedHashSet<>();
         StringBuilder select = new StringBuilder();
         StringBuilder onClause = new StringBuilder();
         StringBuilder where = new StringBuilder();
 
+        // Every type-dependent decision is made once, here, and both the join
+        // and the match score read the same plan — they MUST agree on which
+        // pairs are fuzzy and on how each side is cast, or the score would be
+        // computed over different expressions than the join matched on.
+        List<CriterionPair> pairs = planPairs(req, sides);
+
         appendCriteriaSelects(select, outerColumns, req);
-        appendJoinConditions(onClause, where, params, req);
+        appendJoinConditions(onClause, where, params, pairs);
 
         String dedupAlias = appendDedupSelect(select, outerColumns, req);
-        appendMatchScoreSelect(select, outerColumns, req);
+        appendMatchScoreSelect(select, outerColumns, req, pairs);
         appendAgeFilter(where, params, req);
 
         if (where.length() == 0) {
@@ -180,41 +210,94 @@ public class RecordMatchService {
         }
     }
 
-    private void appendJoinConditions(StringBuilder onClause, StringBuilder where, List<Object> params,
-                                      RecordMatchRequest req) {
+    /**
+     * One (source, target) criterion pair with every type-dependent decision
+     * already made: whether the pair is fuzzy, and the SQL each side becomes
+     * after coercion.
+     *
+     * <p>{@code sourceRef}/{@code targetRef} are what actually goes into SQL.
+     * For a fuzzy pair they are the TEXT forms (Levenshtein and {@code lower}
+     * take nothing else); for an exact pair they are the two sides aligned to
+     * a common type — which is the whole point: the same account number stored
+     * {@code varchar} in one table and {@code bigint} in the other used to
+     * fail the query outright with {@code '=' cannot be applied to varchar,
+     * bigint}.
+     */
+    private record CriterionPair(MatchCriterion source, MatchCriterion target, boolean fuzzy,
+                                 String sourceRef, String targetRef) {
+    }
+
+    /**
+     * Resolves every pair once — fuzzy-or-exact, and the casts each side
+     * needs. Both the join and the match score read this, so they cannot drift
+     * apart, and each column's admin metadata is fetched once instead of once
+     * per use.
+     */
+    private List<CriterionPair> planPairs(RecordMatchRequest req, Sides sides) {
+        List<CriterionPair> pairs = new ArrayList<>();
         for (int i = 0; i < req.sourceCriteria().size(); i++) {
             MatchCriterion sc = req.sourceCriteria().get(i);
             MatchCriterion tc = req.targetCriteria().get(i);
-            appendCriterionJoin(onClause, where, params, i, sc, tc);
+            Optional<AnalysisColumnMetadata> sourceMeta = findMetadata(sc);
+            Optional<AnalysisColumnMetadata> targetMeta = findMetadata(tc);
+
+            String srcCol = "src." + sc.column();
+            String tgtCol = "tgt." + tc.column();
+            SqlTypeFamily srcType = familyOf(sides.sourceColumns(), sc.column());
+            SqlTypeFamily tgtType = familyOf(sides.targetColumns(), tc.column());
+
+            if (isFuzzyMatchable(sc, tc, sourceMeta, targetMeta)) {
+                // CompareAs does not enter into a fuzzy pair: Levenshtein
+                // similarity is a string measure, so both sides go to text
+                // whatever the admin set for a direct comparison.
+                pairs.add(new CriterionPair(sc, tc, true,
+                        TypeCoercion.asText(srcCol, srcType), TypeCoercion.asText(tgtCol, tgtType)));
+            } else {
+                CompareAs mode = CompareAs.resolve(compareAsOf(sourceMeta), compareAsOf(targetMeta));
+                TypeCoercion.Aligned aligned = TypeCoercion.align(srcCol, srcType, tgtCol, tgtType, mode);
+                pairs.add(new CriterionPair(sc, tc, false, aligned.left(), aligned.right()));
+            }
         }
+        return pairs;
     }
 
-    private void appendCriterionJoin(StringBuilder onClause, StringBuilder where, List<Object> params,
-                                     int index, MatchCriterion sc, MatchCriterion tc) {
-        String srcCol = "src." + sc.column();
-        String tgtCol = "tgt." + tc.column();
-        if (onClause.length() > 0) {
-            onClause.append(" AND ");
-        }
-        if (isFuzzyMatchable(sc, tc)) {
-            appendFuzzyJoin(onClause, where, params, index, sc, srcCol, tgtCol);
-        } else {
-            onClause.append(srcCol).append(" = ").append(tgtCol);
+    private static SqlTypeFamily familyOf(Map<String, RegisteredColumn> columns, String column) {
+        RegisteredColumn described = columns.get(column);
+        return described == null ? SqlTypeFamily.UNKNOWN : SqlTypeFamily.of(described.dataType());
+    }
+
+    private static CompareAs compareAsOf(Optional<AnalysisColumnMetadata> meta) {
+        return meta.map(AnalysisColumnMetadata::getCompareAs).orElse(CompareAs.AUTO);
+    }
+
+    private void appendJoinConditions(StringBuilder onClause, StringBuilder where, List<Object> params,
+                                      List<CriterionPair> pairs) {
+        for (int i = 0; i < pairs.size(); i++) {
+            CriterionPair pair = pairs.get(i);
+            if (onClause.length() > 0) {
+                onClause.append(" AND ");
+            }
+            if (pair.fuzzy()) {
+                appendFuzzyJoin(onClause, where, params, i, pair);
+            } else {
+                onClause.append(pair.sourceRef()).append(" = ").append(pair.targetRef());
+            }
         }
     }
 
     private static void appendFuzzyJoin(StringBuilder onClause, StringBuilder where, List<Object> params,
-                                      int index, MatchCriterion sc, String srcCol, String tgtCol) {
-        if (sc.fuzzyThresholdPercent() == null) {
+                                      int index, CriterionPair pair) {
+        if (pair.source().fuzzyThresholdPercent() == null) {
             throw new IllegalArgumentException(
                     "sourceCriteria[" + index + "].fuzzyThresholdPercent is required for a name column");
         }
-        double threshold = sc.fuzzyThresholdPercent();
+        double threshold = pair.source().fuzzyThresholdPercent();
         if (threshold < 0 || threshold > 100) {
             throw new IllegalArgumentException("fuzzyThresholdPercent must be between 0 and 100");
         }
-        onClause.append(blockingKeyExpr(srcCol)).append(" = ").append(blockingKeyExpr(tgtCol));
-        appendWhereClause(where, FuzzyMatchSql.similarityExpr(srcCol, tgtCol) + " >= ?");
+        onClause.append(blockingKeyExpr(pair.sourceRef())).append(" = ")
+                .append(blockingKeyExpr(pair.targetRef()));
+        appendWhereClause(where, FuzzyMatchSql.similarityExpr(pair.sourceRef(), pair.targetRef()) + " >= ?");
         params.add(threshold / 100.0);
     }
 
@@ -229,11 +312,12 @@ public class RecordMatchService {
         return dedupAlias;
     }
 
-    private void appendMatchScoreSelect(StringBuilder select, Set<String> outerColumns, RecordMatchRequest req) {
+    private void appendMatchScoreSelect(StringBuilder select, Set<String> outerColumns,
+                                        RecordMatchRequest req, List<CriterionPair> pairs) {
         if (!req.highlightDuplicates()) {
             return;
         }
-        String scoreExpr = buildMatchScoreExpr(req);
+        String scoreExpr = buildMatchScoreExpr(pairs);
         select.append(", ").append(scoreExpr).append(" AS \"match_score_pct\"");
         outerColumns.add("match_score_pct");
     }
@@ -331,14 +415,12 @@ public class RecordMatchService {
         return "substr(lower(" + columnRef + "), 1, " + BLOCKING_PREFIX_LEN + ")";
     }
 
-    private String buildMatchScoreExpr(RecordMatchRequest req) {
+    private static String buildMatchScoreExpr(List<CriterionPair> pairs) {
         List<String> terms = new ArrayList<>();
-        for (int i = 0; i < req.sourceCriteria().size(); i++) {
-            MatchCriterion sc = req.sourceCriteria().get(i);
-            MatchCriterion tc = req.targetCriteria().get(i);
-            String srcCol = "src." + sc.column();
-            String tgtCol = "tgt." + tc.column();
-            terms.add(isFuzzyMatchable(sc, tc) ? FuzzyMatchSql.similarityExpr(srcCol, tgtCol) : "1.0");
+        for (CriterionPair pair : pairs) {
+            terms.add(pair.fuzzy()
+                    ? FuzzyMatchSql.similarityExpr(pair.sourceRef(), pair.targetRef())
+                    : "1.0");
         }
         String sum = String.join(" + ", terms);
         return "ROUND((" + sum + ") / " + terms.size() + " * 100, 1)";
@@ -351,12 +433,12 @@ public class RecordMatchService {
      * officer could see a Fuzzy % control that the backend then silently
      * ignores (or vice versa: a submitted threshold the backend never uses).
      */
-    private boolean isFuzzyMatchable(MatchCriterion sc, MatchCriterion tc) {
-        Optional<AnalysisColumnMetadata> srcMeta = findMetadata(sc);
+    private static boolean isFuzzyMatchable(MatchCriterion sc, MatchCriterion tc,
+                                            Optional<AnalysisColumnMetadata> srcMeta,
+                                            Optional<AnalysisColumnMetadata> tgtMeta) {
         if (srcMeta.isPresent()) {
             return srcMeta.get().isFuzzyMatchable();
         }
-        Optional<AnalysisColumnMetadata> tgtMeta = findMetadata(tc);
         if (tgtMeta.isPresent()) {
             return tgtMeta.get().isFuzzyMatchable();
         }
@@ -378,8 +460,7 @@ public class RecordMatchService {
     }
 
     /**
-     * Validates every criterion on one side shares one QUALIFIED table, and
-     * that each column passes the registry gate; returns that table.
+     * The one QUALIFIED table every criterion on a side must share.
      *
      * <p>The comparison is on the full {@code catalog.schema.table} triple,
      * not the bare table name — with Silver and Gold layers both registered,
@@ -387,7 +468,7 @@ public class RecordMatchService {
      * be two different physical tables, and treating them as one would emit a
      * join whose ON clause silently compared a table against itself.
      */
-    private QualifiedTable validateSide(List<MatchCriterion> criteria, String label) {
+    private static QualifiedTable tableOf(List<MatchCriterion> criteria, String label) {
         if (criteria == null || criteria.isEmpty() || criteria.size() > MAX_CRITERIA_PER_SIDE) {
             throw new IllegalArgumentException(label + " must have 1 to " + MAX_CRITERIA_PER_SIDE + " entries");
         }
@@ -397,11 +478,19 @@ public class RecordMatchService {
                 throw new IllegalArgumentException(label + " must all reference the same table");
             }
         }
-        // One batched gate call rather than one per criterion: resolving a
-        // table's columns walks the whole catalog/schema/table hierarchy, and
-        // every criterion here shares one table by the check above.
-        registry.validateColumns(table, criteria.stream().map(MatchCriterion::column).toList());
         return table;
+    }
+
+    /**
+     * Puts one side's columns through the registry gate and keeps what the
+     * gate looked up — their live types, which the emitted SQL depends on.
+     *
+     * <p>One batched call rather than one per criterion: resolving a table's
+     * columns walks the whole catalog/schema/table hierarchy, and every
+     * criterion here shares one table by {@link #tableOf}'s check.
+     */
+    private Map<String, RegisteredColumn> describeSide(QualifiedTable table, List<MatchCriterion> criteria) {
+        return registry.describeColumns(table, criteria.stream().map(MatchCriterion::column).toList());
     }
 
     private void validateSideMembership(QualifiedTable table, QualifiedTable sourceTable,

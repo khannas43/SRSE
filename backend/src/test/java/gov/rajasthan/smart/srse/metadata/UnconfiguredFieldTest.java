@@ -1,6 +1,7 @@
 package gov.rajasthan.smart.srse.metadata;
 
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
+import gov.rajasthan.smart.srse.lakehouse.LakehouseBrowseService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -70,7 +71,9 @@ class UnconfiguredFieldTest {
         when(mappings.findByFieldKeyAndDataMode("district", DataMode.LIVE)).thenReturn(
                 Optional.of(new FieldColumnMapping(1L, "district", DataMode.LIVE, physicalExpression)));
 
-        return new MetadataFieldResolver(catalog, mappings, "live");
+        // A browse service that can answer nothing: these tests are about the
+        // placeholder gate, which fires before any type introspection.
+        return new MetadataFieldResolver(catalog, mappings, mock(LakehouseBrowseService.class), "live");
     }
 
     /**

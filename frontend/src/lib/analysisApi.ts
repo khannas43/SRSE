@@ -224,7 +224,25 @@ export type ColumnMetadata = TableRef & {
   businessName: string | null;
   fuzzyMatchable: boolean;
   visible: boolean;
+  compareAs: CompareAs;
 };
+
+/**
+ * How a column is coerced when it is compared against a column of a DIFFERENT
+ * type family — the fix for "'=' cannot be applied to varchar, bigint" when
+ * the same account number is varchar in one table and bigint in the other.
+ *
+ * - AUTO   — let SRSE decide: a number-vs-text pair is compared as NUMBERS,
+ *            so '0123' still matches 123. The default.
+ * - NUMBER — always numerically; the text side goes through TRY_CAST, and text
+ *            that is not a number simply does not match.
+ * - TEXT   — always as text; use when the text form is the truth (a code with
+ *            meaningful leading zeros).
+ *
+ * Two columns of the SAME family are always compared as they always were —
+ * Presto coerces those itself, and this setting does not enter into it.
+ */
+export type CompareAs = "AUTO" | "NUMBER" | "TEXT";
 
 export async function listColumnMetadata(): Promise<ColumnMetadata[]> {
   const res = await authorizedFetch(`${API_BASE}/api/analysis/column-metadata`, { credentials: "include" });
@@ -257,12 +275,13 @@ export async function upsertColumnMetadata(
   businessName: string | null,
   fuzzyMatchable: boolean,
   visible: boolean = true,
+  compareAs: CompareAs = "AUTO",
 ): Promise<ColumnMetadata> {
   const res = await authorizedFetch(`${API_BASE}/api/analysis/column-metadata`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ ...ref, column, businessName, fuzzyMatchable, visible }),
+    body: JSON.stringify({ ...ref, column, businessName, fuzzyMatchable, visible, compareAs }),
   });
   if (!res.ok) {
     throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);

@@ -2,6 +2,7 @@ package gov.rajasthan.smart.srse.metadata;
 
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.config.CacheConfig;
+import gov.rajasthan.smart.srse.lakehouse.LakehouseBrowseService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -80,7 +81,8 @@ class MetadataFieldResolverCachingTest {
 
         @Bean
         MetadataFieldResolver metadataFieldResolver() {
-            return new MetadataFieldResolver(catalogRepository, mappingRepository, "synthetic");
+            return new MetadataFieldResolver(
+                    catalogRepository, mappingRepository, mock(LakehouseBrowseService.class), "synthetic");
         }
     }
 }

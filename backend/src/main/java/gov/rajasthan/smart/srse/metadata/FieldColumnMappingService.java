@@ -14,6 +14,14 @@ import org.springframework.stereotype.Service;
  * caches resolved columns in the {@code fieldMappings} cache, so an admin
  * edit here must invalidate that entry or the compiler keeps using the stale
  * physical expression until the cache naturally expires.
+ *
+ * <p>The eviction clears the WHOLE cache rather than one key. A field now has
+ * more than one entry there — the compare-ready form and the raw one
+ * ({@code FieldResolver.resolveRawColumn}) — and the compare-ready form also
+ * folds in the column's live lakehouse type, so "which keys does this edit
+ * invalidate" is no longer answerable from the field key alone. The cache
+ * holds a few dozen short strings and refills on the next compile; getting
+ * this wrong means an admin's correction silently not taking effect.
  */
 @Service
 public class FieldColumnMappingService {
@@ -24,7 +32,7 @@ public class FieldColumnMappingService {
         this.repository = repository;
     }
 
-    @CacheEvict(cacheNames = "fieldMappings", key = "#fieldKey")
+    @CacheEvict(cacheNames = "fieldMappings", allEntries = true)
     public FieldColumnMapping upsert(String fieldKey, DataMode dataMode, String physicalExpression) {
         Long existingId = repository.findByFieldKeyAndDataMode(fieldKey, dataMode)
                 .map(FieldColumnMapping::getId)
