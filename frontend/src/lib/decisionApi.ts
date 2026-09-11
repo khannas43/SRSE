@@ -1,3 +1,5 @@
+import type { CompareAs } from "@/lib/analysisApi";
+
 // Typed client for the SRSE decision-service seam (design doc §8.1 / CLAUDE.md #6).
 // Full-ruleset preview/save model — caller sends the complete PredicateSpec on every call.
 // Shaped like an ODM decision-service call so CP4BA/ODM can later fulfil it without
@@ -537,4 +539,93 @@ export async function unregisterTable(id: number): Promise<void> {
   if (!res.ok) {
     throw new Error(`Admin service error ${res.status}: ${await res.text()}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Admin: configuration backup / restore (JSON bundle)
+// ---------------------------------------------------------------------------
+
+export type AdminConfigConnectionPlane = {
+  jdbcUrl: string;
+  username: string;
+  password: string;
+  driverClassName: string;
+};
+
+export type AdminConfigBundle = {
+  schemaVersion: string;
+  exportedAt: string;
+  dataMode: string;
+  connections: {
+    operational: AdminConfigConnectionPlane;
+    analytical: AdminConfigConnectionPlane;
+  } | null;
+  fieldCatalog: FieldCatalogRequest[];
+  fieldColumnMappings: {
+    fieldKey: string;
+    dataMode: DataMode;
+    physicalExpression: string;
+  }[];
+  registeredTables: {
+    catalog: string;
+    schema: string;
+    table: string;
+    layer: string | null;
+  }[];
+  analysisColumnMetadata: {
+    catalog: string;
+    schema: string;
+    table: string;
+    column: string;
+    businessName: string | null;
+    fuzzyMatchable: boolean;
+    visible: boolean;
+    compareAs: CompareAs;
+  }[];
+  schemes: {
+    code: string;
+    name: string;
+    description: string | null;
+  }[];
+};
+
+export type AdminConfigImportResult = {
+  fieldCatalogCount: number;
+  fieldMappingCount: number;
+  registeredTableCount: number;
+  columnMetadataCount: number;
+  schemeCount: number;
+  operationalRestartRequired: boolean;
+};
+
+/** Downloads the full admin configuration as JSON (connections, mappings, registrations, etc.). */
+export async function exportAdminConfig(): Promise<AdminConfigBundle> {
+  const res = await authorizedFetch(`${API_BASE}/api/admin/config/export`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Admin config export failed ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
+}
+
+/** Restores admin configuration from a previously exported JSON bundle. */
+export async function importAdminConfig(
+  bundle: AdminConfigBundle,
+  options?: { testConnections?: boolean },
+): Promise<AdminConfigImportResult> {
+  const testConnections = options?.testConnections ?? true;
+  const res = await authorizedFetch(
+    `${API_BASE}/api/admin/config/import?testConnections=${testConnections ? "true" : "false"}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(bundle),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`Admin config import failed ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
 }

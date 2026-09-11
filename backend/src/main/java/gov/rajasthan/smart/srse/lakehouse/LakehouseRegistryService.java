@@ -98,6 +98,24 @@ public class LakehouseRegistryService {
         registrations.deleteById(id);
     }
 
+    /**
+     * Config-import path only — persists a registration without live
+     * lakehouse validation so an admin can restore the allow-list before
+     * Presto is reachable. Normal admin UI flows must keep using
+     * {@link #register}.
+     */
+    @Transactional
+    public RegisteredTable importRegistration(String catalog, String schema, String table, String layer) {
+        RegisteredTable existing = registrations
+                .findByCatalogNameAndSchemaNameAndTableName(catalog, schema, table)
+                .orElse(null);
+        if (existing != null) {
+            existing.setLayer(normaliseLayer(layer));
+            return registrations.save(existing);
+        }
+        return registrations.save(new RegisteredTable(null, catalog, schema, table, normaliseLayer(layer)));
+    }
+
     public List<RegisteredTable> listRegistrations() {
         return registrations.findAllByOrderByCatalogNameAscSchemaNameAscTableNameAsc();
     }

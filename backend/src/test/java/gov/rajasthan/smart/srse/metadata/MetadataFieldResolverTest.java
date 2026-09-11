@@ -156,7 +156,9 @@ class MetadataFieldResolverTest {
         String expression = "date_diff('year', beneficiary.date_of_birth, current_date)";
         stubField("age_years", FieldDataType.NUMBER, expression);
 
-        assertEquals(expression, resolver.resolveColumn("age_years"));
+        assertEquals(
+                "date_diff('year', CAST(beneficiary.date_of_birth AS DATE), current_date)",
+                resolver.resolveColumn("age_years"));
         verifyNoInteractions(browse);
     }
 

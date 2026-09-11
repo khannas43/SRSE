@@ -9,7 +9,9 @@ import {
   createField,
   deleteField,
   deleteMapping,
+  exportAdminConfig,
   getConnections,
+  importAdminConfig,
   listFields,
   listMappings,
   listRegistrations,
@@ -20,6 +22,8 @@ import {
   updateOperationalConnection,
   updateTableRegistration,
   upsertMapping,
+  type AdminConfigBundle,
+  type AdminConfigImportResult,
   type ConnectionPlaneInfo,
   type ConnectionsInfo,
   type DataMode,
@@ -670,7 +674,9 @@ function FieldCatalogRowEditor({
 // syntax — the DOB column genuinely differs per environment (that's the
 // whole reason this exists instead of just typing the expression by hand).
 function buildDobAgeExpression(dobColumn: string): string {
-  return `date_diff('year', ${dobColumn}, current_date)`;
+  const col = dobColumn.trim();
+  const inner = col.toUpperCase().startsWith("CAST(") ? col : `CAST(${col} AS DATE)`;
+  return `date_diff('year', ${inner}, current_date)`;
 }
 
 const DOB_AGE_PREFIX = "date_diff('year', ";
@@ -681,7 +687,11 @@ function parseDobAgeExpression(expression: string): string | null {
   if (!trimmed.startsWith(DOB_AGE_PREFIX) || !trimmed.endsWith(DOB_AGE_SUFFIX)) {
     return null;
   }
-  return trimmed.slice(DOB_AGE_PREFIX.length, trimmed.length - DOB_AGE_SUFFIX.length).trim();
+  let inner = trimmed.slice(DOB_AGE_PREFIX.length, trimmed.length - DOB_AGE_SUFFIX.length).trim();
+  if (inner.toUpperCase().startsWith("CAST(") && inner.toUpperCase().endsWith("AS DATE)")) {
+    inner = inner.slice("CAST(".length, inner.length - " AS DATE)".length).trim();
+  }
+  return inner;
 }
 
 /**
@@ -769,6 +779,8 @@ function MappingRowEditor({
   const effectiveValue = dobMode ? buildDobAgeExpression(dobColumn) : value;
   const dirty = effectiveValue !== (row.physicalExpression ?? "");
   const unconfigured = isUnconfiguredMapping(row.physicalExpression);
+  const dobLooksWrong =
+    isAgeField && dobMode && dobColumn.trim().toLowerCase().includes("marriage");
 
   // Re-seed from the row so Cancel really is a cancel, matching the registry
   // and field-catalogue rows.
@@ -855,13 +867,20 @@ function MappingRowEditor({
           </label>
         )}
         {editing && isAgeField && dobMode ? (
-          <input
-            value={dobColumn}
-            placeholder="e.g. iceberg_gold.golden_layer.tbl_beneficiary.date_of_birth"
-            onChange={(e) => setDobColumn(e.target.value)}
-            className="srse-input"
-            style={{ width: 340, fontFamily: "monospace" }}
-          />
+          <>
+            <input
+              value={dobColumn}
+              placeholder="e.g. golden_data.gold_metadata.citizen_360.date_of_birth"
+              onChange={(e) => setDobColumn(e.target.value)}
+              className="srse-input"
+              style={{ width: 340, fontFamily: "monospace" }}
+            />
+            {dobLooksWrong && (
+              <p className="srse-text-danger" style={{ marginTop: "0.35rem", fontSize: "0.78rem" }}>
+                Use date of birth ({`date_of_birth`}), not date of marriage — age rules must be computed from DOB.
+              </p>
+            )}
+          </>
         ) : (
           editing && (
             <input
@@ -1783,6 +1802,106 @@ function LakehouseRegistryPanel({
   );
 }
 
+function ConfigBackupPanel({ onImported }: Readonly<{ onImported: () => void }>) {
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [skipConnectionTest, setSkipConnectionTest] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function onDownload() {
+    setExporting(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const bundle = await exportAdminConfig();
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `srse-admin-config-${new Date().toISOString().slice(0, 10)}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setMessage("Configuration downloaded. Store this file safely — it includes connection passwords.");
+    } catch (err: unknown) {
+      setError(errorMessage(err));
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function onUpload(file: File) {
+    setImporting(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const text = await file.text();
+      const bundle = JSON.parse(text) as AdminConfigBundle;
+      const result: AdminConfigImportResult = await importAdminConfig(bundle, {
+        testConnections: !skipConnectionTest,
+      });
+      const summary = [
+        `${result.fieldCatalogCount} field(s)`,
+        `${result.fieldMappingCount} mapping(s)`,
+        `${result.registeredTableCount} table registration(s)`,
+        `${result.columnMetadataCount} column override(s)`,
+        `${result.schemeCount} scheme(s)`,
+      ].join(", ");
+      let msg = `Import complete: ${summary}.`;
+      if (result.operationalRestartRequired) {
+        msg += " Restart the backend container for DB2 connection changes to take effect.";
+      }
+      setMessage(msg);
+      onImported();
+    } catch (err: unknown) {
+      setError(errorMessage(err));
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  return (
+    <section className="srse-card" style={{ marginBottom: "1.25rem" }}>
+      <h2 className="srse-section-title">Configuration backup</h2>
+      <p className="srse-text-muted" style={{ marginBottom: "0.85rem", maxWidth: "52rem" }}>
+        Download a JSON snapshot of all connections, lakehouse registrations, field mappings, analysis column
+        settings, and schemes. After a redeploy, upload the same file to restore everything without re-entering
+        it by hand. The file includes JDBC passwords — treat it as confidential.
+      </p>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "center" }}>
+        <button type="button" className="srse-btn srse-btn-primary" disabled={exporting} onClick={onDownload}>
+          {exporting ? "Exporting…" : "Download configuration JSON"}
+        </button>
+        <label className="srse-btn" style={{ cursor: importing ? "wait" : "pointer", margin: 0 }}>
+          {importing ? "Importing…" : "Upload configuration JSON"}
+          <input
+            type="file"
+            accept="application/json,.json"
+            disabled={importing}
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              e.target.value = "";
+              if (file) void onUpload(file);
+            }}
+          />
+        </label>
+        <label className="srse-checkbox-label" style={{ fontSize: "0.85rem" }}>
+          <input
+            type="checkbox"
+            checked={skipConnectionTest}
+            onChange={(e) => setSkipConnectionTest(e.target.checked)}
+          />
+          {" "}
+          Skip connection test on import (save credentials only — use when DB2/Presto are not up yet)
+        </label>
+      </div>
+      {message && <p className="srse-text-success" style={{ marginTop: "0.75rem" }}>{message}</p>}
+      {error && <p className="srse-text-danger" style={{ marginTop: "0.75rem" }}>{error}</p>}
+    </section>
+  );
+}
+
 export default function AdminPage() {
   // Registrations and column settings are loaded once here and passed down:
   // several panels need the same two lists, and they have to refresh TOGETHER.
@@ -1826,6 +1945,7 @@ export default function AdminPage() {
         physical column each abstract field resolves to, per environment.
       </p>
 
+      <ConfigBackupPanel onImported={refresh} />
       <ConnectionsPanel />
       <LakehouseRegistryPanel
         registrations={registrations}

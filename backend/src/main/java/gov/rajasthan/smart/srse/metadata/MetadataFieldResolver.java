@@ -1,5 +1,6 @@
 package gov.rajasthan.smart.srse.metadata;
 
+import gov.rajasthan.smart.srse.compiler.AgeYearsExpression;
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.compiler.FieldResolver.UnconfiguredFieldException;
 import gov.rajasthan.smart.srse.compiler.SqlTypeFamily;
@@ -95,7 +96,7 @@ public class MetadataFieldResolver implements FieldResolver {
         if (FieldColumnMapping.isPlaceholder(physicalExpression)) {
             throw new UnconfiguredFieldException(entry.getFieldKey(), physicalExpression);
         }
-        return physicalExpression;
+        return AgeYearsExpression.normalize(entry.getFieldKey(), physicalExpression);
     }
 
     /**
