@@ -137,6 +137,9 @@ export type MatchProgressEvent = {
   rows?: number;
   message?: string;
   reason?: string;
+  // Present on "started" only. The backend cannot put these on the meta line:
+  // meta is flushed before any target has been planned.
+  sql?: string;
 };
 
 export function fetchAnalysisLimits(): Promise<{ maxTargetSets: number }> {
@@ -280,7 +283,7 @@ export async function runRecordMatchStream(
 }
 
 export type MultiTargetMatchStreamHandlers = {
-  onMeta: (meta: { columns: string[]; targetCount: number; perTargetSql: (string | null)[] }) => void;
+  onMeta: (meta: { columns: string[]; targetCount: number }) => void;
   onProgress: (event: MatchProgressEvent) => void;
   onRow: (row: Record<string, unknown>) => void;
   onDone: (totalRows: number, perTarget: PerTargetSummary[]) => void;
@@ -315,8 +318,8 @@ export async function runMultiTargetMatchStream(
       return;
     }
     const event = JSON.parse(line) as
-      | { type: "meta"; columns: string[]; targetCount: number; perTargetSql: (string | null)[] }
-      | { type: "progress"; targetIndex: number; label: string; phase: MatchProgressEvent["phase"]; rows?: number; message?: string; reason?: string }
+      | { type: "meta"; columns: string[]; targetCount: number }
+      | { type: "progress"; targetIndex: number; label: string; phase: MatchProgressEvent["phase"]; rows?: number; message?: string; reason?: string; sql?: string }
       | { type: "row"; data: Record<string, unknown> }
       | { type: "done"; totalRows: number; perTarget: PerTargetSummary[] }
       | { type: "error"; message: string };
@@ -325,7 +328,6 @@ export async function runMultiTargetMatchStream(
         handlers.onMeta({
           columns: event.columns,
           targetCount: event.targetCount,
-          perTargetSql: event.perTargetSql,
         });
         break;
       case "progress":
@@ -336,6 +338,7 @@ export async function runMultiTargetMatchStream(
           rows: event.rows,
           message: event.message,
           reason: event.reason,
+          sql: event.sql,
         });
         break;
       case "row":

@@ -71,15 +71,14 @@ public class MultiTargetRecordMatchService {
         QualifiedTable hubTable = validateBeforeStream(req);
         MergedLayout layout = MergedLayout.build(req);
         return outputStream -> {
-            List<String> perTargetSql = new ArrayList<>();
-            for (int i = 0; i < req.targets().size(); i++) {
-                perTargetSql.add(null);
-            }
+            // No per-target SQL here: `meta` is serialised and flushed before a
+            // single target has been planned, so anything this line promised
+            // about them could only ever be null. Each target carries its own
+            // SQL on its `started` event instead.
             writeLine(outputStream, Map.of(
                     "type", "meta",
                     "columns", layout.supersetColumns(),
-                    "targetCount", req.targets().size(),
-                    "perTargetSql", perTargetSql));
+                    "targetCount", req.targets().size()));
 
             long streamStartNanos = System.nanoTime();
             long budgetMillis = analysisProperties.multiMatchBudgetSeconds() * 1000L;
@@ -96,16 +95,20 @@ public class MultiTargetRecordMatchService {
                     break;
                 }
 
-                writeLine(outputStream, Map.of(
-                        "type", "progress",
-                        "targetIndex", i,
-                        "label", target.label(),
-                        "phase", "started"));
-
                 try {
                     RecordMatchRequest single = toSingleMatch(req, target);
                     RecordMatchService.MatchQuery query = recordMatchService.planMatch(single);
-                    perTargetSql.set(i, recordMatchService.renderQueryForDisplay(query));
+
+                    // Planned BEFORE `started` is announced, so the event can
+                    // carry this target's SQL. A target that fails planning
+                    // therefore goes straight to `error` with no `started` —
+                    // there is no query to show.
+                    writeLine(outputStream, Map.of(
+                            "type", "progress",
+                            "targetIndex", i,
+                            "label", target.label(),
+                            "phase", "started",
+                            "sql", recordMatchService.renderQueryForDisplay(query)));
 
                     int timeoutSeconds = timeoutForTarget(streamStartNanos, budgetMillis);
                     if (timeoutSeconds <= 0) {
@@ -222,19 +225,9 @@ public class MultiTargetRecordMatchService {
                     "dedup must reference the hub table in multi-target mode, not a target table");
         }
         if (req.ageFilter() != null) {
-            validateAgeFilter(req.ageFilter());
+            RecordMatchService.validateAgeFilter(req.ageFilter());
         }
         return hubTable;
-    }
-
-    private static void validateAgeFilter(AgeFilterSpec ageFilter) {
-        Set<String> units = Set.of("DAYS", "MONTHS", "YEARS");
-        if (!units.contains(ageFilter.unit())) {
-            throw new IllegalArgumentException("ageFilter.unit must be one of " + units);
-        }
-        if (ageFilter.minAge() > ageFilter.maxAge()) {
-            throw new IllegalArgumentException("ageFilter minAge must be <= maxAge");
-        }
     }
 
     private long streamTargetRows(java.io.OutputStream outputStream, RecordMatchService.MatchQuery query,
@@ -359,7 +352,13 @@ public class MultiTargetRecordMatchService {
                 hubBindings.add(new HubColumnBinding(out, "source_" + d.column()));
             }
 
-            List<TargetRowMapper> mappers = new ArrayList<>();
+            // Per-target bindings are collected first and the mappers built
+            // afterwards: `columns` is still growing while this loop runs, so a
+            // mapper made inside it would be handed a list that was only
+            // complete by accident.
+            record Pending(String label, String table, List<PeerColumnBinding> bindings, String scoreOut) {
+            }
+            List<Pending> pending = new ArrayList<>();
             for (TargetMatchSpec target : req.targets()) {
                 String sanitized = sanitizeLabel(target.label());
                 String peerOutPrefix = req.hubSide() == HubSide.SOURCE
@@ -388,15 +387,17 @@ public class MultiTargetRecordMatchService {
                     used.add(scoreOut);
                     columns.add(scoreOut);
                 }
-                mappers.add(new TargetRowMapper(
-                        target.label(),
-                        target.qualifiedTableName(),
-                        columns,
-                        hubBindings,
-                        peerBindings,
-                        scoreOut));
+                pending.add(new Pending(
+                        target.label(), target.qualifiedTableName(), List.copyOf(peerBindings), scoreOut));
             }
-            return new MergedLayout(List.copyOf(columns), mappers);
+
+            List<String> superset = List.copyOf(columns);
+            List<HubColumnBinding> hub = List.copyOf(hubBindings);
+            List<TargetRowMapper> mappers = pending.stream()
+                    .map(p -> new TargetRowMapper(
+                            p.label(), p.table(), superset, hub, p.bindings(), p.scoreOut()))
+                    .toList();
+            return new MergedLayout(superset, mappers);
         }
 
         TargetRowMapper mapperForTarget(int index) {

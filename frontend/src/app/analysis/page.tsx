@@ -820,13 +820,20 @@ export default function AnalysisPage() {
           {
             onMeta: (meta) => {
               setMatchColumns(meta.columns);
-              setMatchSql(meta.perTargetSql.filter(Boolean).join("\n\n---\n\n"));
+              setMatchSql("");
             },
             onProgress: (event) => {
               setMatchProgress((prev) => {
                 const next = prev.filter((p) => p.label !== event.label || event.phase === "started");
                 return [...next, event];
               });
+              // Each target announces its own SQL as it is planned — the meta
+              // line is written before any of them exist.
+              if (event.sql) {
+                setMatchSql((prev) =>
+                  prev ? `${prev}\n\n---\n\n${event.sql}` : (event.sql as string),
+                );
+              }
             },
             onRow: (row) => appendStreamRow(row, controller),
             onDone: (totalRows) => {

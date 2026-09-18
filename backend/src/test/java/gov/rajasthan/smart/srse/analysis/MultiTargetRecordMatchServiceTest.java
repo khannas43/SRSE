@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -119,6 +120,49 @@ class MultiTargetRecordMatchServiceTest {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         body.writeTo(out);
         return out.toString(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * The SQL used to be promised on the {@code meta} line, which is serialised
+     * and flushed before a single target has been planned — so every client
+     * received a list of nulls and the officer's SQL panel was silently blank.
+     * Each target announces its own query on its {@code started} event instead.
+     */
+    @Test
+    void eachTargetsSqlRidesItsOwnStartedEvent() throws Exception {
+        stubHubValidation();
+        when(recordMatchService.planMatch(any()))
+                .thenReturn(queryWithSql("JOIN bank ON hub"))
+                .thenReturn(queryWithSql("JOIN ration ON hub"));
+        when(recordMatchService.renderQueryForDisplay(any()))
+                .thenAnswer(inv -> "RENDERED " + inv.getArgument(0, RecordMatchService.MatchQuery.class).sql());
+        stubJdbcRow(Map.of("source_jan_aadhaar", "1", "target_ja_id", "1"));
+
+        String out = streamOutput(twoTargetRequest(HubSide.SOURCE));
+
+        String meta = out.lines().findFirst().orElseThrow();
+        assertTrue(meta.contains("\"type\":\"meta\""), meta);
+        assertFalse(meta.contains("perTargetSql"), meta);
+
+        List<String> started = out.lines().filter(l -> l.contains("\"phase\":\"started\"")).toList();
+        assertEquals(2, started.size());
+        assertTrue(started.get(0).contains("RENDERED JOIN bank ON hub"), started.get(0));
+        assertTrue(started.get(1).contains("RENDERED JOIN ration ON hub"), started.get(1));
+    }
+
+    /** A target that never planned has no query to show, so it skips straight to error. */
+    @Test
+    void planningFailureEmitsNoStartedEventForThatTarget() throws Exception {
+        stubHubValidation();
+        when(recordMatchService.planMatch(any()))
+                .thenReturn(queryWithSql("SQL1"))
+                .thenThrow(new IllegalArgumentException("ration table dropped"));
+        stubJdbcRow(Map.of("source_jan_aadhaar", "1", "target_ja_id", "1"));
+
+        String out = streamOutput(twoTargetRequest(HubSide.SOURCE));
+
+        assertEquals(1, out.lines().filter(l -> l.contains("\"phase\":\"started\"")).count());
+        assertTrue(out.contains("\"phase\":\"error\""), out);
     }
 
     @Test

@@ -193,7 +193,10 @@ so those comparisons did not return zero rows — they failed the whole query
   JOIN**, never an N-way join — one hub table, one target table per sub-match.
   Partial failure is **per target** in the NDJSON stream; **`match-multi.csv` is
   all-or-nothing** (one failed target aborts the download). **Dedup** in multi
-  mode must reference the **hub table only**.
+  mode must reference the **hub table only**. Each target's SQL rides its own
+  `started` progress event, never the `meta` line — `meta` is serialised and
+  flushed before any target has been planned, so anything it promised about
+  them could only be null.
 
 ## Reference
 

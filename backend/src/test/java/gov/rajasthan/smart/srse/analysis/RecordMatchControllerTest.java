@@ -171,8 +171,9 @@ class RecordMatchControllerTest {
     void matchMultiStreamsProgressAndDone() throws Exception {
         StreamingResponseBody body = out -> {
             out.write(("{\"type\":\"meta\",\"columns\":[\"match_set_label\"],"
-                    + "\"targetCount\":1,\"perTargetSql\":[null]}\n").getBytes(StandardCharsets.UTF_8));
-            out.write(("{\"type\":\"progress\",\"targetIndex\":0,\"label\":\"Bank\",\"phase\":\"started\"}\n")
+                    + "\"targetCount\":1}\n").getBytes(StandardCharsets.UTF_8));
+            out.write(("{\"type\":\"progress\",\"targetIndex\":0,\"label\":\"Bank\","
+                    + "\"phase\":\"started\",\"sql\":\"SELECT ...\"}\n")
                     .getBytes(StandardCharsets.UTF_8));
             out.write("{\"type\":\"done\",\"totalRows\":0,\"perTarget\":[]}\n".getBytes(StandardCharsets.UTF_8));
         };

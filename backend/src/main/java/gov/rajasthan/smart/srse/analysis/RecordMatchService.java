@@ -207,7 +207,11 @@ public class RecordMatchService {
         return sides;
     }
 
-    private static void validateAgeFilter(AgeFilterSpec ageFilter) {
+    /**
+     * Package-private so {@link MultiTargetRecordMatchService} validates the age
+     * filter through this one definition rather than a copy that could drift.
+     */
+    static void validateAgeFilter(AgeFilterSpec ageFilter) {
         if (!AGE_UNITS.contains(ageFilter.unit())) {
             throw new IllegalArgumentException("ageFilter.unit must be one of " + AGE_UNITS);
         }
