@@ -25,8 +25,10 @@ import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -99,6 +101,10 @@ class RecordMatchServiceTest {
         return new MatchCriterion(CATALOG, SCHEMA, table, column, thresholdPercent);
     }
 
+    private static DisplayColumn display(String table, String column) {
+        return new DisplayColumn(CATALOG, SCHEMA, table, column);
+    }
+
     private static String qualified(String table) {
         return CATALOG + "." + SCHEMA + "." + table;
     }
@@ -107,6 +113,7 @@ class RecordMatchServiceTest {
         return new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
+                null, null,
                 false, null, null);
     }
 
@@ -144,6 +151,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "father_name", 75.0)),
                 List.of(exact("beneficiary", "father_name")),
+                null, null,
                 false, null, null);
         Captured c = runAndCapture(req);
         assertTrue(c.sql().contains("levenshtein_distance(lower(src.father_name), lower(tgt.father_name))"), c.sql());
@@ -163,6 +171,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "guardian", 70.0)),
                 List.of(exact("beneficiary", "guardian")),
+                null, null,
                 false, null, null);
         Captured c = runAndCapture(req);
         assertTrue(c.sql().contains("levenshtein_distance"), c.sql());
@@ -181,6 +190,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "scheme_name")),
                 List.of(exact("beneficiary", "scheme_name")),
+                null, null,
                 false, null, null);
         Captured c = runAndCapture(req);
         assertTrue(c.sql().contains("src.scheme_name = tgt.scheme_name"), c.sql());
@@ -192,6 +202,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "father_name")),
                 List.of(exact("beneficiary", "father_name")),
+                null, null,
                 false, null, null);
 
         assertThrows(IllegalArgumentException.class, () -> service.match(req));
@@ -202,6 +213,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "father_name", 80.0), exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "father_name"), exact("beneficiary", "district")),
+                null, null,
                 false, null, null);
         String sql = runAndCapture(req).sql();
 
@@ -223,6 +235,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "father_name"), exact("beneficiary", "mother_name")),
                 List.of(exact("beneficiary", "father_name")),
+                null, null,
                 false, null, null);
 
         assertThrows(IllegalArgumentException.class, () -> service.match(req));
@@ -233,6 +246,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "father_name"), exact("other_table", "mother_name")),
                 List.of(exact("beneficiary", "father_name"), exact("beneficiary", "mother_name")),
+                null, null,
                 false, null, null);
 
         assertThrows(IllegalArgumentException.class, () -> service.match(req));
@@ -243,6 +257,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "father_name", 150.0)),
                 List.of(exact("beneficiary", "father_name")),
+                null, null,
                 false, null, null);
 
         assertThrows(IllegalArgumentException.class, () -> service.match(req));
@@ -253,6 +268,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
+                null, null,
                 false, new DedupSpec(CATALOG, SCHEMA, "beneficiary", "last_refreshed_at"), null);
         String sql = runAndCapture(req).sql();
 
@@ -266,6 +282,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
+                null, null,
                 false, null,
                 new AgeFilterSpec(18, 60, "YEARS"));
         Captured c = runAndCapture(req);
@@ -281,6 +298,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
+                null, null,
                 false, null,
                 new AgeFilterSpec(12, 24, "MONTHS"));
         Captured c = runAndCapture(req);
@@ -292,6 +310,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
+                null, null,
                 false, null,
                 new AgeFilterSpec(60, 18, "YEARS"));
 
@@ -303,6 +322,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
+                null, null,
                 false, null,
                 new AgeFilterSpec(1, 2, "DECADES"));
 
@@ -352,6 +372,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "father_name", 75.0)),
                 List.of(exact("beneficiary", "father_name")),
+                null, null,
                 false, null, null);
         String output = writtenOutput(req);
         String metaLine = output.strip().split("\n")[0];
@@ -377,6 +398,7 @@ class RecordMatchServiceTest {
         Captured c = runAndCapture(new RecordMatchRequest(
                 List.of(in("iceberg_silver", "jan_aadhar_data_txn", "tbl_txn_bankdtl", "account_no")),
                 List.of(in("iceberg_gold", "golden_layer", "tbl_beneficiary_bank", "account_no")),
+                null, null,
                 false, null, null));
 
         assertTrue(c.sql().contains(
@@ -406,6 +428,7 @@ class RecordMatchServiceTest {
                         in("iceberg_gold", "s", "tbl_txn_bankdtl", "m_id")),
                 List.of(in("iceberg_silver", "s", "tbl_txn_bankdtl", "bank_id"),
                         in("iceberg_silver", "s", "tbl_txn_bankdtl", "m_id")),
+                null, null,
                 false, null, null);
 
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> service.match(req));
@@ -428,6 +451,7 @@ class RecordMatchServiceTest {
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
+                null, null,
                 false,
                 new DedupSpec("iceberg_gold", SCHEMA, "beneficiary", "last_refreshed_at"),
                 null);
@@ -448,6 +472,7 @@ class RecordMatchServiceTest {
         runAndCapture(new RecordMatchRequest(
                 List.of(exact("beneficiary", "district"), exact("beneficiary", "gender")),
                 List.of(exact("beneficiary", "district"), exact("beneficiary", "gender")),
+                null, null,
                 false, null, null));
 
         ArgumentCaptor<java.util.Collection<String>> columns =
@@ -483,6 +508,7 @@ class RecordMatchServiceTest {
         Captured c = runAndCapture(new RecordMatchRequest(
                 List.of(exact("tbl_txn_member_id", "member_id")),
                 List.of(exact("citizen_360", "jan_member_id")),
+                null, null,
                 false, null, new AgeFilterSpec(75, 100, "YEARS")));
 
         assertTrue(c.sql().contains("CAST(tgt.date_of_birth AS DATE)"), c.sql());
@@ -504,6 +530,7 @@ class RecordMatchServiceTest {
         Captured c = runAndCapture(new RecordMatchRequest(
                 List.of(exact("tbl_txn_member_id", "member_id")),
                 List.of(exact("beneficiary", "member_id")),
+                null, null,
                 false, null, new AgeFilterSpec(75, 100, "YEARS")));
 
         assertArrayEquals(new Object[]{75.0, 100.0}, c.params());
@@ -519,8 +546,9 @@ class RecordMatchServiceTest {
 
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                 () -> service.match(new RecordMatchRequest(
-                        List.of(exact("tbl_txn_member_id", "member_id")),
+                List.of(exact("tbl_txn_member_id", "member_id")),
                         List.of(exact("tbl_txn_bankdtl", "member_id")),
+                        null, null,
                         false, null, new AgeFilterSpec(75, 100, "YEARS"))));
 
         assertTrue(e.getMessage().contains("age filter cannot be applied"), e.getMessage());
@@ -665,6 +693,7 @@ class RecordMatchServiceTest {
         Captured c = runAndCapture(new RecordMatchRequest(
                 List.of(exact("txn_bank", "account_no")),
                 List.of(exact("golden_bank", "account_no")),
+                null, null,
                 false, null, null));
 
         assertTrue(c.sql().contains("TRY_CAST(src.account_no AS DOUBLE) = tgt.account_no"), c.sql());
@@ -679,6 +708,7 @@ class RecordMatchServiceTest {
         Captured c = runAndCapture(new RecordMatchRequest(
                 List.of(exact("txn_bank", "account_no")),
                 List.of(exact("golden_bank", "account_no")),
+                null, null,
                 false, null, null));
 
         assertTrue(c.sql().contains("src.account_no = tgt.account_no"), c.sql());
@@ -695,6 +725,7 @@ class RecordMatchServiceTest {
         Captured c = runAndCapture(new RecordMatchRequest(
                 List.of(exact("txn_bank", "account_no")),
                 List.of(exact("golden_bank", "account_no")),
+                null, null,
                 false, null, null));
 
         assertTrue(c.sql().contains("src.account_no = CAST(tgt.account_no AS VARCHAR)"), c.sql());
@@ -713,6 +744,7 @@ class RecordMatchServiceTest {
         Captured c = runAndCapture(new RecordMatchRequest(
                 List.of(fuzzy("txn_bank", "father_name", 80.0)),
                 List.of(exact("golden_bank", "father_name")),
+                null, null,
                 false, null, null));
 
         assertTrue(c.sql().contains("substr(lower(CAST(tgt.father_name AS VARCHAR)), 1, 3)"), c.sql());
@@ -734,6 +766,7 @@ class RecordMatchServiceTest {
         Captured c = runAndCapture(new RecordMatchRequest(
                 List.of(fuzzy("txn_bank", "father_name", 80.0)),
                 List.of(exact("golden_bank", "father_name")),
+                null, null,
                 true, null, null));
 
         assertTrue(c.sql().contains("match_score_pct"), c.sql());
@@ -763,6 +796,7 @@ class RecordMatchServiceTest {
         StreamingResponseBody body = dobService.match(new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
+                null, null,
                 false, null,
                 new AgeFilterSpec(18, 60, "YEARS")));
         body.writeTo(new ByteArrayOutputStream());
@@ -793,6 +827,7 @@ class RecordMatchServiceTest {
         StreamingResponseBody body = qualifiedService.match(new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
+                null, null,
                 false, null,
                 new AgeFilterSpec(18, 60, "YEARS")));
         body.writeTo(new ByteArrayOutputStream());
@@ -818,6 +853,7 @@ class RecordMatchServiceTest {
         Captured c = runAndCapture(new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
                 List.of(exact("beneficiary", "district")),
+                null, null,
                 false, null,
                 new AgeFilterSpec(18, 60, "YEARS")));
 
@@ -832,10 +868,167 @@ class RecordMatchServiceTest {
         Captured c = runAndCapture(new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "father_name", 80.0)),
                 List.of(exact("beneficiary", "father_name")),
+                null, null,
                 false, null,
                 new AgeFilterSpec(18, 60, "YEARS")));
 
         assertFalse(c.sql().contains("WHERE  AND"), c.sql());
         assertTrue(c.sql().contains(" AND src.age_years BETWEEN ? AND ?"), c.sql());
+    }
+
+    // ---- display-only columns (PR 1: join vs select split) ----
+
+    @Test
+    void displayColumnsProjectedWithoutExtraJoinPredicates() throws Exception {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "jan_aadhaar")),
+                List.of(exact("beneficiary", "ja_id")),
+                List.of(display("beneficiary", "member_name_en"), display("beneficiary", "district_code")),
+                List.of(display("beneficiary", "account_holder"), display("beneficiary", "ifsc")),
+                false, null, null);
+        Captured c = runAndCapture(req);
+
+        int onIdx = c.sql().indexOf(" ON ");
+        int whereIdx = c.sql().indexOf(" WHERE ");
+        String onClause = c.sql().substring(onIdx, whereIdx);
+        assertEquals(1, onClause.split("=", -1).length - 1, onClause);
+        assertTrue(c.sql().contains("src.member_name_en AS \"source_member_name_en\""), c.sql());
+        assertTrue(c.sql().contains("src.district_code AS \"source_district_code\""), c.sql());
+        assertTrue(c.sql().contains("tgt.account_holder AS \"target_account_holder\""), c.sql());
+        assertTrue(c.sql().contains("tgt.ifsc AS \"target_ifsc\""), c.sql());
+    }
+
+    @Test
+    void displayColumnDuplicatingJoinCriterionIsProjectedOnce() throws Exception {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "jan_aadhaar")),
+                List.of(exact("beneficiary", "ja_id")),
+                List.of(display("beneficiary", "jan_aadhaar"), display("beneficiary", "ifsc")),
+                List.of(),
+                false, null, null);
+        Captured c = runAndCapture(req);
+
+        assertEquals(1, countOccurrences(c.sql(), "src.jan_aadhaar AS \"source_jan_aadhaar\""), c.sql());
+        assertTrue(c.sql().contains("src.ifsc AS \"source_ifsc\""), c.sql());
+    }
+
+    @Test
+    void displayColumnOnWrongTableIsRejected() {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("beneficiary", "district")),
+                List.of(display("other_table", "ifsc")),
+                List.of(),
+                false, null, null);
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> service.match(req));
+        assertTrue(e.getMessage().contains("sourceDisplayColumns[0]"), e.getMessage());
+    }
+
+    @Test
+    void displayColumnRejectedByRegistryNeverReachesDatabase() {
+        doThrow(new IllegalArgumentException("Column not available"))
+                .when(registry).validateColumn(any(QualifiedColumn.class));
+
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("beneficiary", "district")),
+                List.of(display("beneficiary", "ifsc")),
+                List.of(),
+                false, null, null);
+
+        assertThrows(IllegalArgumentException.class, () -> service.match(req));
+        verify(jdbc, never()).query(anyString(), any(Object[].class), any(RowCallbackHandler.class));
+    }
+
+    @Test
+    void matchScoreIgnoresDisplayColumns() throws Exception {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(fuzzy("beneficiary", "father_name", 75.0)),
+                List.of(exact("beneficiary", "father_name")),
+                List.of(display("beneficiary", "ifsc")),
+                List.of(display("beneficiary", "branch_code")),
+                true, null, null);
+        Captured c = runAndCapture(req);
+
+        assertTrue(c.sql().contains("match_score_pct"), c.sql());
+        assertTrue(c.sql().contains("/ 1 * 100"), c.sql());
+        assertFalse(c.sql().contains("levenshtein_distance(lower(src.ifsc)"), c.sql());
+    }
+
+    @Test
+    void dedupPartitionUsesJoinSourceKeysOnlyNotDisplayColumns() throws Exception {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "jan_aadhaar")),
+                List.of(exact("beneficiary", "ja_id")),
+                List.of(display("beneficiary", "ifsc")),
+                List.of(),
+                false, new DedupSpec(CATALOG, SCHEMA, "beneficiary", "last_refreshed_at"), null);
+        String sql = runAndCapture(req).sql();
+
+        assertTrue(sql.contains("PARTITION BY \"source_jan_aadhaar\""), sql);
+        assertFalse(sql.contains("PARTITION BY \"source_ifsc\""), sql);
+        assertTrue(sql.contains("src.ifsc AS \"source_ifsc\""), sql);
+    }
+
+    @Test
+    void displayColumnsAppearInStreamMetaColumns() throws Exception {
+        stubOneRow(new LinkedHashMap<>(Map.of(
+                "source_jan_aadhaar", "1",
+                "target_ja_id", "1",
+                "source_ifsc", "SBIN0001")));
+
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "jan_aadhaar")),
+                List.of(exact("beneficiary", "ja_id")),
+                List.of(display("beneficiary", "ifsc")),
+                List.of(),
+                false, null, null);
+        String output = writtenOutput(req);
+
+        assertTrue(output.contains("\"source_ifsc\""), output);
+    }
+
+    @Test
+    void gateIncludesDisplayColumnNamesInSingleDescribeCall() throws Exception {
+        runAndCapture(new RecordMatchRequest(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("beneficiary", "district")),
+                List.of(display("beneficiary", "ifsc")),
+                List.of(),
+                false, null, null));
+
+        ArgumentCaptor<java.util.Collection<String>> columns =
+                ArgumentCaptor.forClass(java.util.Collection.class);
+        verify(registry, times(2)).describeColumns(any(), columns.capture());
+        assertEquals(List.of("district", "ifsc"), List.copyOf(columns.getAllValues().get(0)));
+    }
+
+    @Test
+    void allocateUniqueAliasSuffixesWhenBaseIsTaken() {
+        Set<String> used = new LinkedHashSet<>(List.of("source_foo", "match_score_pct"));
+        assertEquals("source_foo_2", RecordMatchService.allocateUniqueAlias("source_foo", used));
+    }
+
+    @Test
+    void duplicateJoinCriteriaColumnsGetDistinctSelectAliases() throws Exception {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "district"), exact("beneficiary", "district")),
+                List.of(exact("beneficiary", "district"), exact("beneficiary", "district")),
+                null, null,
+                false, null, null);
+        Captured c = runAndCapture(req);
+        assertTrue(c.sql().contains("src.district AS \"source_district\""), c.sql());
+        assertTrue(c.sql().contains("src.district AS \"source_district_2\""), c.sql());
+    }
+
+    private static int countOccurrences(String haystack, String needle) {
+        int count = 0;
+        int idx = 0;
+        while ((idx = haystack.indexOf(needle, idx)) >= 0) {
+            count++;
+            idx += needle.length();
+        }
+        return count;
     }
 }

@@ -90,13 +90,58 @@ export type AgeFilterSpec = {
   unit: AgeUnit;
 };
 
+export type DisplayColumn = TableRef & {
+  column: string;
+};
+
 export type RecordMatchRequest = {
   sourceCriteria: MatchCriterion[];
   targetCriteria: MatchCriterion[];
+  sourceDisplayColumns?: DisplayColumn[];
+  targetDisplayColumns?: DisplayColumn[];
   highlightDuplicates: boolean;
   dedup: DedupSpec | null;
   ageFilter: AgeFilterSpec | null;
 };
+
+export type HubSide = "SOURCE" | "TARGET";
+
+export type TargetMatchSpec = TableRef & {
+  label: string;
+  joinCriteria: MatchCriterion[];
+  displayColumns?: DisplayColumn[];
+};
+
+export type MultiTargetRecordMatchRequest = {
+  hubCriteria: MatchCriterion[];
+  hubDisplayColumns?: DisplayColumn[];
+  hubSide: HubSide;
+  targets: TargetMatchSpec[];
+  highlightDuplicates: boolean;
+  dedup: DedupSpec | null;
+  ageFilter: AgeFilterSpec | null;
+};
+
+export type PerTargetSummary = {
+  label: string;
+  rows: number;
+  status: string;
+  message?: string;
+  reason?: string;
+};
+
+export type MatchProgressEvent = {
+  targetIndex: number;
+  label: string;
+  phase: "started" | "done" | "error" | "skipped";
+  rows?: number;
+  message?: string;
+  reason?: string;
+};
+
+export function fetchAnalysisLimits(): Promise<{ maxTargetSets: number }> {
+  return analysisGet<{ maxTargetSets: number }>("/api/analysis/limits");
+}
 
 async function analysisGet<T>(path: string): Promise<T> {
   const res = await authorizedFetch(`${API_BASE}${path}`, { credentials: "include" });
@@ -232,6 +277,107 @@ export async function runRecordMatchStream(
   if (buffer.trim()) {
     handleLine(buffer);
   }
+}
+
+export type MultiTargetMatchStreamHandlers = {
+  onMeta: (meta: { columns: string[]; targetCount: number; perTargetSql: (string | null)[] }) => void;
+  onProgress: (event: MatchProgressEvent) => void;
+  onRow: (row: Record<string, unknown>) => void;
+  onDone: (totalRows: number, perTarget: PerTargetSummary[]) => void;
+  onError: (message: string) => void;
+};
+
+export async function runMultiTargetMatchStream(
+  req: MultiTargetRecordMatchRequest,
+  handlers: MultiTargetMatchStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await authorizedFetch(`${API_BASE}/api/analysis/match-multi`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(req),
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
+  }
+  if (!res.body) {
+    throw new Error("Analysis service error: streaming response has no body");
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  function handleLine(line: string) {
+    if (!line.trim()) {
+      return;
+    }
+    const event = JSON.parse(line) as
+      | { type: "meta"; columns: string[]; targetCount: number; perTargetSql: (string | null)[] }
+      | { type: "progress"; targetIndex: number; label: string; phase: MatchProgressEvent["phase"]; rows?: number; message?: string; reason?: string }
+      | { type: "row"; data: Record<string, unknown> }
+      | { type: "done"; totalRows: number; perTarget: PerTargetSummary[] }
+      | { type: "error"; message: string };
+    switch (event.type) {
+      case "meta":
+        handlers.onMeta({
+          columns: event.columns,
+          targetCount: event.targetCount,
+          perTargetSql: event.perTargetSql,
+        });
+        break;
+      case "progress":
+        handlers.onProgress({
+          targetIndex: event.targetIndex,
+          label: event.label,
+          phase: event.phase,
+          rows: event.rows,
+          message: event.message,
+          reason: event.reason,
+        });
+        break;
+      case "row":
+        handlers.onRow(event.data);
+        break;
+      case "done":
+        handlers.onDone(event.totalRows, event.perTarget);
+        break;
+      case "error":
+        handlers.onError(event.message);
+        break;
+    }
+  }
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex: number;
+    while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+      handleLine(buffer.slice(0, newlineIndex));
+      buffer = buffer.slice(newlineIndex + 1);
+    }
+  }
+  if (buffer.trim()) {
+    handleLine(buffer);
+  }
+}
+
+export async function downloadMultiTargetMatchCsv(req: MultiTargetRecordMatchRequest): Promise<Blob> {
+  const res = await authorizedFetch(`${API_BASE}/api/analysis/match-multi.csv`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
+  }
+  return res.blob();
 }
 
 // Admin-managed business name / fuzzy-matchable / visibility override per

@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.StringJoiner;
+import java.util.stream.Stream;
 
 /**
  * Cross-table fuzzy/exact record matching for the Analysis tab.
@@ -131,10 +132,31 @@ public class RecordMatchService {
         this.objectMapper = objectMapper;
     }
 
-    public StreamingResponseBody match(RecordMatchRequest req) {
+    /**
+     * Validates the request and builds the Presto match query without executing it.
+     */
+    public MatchQuery planMatch(RecordMatchRequest req) {
         Sides sides = validateRequest(req);
-        MatchQuery query = buildMatchQuery(req, sides);
-        return streamResults(query);
+        return buildMatchQuery(req, sides);
+    }
+
+    /** Display-only SQL with bound parameters rendered as literals — never re-executed. */
+    public String renderQueryForDisplay(MatchQuery query) {
+        return renderForDisplay(query.sql(), query.params());
+    }
+
+    /**
+     * Validates hub join/display picks for a multi-target run (same rules as a
+     * single-match {@linkplain RecordMatchRequest#sourceCriteria() source side}).
+     */
+    public QualifiedTable validateHubShape(List<MatchCriterion> hubCriteria, List<DisplayColumn> hubDisplay) {
+        QualifiedTable hub = tableOf(hubCriteria, "hubCriteria");
+        validateDisplayColumns(hubDisplay, hub, "hubDisplayColumns");
+        return hub;
+    }
+
+    public StreamingResponseBody match(RecordMatchRequest req) {
+        return streamResults(planMatch(req));
     }
 
     /**
@@ -151,9 +173,7 @@ public class RecordMatchService {
      * request 400s before a single byte of the download is written.
      */
     public StreamingResponseBody matchCsv(RecordMatchRequest req) {
-        Sides sides = validateRequest(req);
-        MatchQuery query = buildMatchQuery(req, sides);
-        return streamCsv(query);
+        return streamCsv(planMatch(req));
     }
 
     /**
@@ -171,9 +191,12 @@ public class RecordMatchService {
         if (req.sourceCriteria().size() != req.targetCriteria().size()) {
             throw new IllegalArgumentException("sourceCriteria and targetCriteria must be the same size");
         }
+        validateDisplayColumns(req.sourceDisplayColumns(), sourceTable, "sourceDisplayColumns");
+        validateDisplayColumns(req.targetDisplayColumns(), targetTable, "targetDisplayColumns");
+
         Sides sides = new Sides(
-                sourceTable, describeSide(sourceTable, req.sourceCriteria()),
-                targetTable, describeSide(targetTable, req.targetCriteria()));
+                sourceTable, describeSide(sourceTable, req.sourceCriteria(), req.sourceDisplayColumns()),
+                targetTable, describeSide(targetTable, req.targetCriteria(), req.targetDisplayColumns()));
         if (req.dedup() != null) {
             validateSideMembership(req.dedup().qualifiedTable(), sourceTable, targetTable, "dedup.table");
             registry.validateColumn(req.dedup().qualifiedColumn());
@@ -231,11 +254,42 @@ public class RecordMatchService {
 
     private void appendCriteriaSelects(StringBuilder select, Set<String> outerColumns, RecordMatchRequest req) {
         for (MatchCriterion c : req.sourceCriteria()) {
-            appendSelect(select, outerColumns, "src", c.column(), "source_" + c.column());
+            String baseAlias = "source_" + c.column();
+            appendSelect(select, outerColumns, "src", c.column(), allocateUniqueAlias(baseAlias, outerColumns));
         }
         for (MatchCriterion c : req.targetCriteria()) {
-            appendSelect(select, outerColumns, "tgt", c.column(), "target_" + c.column());
+            String baseAlias = "target_" + c.column();
+            appendSelect(select, outerColumns, "tgt", c.column(), allocateUniqueAlias(baseAlias, outerColumns));
         }
+        appendDisplaySelects(select, outerColumns, "src", "source_", req.sourceDisplayColumns());
+        appendDisplaySelects(select, outerColumns, "tgt", "target_", req.targetDisplayColumns());
+    }
+
+    private void appendDisplaySelects(StringBuilder select, Set<String> outerColumns, String sqlAlias,
+                                      String outPrefix, List<DisplayColumn> display) {
+        for (DisplayColumn d : display) {
+            String baseAlias = outPrefix + d.column();
+            if (outerColumns.contains(baseAlias)) {
+                continue;
+            }
+            String outAlias = allocateUniqueAlias(baseAlias, outerColumns);
+            appendSelect(select, outerColumns, sqlAlias, d.column(), outAlias);
+        }
+    }
+
+    /**
+     * Reserves a unique output alias when {@code baseAlias} is already taken by
+     * a non-skipped projection (e.g. {@code match_score_pct}).
+     */
+    static String allocateUniqueAlias(String baseAlias, Set<String> outerColumns) {
+        if (!outerColumns.contains(baseAlias)) {
+            return baseAlias;
+        }
+        int suffix = 2;
+        while (outerColumns.contains(baseAlias + "_" + suffix)) {
+            suffix++;
+        }
+        return baseAlias + "_" + suffix;
     }
 
     /**
@@ -340,6 +394,10 @@ public class RecordMatchService {
         return dedupAlias;
     }
 
+    /**
+     * Match score reflects JOIN criterion pairs only — display-only columns do
+     * not enter the average.
+     */
     private void appendMatchScoreSelect(StringBuilder select, Set<String> outerColumns,
                                         RecordMatchRequest req, List<CriterionPair> pairs) {
         if (!req.highlightDuplicates()) {
@@ -531,7 +589,7 @@ public class RecordMatchService {
         return '"' + text.replace("\"", "\"\"") + '"';
     }
 
-    private record MatchQuery(String sql, List<Object> params, List<String> columns) {
+    public record MatchQuery(String sql, List<Object> params, List<String> columns) {
     }
 
     private void writeLine(java.io.OutputStream out, Map<String, Object> payload) throws IOException {
@@ -618,8 +676,30 @@ public class RecordMatchService {
      * columns walks the whole catalog/schema/table hierarchy, and every
      * criterion here shares one table by {@link #tableOf}'s check.
      */
-    private Map<String, RegisteredColumn> describeSide(QualifiedTable table, List<MatchCriterion> criteria) {
-        return registry.describeColumns(table, criteria.stream().map(MatchCriterion::column).toList());
+    private Map<String, RegisteredColumn> describeSide(QualifiedTable table, List<MatchCriterion> criteria,
+                                                         List<DisplayColumn> display) {
+        List<String> columnNames = Stream.concat(
+                criteria.stream().map(MatchCriterion::column),
+                display.stream().map(DisplayColumn::column))
+                .distinct()
+                .toList();
+        return registry.describeColumns(table, columnNames);
+    }
+
+    private void validateDisplayColumns(List<DisplayColumn> columns, QualifiedTable sideTable, String label) {
+        if (columns.isEmpty()) {
+            return;
+        }
+        if (columns.size() > MAX_CRITERIA_PER_SIDE) {
+            throw new IllegalArgumentException(label + " must have 0 to " + MAX_CRITERIA_PER_SIDE + " entries");
+        }
+        for (int i = 0; i < columns.size(); i++) {
+            DisplayColumn d = columns.get(i);
+            if (!sideTable.equals(d.qualifiedTable())) {
+                throw new IllegalArgumentException(label + "[" + i + "] must reference " + sideTable.qualifiedName());
+            }
+            registry.validateColumn(d.qualifiedColumn());
+        }
     }
 
     private void validateSideMembership(QualifiedTable table, QualifiedTable sourceTable,

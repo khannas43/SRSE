@@ -3,6 +3,8 @@ package gov.rajasthan.smart.srse.analysis;
 import gov.rajasthan.smart.srse.decision.DecisionExceptionHandler;
 import gov.rajasthan.smart.srse.security.MockJwtService;
 import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -17,7 +19,10 @@ import java.nio.charset.StandardCharsets;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentCaptor.forClass;
+import org.mockito.ArgumentCaptor;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -35,6 +40,9 @@ class RecordMatchControllerTest {
 
     @MockBean
     private RecordMatchService matchService;
+
+    @MockBean
+    private MultiTargetRecordMatchService multiMatchService;
 
     @MockBean
     private MockJwtService mockJwtService;
@@ -120,6 +128,83 @@ class RecordMatchControllerTest {
         mockMvc.perform(post("/api/analysis/match.csv")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(REQUEST_BODY))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void matchAcceptsDisplayColumnsAndStreamsTheirMetaColumns() throws Exception {
+        StreamingResponseBody body = out -> {
+            out.write(("{\"type\":\"meta\",\"columns\":[\"source_district\",\"target_district\","
+                    + "\"source_ifsc\",\"target_branch\"],\"sql\":\"SELECT ...\"}\n")
+                    .getBytes(StandardCharsets.UTF_8));
+            out.write("{\"type\":\"done\",\"totalRows\":0}\n".getBytes(StandardCharsets.UTF_8));
+        };
+        when(matchService.match(any())).thenReturn(body);
+
+        String bodyJson = """
+                {"sourceCriteria":[{"catalog":"c","schema":"s","table":"beneficiary","column":"district","fuzzyThresholdPercent":null}],
+                 "targetCriteria":[{"catalog":"c","schema":"s","table":"beneficiary","column":"district","fuzzyThresholdPercent":null}],
+                 "sourceDisplayColumns":[{"catalog":"c","schema":"s","table":"beneficiary","column":"ifsc"}],
+                 "targetDisplayColumns":[{"catalog":"c","schema":"s","table":"beneficiary","column":"branch"}],
+                 "highlightDuplicates":false,
+                 "dedup":null,"ageFilter":null}
+                """;
+
+        MvcResult mvcResult = mockMvc.perform(post("/api/analysis/match")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(bodyJson))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        mockMvc.perform(asyncDispatch(mvcResult))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("\"source_ifsc\"")))
+                .andExpect(content().string(containsString("\"target_branch\"")));
+
+        ArgumentCaptor<RecordMatchRequest> captor = forClass(RecordMatchRequest.class);
+        verify(matchService).match(captor.capture());
+        assertEquals(1, captor.getValue().sourceDisplayColumns().size());
+        assertEquals("ifsc", captor.getValue().sourceDisplayColumns().get(0).column());
+    }
+
+    @Test
+    void matchMultiStreamsProgressAndDone() throws Exception {
+        StreamingResponseBody body = out -> {
+            out.write(("{\"type\":\"meta\",\"columns\":[\"match_set_label\"],"
+                    + "\"targetCount\":1,\"perTargetSql\":[null]}\n").getBytes(StandardCharsets.UTF_8));
+            out.write(("{\"type\":\"progress\",\"targetIndex\":0,\"label\":\"Bank\",\"phase\":\"started\"}\n")
+                    .getBytes(StandardCharsets.UTF_8));
+            out.write("{\"type\":\"done\",\"totalRows\":0,\"perTarget\":[]}\n".getBytes(StandardCharsets.UTF_8));
+        };
+        when(multiMatchService.matchMulti(any())).thenReturn(body);
+
+        String bodyJson = """
+                {"hubCriteria":[{"catalog":"c","schema":"s","table":"golden","column":"id","fuzzyThresholdPercent":null}],
+                 "hubDisplayColumns":[],
+                 "hubSide":"SOURCE",
+                 "targets":[{"label":"Bank","catalog":"c","schema":"s","table":"bank","joinCriteria":[{"catalog":"c","schema":"s","table":"bank","column":"id","fuzzyThresholdPercent":null}],"displayColumns":[]}],
+                 "highlightDuplicates":false,"dedup":null,"ageFilter":null}
+                """;
+
+        MvcResult mvcResult = mockMvc.perform(post("/api/analysis/match-multi")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(bodyJson))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        mockMvc.perform(asyncDispatch(mvcResult))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("\"phase\":\"started\"")))
+                .andExpect(content().string(containsString("\"type\":\"done\"")));
+    }
+
+    @Test
+    void invalidMultiMatchReturns400BeforeStream() throws Exception {
+        when(multiMatchService.matchMulti(any())).thenThrow(new IllegalArgumentException("bad multi request"));
+
+        mockMvc.perform(post("/api/analysis/match-multi")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"hubCriteria\":[],\"targets\":[]}"))
                 .andExpect(status().isBadRequest());
     }
 

@@ -3,6 +3,7 @@ package gov.rajasthan.smart.srse.analysis;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -10,15 +11,24 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/analysis")
 public class RecordMatchController {
 
     private final RecordMatchService matchService;
+    private final MultiTargetRecordMatchService multiMatchService;
 
-    public RecordMatchController(RecordMatchService matchService) {
+    public RecordMatchController(RecordMatchService matchService,
+                                 MultiTargetRecordMatchService multiMatchService) {
         this.matchService = matchService;
+        this.multiMatchService = multiMatchService;
+    }
+
+    @GetMapping("/limits")
+    public Map<String, Integer> limits() {
+        return Map.of("maxTargetSets", multiMatchService.maxTargetSets());
     }
 
     /**
@@ -47,5 +57,23 @@ public class RecordMatchController {
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"analysis-match.csv\"")
                 .contentType(new MediaType("text", "csv", StandardCharsets.UTF_8))
                 .body(matchService.matchCsv(req));
+    }
+
+    /**
+     * One hub table against N targets — N independent two-table JOINs merged
+     * into one NDJSON stream. Partial per-target failure is reported in-band;
+     * see {@link MultiTargetRecordMatchService}.
+     */
+    @PostMapping(value = "/match-multi", produces = "application/x-ndjson")
+    public StreamingResponseBody matchMulti(@RequestBody MultiTargetRecordMatchRequest req) {
+        return multiMatchService.matchMulti(req);
+    }
+
+    /**
+     * Combined multi-target CSV — all-or-nothing (unlike the NDJSON stream).
+     */
+    @PostMapping(value = "/match-multi.csv", produces = "text/csv")
+    public ResponseEntity<StreamingResponseBody> matchMultiCsv(@RequestBody MultiTargetRecordMatchRequest req) {
+        return multiMatchService.matchMultiCsv(req);
     }
 }

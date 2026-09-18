@@ -275,6 +275,15 @@ Copy `.env.example` to `.env` and set values per environment.
 | `SRSE_QUERY_TIMEOUT_SECONDS` | `30` | Presto query timeout |
 | `SRSE_AGE_BAND_COLUMN` | `age_band` | Physical column for breakdown age-band dimension |
 
+### 5.4.1 Analysis multi-target
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SRSE_ANALYSIS_MAX_TARGET_SETS` | `5` | Maximum target tables in one multi-match run |
+| `SRSE_ANALYSIS_MULTI_MATCH_BUDGET_SECONDS` | `120` | Wall-clock budget for the whole `match-multi` stream |
+
+Each sub-match still uses `min(SRSE_QUERY_TIMEOUT_SECONDS, remaining budget)` as its JDBC timeout — five targets does **not** mean five full query timeouts of wall clock.
+
 ### 5.5 Frontend build-time vs runtime
 
 `NEXT_PUBLIC_*` variables are **baked into the frontend JavaScript bundle at Docker build time**. Changing them requires a rebuild:

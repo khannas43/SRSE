@@ -189,6 +189,11 @@ so those comparisons did not return zero rows — they failed the whole query
   what the screen was holding. Reading the NDJSON stream still stops at 200,000
   rows, after which the on-screen count is a lower bound (`200000+`) but the CSV
   remains complete.
+- **Multi-target Analysis** (`POST /api/analysis/match-multi`) is **N × two-table
+  JOIN**, never an N-way join — one hub table, one target table per sub-match.
+  Partial failure is **per target** in the NDJSON stream; **`match-multi.csv` is
+  all-or-nothing** (one failed target aborts the download). **Dedup** in multi
+  mode must reference the **hub table only**.
 
 ## Reference
 

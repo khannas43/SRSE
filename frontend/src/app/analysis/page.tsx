@@ -2,17 +2,23 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  downloadMultiTargetMatchCsv,
   downloadRecordMatchCsv,
+  fetchAnalysisLimits,
   listAnalysisCatalogs,
   listAnalysisColumns,
   listAnalysisSchemas,
   listAnalysisTables,
   listColumnMetadata,
   qualifiedTableName,
+  runMultiTargetMatchStream,
   runRecordMatchStream,
   type AgeUnit,
   type ColumnMetadata,
   type CompareAs,
+  type HubSide,
+  type MatchProgressEvent,
+  type MultiTargetRecordMatchRequest,
   type RecordMatchRequest,
   type RegisteredColumn,
   type TableRef,
@@ -50,6 +56,13 @@ type CriterionRow = {
   fuzzyThresholdPercent: number;
 };
 
+type DisplayRow = {
+  id: string;
+  ref: CascadeValue;
+  column: string;
+  columns: RegisteredColumn[];
+};
+
 function createEmptyRow(): CriterionRow {
   return {
     id: crypto.randomUUID(),
@@ -57,6 +70,31 @@ function createEmptyRow(): CriterionRow {
     column: "",
     columns: [],
     fuzzyThresholdPercent: 80,
+  };
+}
+
+function createEmptyDisplayRow(defaultRef: CascadeValue): DisplayRow {
+  return {
+    id: crypto.randomUUID(),
+    ref: isCascadeComplete(defaultRef) ? { ...defaultRef } : EMPTY_CASCADE,
+    column: "",
+    columns: [],
+  };
+}
+
+type TargetBlock = {
+  id: string;
+  label: string;
+  joinRows: CriterionRow[];
+  displayRows: DisplayRow[];
+};
+
+function createTargetBlock(defaultLabel: string): TargetBlock {
+  return {
+    id: crypto.randomUUID(),
+    label: defaultLabel,
+    joinRows: [createEmptyRow()],
+    displayRows: [],
   };
 }
 
@@ -185,6 +223,93 @@ function rowShowsFuzzy(
   return paired ? isFuzzyMatchable(paired.ref, paired.column) : false;
 }
 
+type DisplayColumnBoxProps = Readonly<{
+  title: string;
+  boxId: string;
+  rows: DisplayRow[];
+  businessNameFor: (ref: TableRef, column: string) => string | null;
+  onTableChange: (rowId: string, ref: CascadeValue) => void;
+  onColumnChange: (rowId: string, column: string) => void;
+  onRemove: (rowId: string) => void;
+  onAdd: () => void;
+  onError: (message: string) => void;
+}>;
+
+function DisplayColumnBox({
+  title,
+  boxId,
+  rows,
+  businessNameFor,
+  onTableChange,
+  onColumnChange,
+  onRemove,
+  onAdd,
+  onError,
+}: DisplayColumnBoxProps) {
+  return (
+    <div style={{ marginTop: "0.75rem" }}>
+      <h3 className="srse-text-muted" style={{ fontSize: "0.85rem", margin: "0 0 0.35rem" }}>
+        {title}
+      </h3>
+      {rows.map((row, index) => (
+        <div
+          key={row.id}
+          style={{
+            display: "flex",
+            gap: "0.6rem",
+            alignItems: "flex-end",
+            flexWrap: "wrap",
+            marginBottom: "0.5rem",
+            paddingBottom: "0.5rem",
+            borderBottom: index === rows.length - 1 ? "none" : "1px solid var(--srse-border)",
+          }}
+        >
+          <div style={{ flex: "1 1 100%" }}>
+            <LakehouseCascade
+              value={row.ref}
+              onChange={(ref) => onTableChange(row.id, ref)}
+              fetchers={REGISTRY_FETCHERS}
+              idPrefix={`${boxId}-${row.id}`}
+              onError={onError}
+            />
+          </div>
+          <div style={{ flex: "1 1 150px" }}>
+            <label htmlFor={`${boxId}-column-${row.id}`} className="srse-text-muted" style={fieldLabelStyle}>
+              Column
+            </label>
+            <select
+              id={`${boxId}-column-${row.id}`}
+              className="srse-select"
+              style={{ width: "100%" }}
+              value={row.column}
+              onChange={(e) => onColumnChange(row.id, e.target.value)}
+              disabled={!isCascadeComplete(row.ref)}
+            >
+              <option value="">— select —</option>
+              {row.columns.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {businessNameFor(row.ref, c.name) ?? c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <button
+            type="button"
+            className="srse-btn srse-btn-ghost srse-btn-sm"
+            onClick={() => onRemove(row.id)}
+            title="Remove this row"
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+      <button type="button" className="srse-btn srse-btn-ghost srse-btn-sm" onClick={onAdd}>
+        + Add column to show
+      </button>
+    </div>
+  );
+}
+
 function CriterionBox({
   title,
   boxId,
@@ -200,7 +325,8 @@ function CriterionBox({
   onRemove,
   onAdd,
   onError,
-}: CriterionBoxProps) {
+  displaySection,
+}: CriterionBoxProps & { displaySection?: React.ReactNode }) {
   return (
     <section className="srse-card" style={{ flex: "1 1 380px" }}>
       <h2 className="srse-card-title">{title}</h2>
@@ -299,6 +425,7 @@ function CriterionBox({
       <button type="button" className="srse-btn srse-btn-ghost srse-btn-sm" onClick={onAdd}>
         + Add more
       </button>
+      {displaySection}
     </section>
   );
 }
@@ -311,9 +438,20 @@ export default function AnalysisPage() {
 
   const [sourceRows, setSourceRows] = useState<CriterionRow[]>([createEmptyRow()]);
   const [targetRows, setTargetRows] = useState<CriterionRow[]>([createEmptyRow()]);
+  const [sourceDisplayRows, setSourceDisplayRows] = useState<DisplayRow[]>([]);
+  const [targetDisplayRows, setTargetDisplayRows] = useState<DisplayRow[]>([]);
+
+  const [multiMatchMode, setMultiMatchMode] = useState(false);
+  const [hubSide, setHubSide] = useState<HubSide>("SOURCE");
+  const [targetBlocks, setTargetBlocks] = useState<TargetBlock[]>([createTargetBlock("Target 1")]);
+  const [maxTargetSets, setMaxTargetSets] = useState(5);
+  const [targetSetFilter, setTargetSetFilter] = useState<string>("All");
+  const [matchProgress, setMatchProgress] = useState<MatchProgressEvent[]>([]);
 
   const [dedupEnabled, setDedupEnabled] = useState(false);
-  const dedupColumn = detectLastUpdatedColumn(targetRows[0]?.columns ?? []);
+  const dedupColumn = detectLastUpdatedColumn(
+    (multiMatchMode ? sourceRows[0] : targetRows[0])?.columns ?? [],
+  );
 
   const [ageFilterEnabled, setAgeFilterEnabled] = useState(false);
   const [minAge, setMinAge] = useState(0);
@@ -349,6 +487,7 @@ export default function AnalysisPage() {
   // since running the match, and a file that quietly answers a different
   // question than the count on screen is worse than no file.
   const lastRunRequestRef = useRef<RecordMatchRequest | null>(null);
+  const lastRunMultiRequestRef = useRef<MultiTargetRecordMatchRequest | null>(null);
   const pendingRowsRef = useRef<Record<string, unknown>[]>([]);
   const flushIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const rowsSeenRef = useRef(0);
@@ -359,6 +498,11 @@ export default function AnalysisPage() {
     listColumnMetadata()
       .then((entries) => setColumnMetadata(new Map(entries.map((e) => [metadataKey(e, e.column), e]))))
       .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
+    fetchAnalysisLimits()
+      .then((limits) => setMaxTargetSets(limits.maxTargetSets))
+      .catch(() => {
+        /* keep default */
+      });
   }, []);
 
   const reportError = useCallback((message: string) => setLoadError(message), []);
@@ -417,13 +561,39 @@ export default function AnalysisPage() {
     setRows((rows) => removeRowById(rows, rowId));
   }
 
+  function defaultSideRef(sideRows: CriterionRow[]): CascadeValue {
+    const filled = sideRows.find(isRowFilled);
+    return filled?.ref ?? sideRows[0]?.ref ?? EMPTY_CASCADE;
+  }
+
+  function isDisplayRowFilled(row: DisplayRow): boolean {
+    return isCascadeComplete(row.ref) && Boolean(row.column);
+  }
+
+  async function handleDisplayTableChange(
+    setRows: React.Dispatch<React.SetStateAction<DisplayRow[]>>,
+    rowId: string,
+    ref: CascadeValue,
+  ) {
+    setRows((rows) => rows.map((r) => (r.id === rowId ? { ...r, ref, column: "", columns: [] } : r)));
+    if (!isCascadeComplete(ref)) return;
+    try {
+      const cols = await listAnalysisColumns(ref);
+      setRows((rows) => rows.map((r) => (r.id === rowId ? { ...r, columns: cols } : r)));
+    } catch (err: unknown) {
+      setLoadError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   function buildRequest(withDedup: boolean): RecordMatchRequest | null {
     const filledSource = sourceRows.filter(isRowFilled);
     const filledTarget = targetRows.filter(isRowFilled);
     const n = Math.min(filledSource.length, filledTarget.length);
     if (n === 0) return null;
     const dedupRef = targetRows[0]?.ref;
-    return {
+    const filledSourceDisplay = sourceDisplayRows.filter(isDisplayRowFilled);
+    const filledTargetDisplay = targetDisplayRows.filter(isDisplayRowFilled);
+    const req: RecordMatchRequest = {
       sourceCriteria: filledSource.slice(0, n).map((r, i) => ({
         ...r.ref,
         column: r.column,
@@ -444,17 +614,89 @@ export default function AnalysisPage() {
           : null,
       ageFilter: ageFilterEnabled ? { minAge, maxAge, unit: ageUnit } : null,
     };
+    if (filledSourceDisplay.length > 0) {
+      req.sourceDisplayColumns = filledSourceDisplay.map((r) => ({ ...r.ref, column: r.column }));
+    }
+    if (filledTargetDisplay.length > 0) {
+      req.targetDisplayColumns = filledTargetDisplay.map((r) => ({ ...r.ref, column: r.column }));
+    }
+    return req;
+  }
+
+  function buildMultiRequest(withDedup: boolean): MultiTargetRecordMatchRequest | null {
+    const filledHub = sourceRows.filter(isRowFilled);
+    if (filledHub.length === 0) return null;
+
+    const targets: MultiTargetRecordMatchRequest["targets"] = [];
+    for (const block of targetBlocks) {
+      const label = block.label.trim();
+      if (!label) return null;
+      const filledJoin = block.joinRows.filter(isRowFilled);
+      const n = Math.min(filledHub.length, filledJoin.length);
+      if (n === 0) continue;
+      const tableRef = filledJoin[0].ref;
+      if (!isCascadeComplete(tableRef)) return null;
+      const filledDisplay = block.displayRows.filter(isDisplayRowFilled);
+      targets.push({
+        label,
+        ...tableRef,
+        joinCriteria: filledJoin.slice(0, n).map((r, i) => ({
+          ...r.ref,
+          column: r.column,
+          fuzzyThresholdPercent:
+            isFuzzyMatchable(filledHub[i].ref, filledHub[i].column) ||
+            isFuzzyMatchable(r.ref, r.column)
+              ? filledHub[i].fuzzyThresholdPercent
+              : null,
+        })),
+        displayColumns:
+          filledDisplay.length > 0
+            ? filledDisplay.map((r) => ({ ...r.ref, column: r.column }))
+            : undefined,
+      });
+    }
+    if (targets.length === 0) return null;
+
+    const hubRef = filledHub[0].ref;
+    const filledHubDisplay = sourceDisplayRows.filter(isDisplayRowFilled);
+    const req: MultiTargetRecordMatchRequest = {
+      hubCriteria: filledHub.map((r) => ({
+        ...r.ref,
+        column: r.column,
+        fuzzyThresholdPercent: isFuzzyMatchable(r.ref, r.column) ? r.fuzzyThresholdPercent : null,
+      })),
+      hubSide,
+      targets,
+      highlightDuplicates,
+      dedup:
+        withDedup && dedupColumn && isCascadeComplete(hubRef)
+          ? { ...hubRef, column: dedupColumn }
+          : null,
+      ageFilter: ageFilterEnabled ? { minAge, maxAge, unit: ageUnit } : null,
+    };
+    if (filledHubDisplay.length > 0) {
+      req.hubDisplayColumns = filledHubDisplay.map((r) => ({ ...r.ref, column: r.column }));
+    }
+    return req;
   }
 
   function buildColumnLabels(): Record<string, string> {
     const labels: Record<string, string> = {};
+    const labelSide = (prefix: string, side: string, ref: TableRef, column: string) => {
+      const bn = businessNameFor(ref, column);
+      if (bn) labels[`${prefix}_${column}`] = `${side}: ${bn}`;
+    };
     for (const r of sourceRows) {
-      const bn = isRowFilled(r) ? businessNameFor(r.ref, r.column) : null;
-      if (bn) labels[`source_${r.column}`] = `Source: ${bn}`;
+      if (isRowFilled(r)) labelSide("source", "Source", r.ref, r.column);
     }
     for (const r of targetRows) {
-      const bn = isRowFilled(r) ? businessNameFor(r.ref, r.column) : null;
-      if (bn) labels[`target_${r.column}`] = `Target: ${bn}`;
+      if (isRowFilled(r)) labelSide("target", "Target", r.ref, r.column);
+    }
+    for (const r of sourceDisplayRows) {
+      if (isDisplayRowFilled(r)) labelSide("source", "Source", r.ref, r.column);
+    }
+    for (const r of targetDisplayRows) {
+      if (isDisplayRowFilled(r)) labelSide("target", "Target", r.ref, r.column);
     }
     return labels;
   }
@@ -469,6 +711,56 @@ export default function AnalysisPage() {
     }
   }
 
+  function beginMatchStream() {
+    setMatchStatus("loading");
+    setMatchError(null);
+    setMatchColumns([]);
+    setMatchRows([]);
+    setMatchSql("");
+    setMatchTotalRows(null);
+    setMatchCountIsPartial(false);
+    setMatchTooManyToDisplay(false);
+    pendingRowsRef.current = [];
+    rowsSeenRef.current = 0;
+    if (flushIntervalRef.current !== null) {
+      clearInterval(flushIntervalRef.current);
+    }
+    flushIntervalRef.current = setInterval(flushPendingRows, 100);
+  }
+
+  function appendStreamRow(row: Record<string, unknown>, controller: AbortController) {
+    rowsSeenRef.current += 1;
+    if (rowsSeenRef.current <= MAX_DISPLAYED_ROWS) {
+      pendingRowsRef.current.push(row);
+    } else if (rowsSeenRef.current === MAX_DISPLAYED_ROWS + 1) {
+      pendingRowsRef.current = [];
+      setMatchTooManyToDisplay(true);
+      setMatchRows([]);
+    }
+    if (rowsSeenRef.current >= MAX_ROWS_TO_PARSE) {
+      setMatchCountIsPartial(true);
+      controller.abort();
+    }
+  }
+
+  function finishStreamFlush() {
+    if (flushIntervalRef.current !== null) {
+      clearInterval(flushIntervalRef.current);
+      flushIntervalRef.current = null;
+    }
+    flushPendingRows();
+  }
+
+  function handleStreamAbort(err: unknown, controller: AbortController) {
+    if (controller.signal.aborted) {
+      setMatchTotalRows(rowsSeenRef.current);
+      setMatchStatus("ok");
+    } else {
+      setMatchError(err instanceof Error ? err.message : String(err));
+      setMatchStatus("error");
+    }
+  }
+
   /**
    * Streams the COMPLETE result to a file. Built from a fresh backend request,
    * not from `matchRows` — above MAX_DISPLAYED_ROWS the browser deliberately
@@ -477,6 +769,22 @@ export default function AnalysisPage() {
    * explicit click.
    */
   async function downloadFullCsv() {
+    if (multiMatchMode) {
+      const multiReq = lastRunMultiRequestRef.current;
+      if (!multiReq) {
+        throw new Error("Run a match first.");
+      }
+      const blob = await downloadMultiTargetMatchCsv(multiReq);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `analysis-match-multi-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, "-")}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      return;
+    }
     const req = lastRunRequestRef.current;
     if (!req) {
       throw new Error("Run a match first.");
@@ -493,26 +801,61 @@ export default function AnalysisPage() {
   }
 
   async function runMatch(withDedup: boolean) {
+    if (multiMatchMode) {
+      const multiReq = buildMultiRequest(withDedup);
+      if (!multiReq) {
+        setMatchError(
+          "Pick hub match columns and at least one target set (label + paired match columns on each target).",
+        );
+        return;
+      }
+      lastRunMultiRequestRef.current = multiReq;
+      lastRunRequestRef.current = null;
+      setMatchProgress([]);
+      beginMatchStream();
+      const controller = new AbortController();
+      try {
+        await runMultiTargetMatchStream(
+          multiReq,
+          {
+            onMeta: (meta) => {
+              setMatchColumns(meta.columns);
+              setMatchSql(meta.perTargetSql.filter(Boolean).join("\n\n---\n\n"));
+            },
+            onProgress: (event) => {
+              setMatchProgress((prev) => {
+                const next = prev.filter((p) => p.label !== event.label || event.phase === "started");
+                return [...next, event];
+              });
+            },
+            onRow: (row) => appendStreamRow(row, controller),
+            onDone: (totalRows) => {
+              setMatchTotalRows(totalRows);
+              setMatchStatus("ok");
+            },
+            onError: (message) => {
+              setMatchError(message);
+              setMatchStatus("error");
+            },
+          },
+          controller.signal,
+        );
+      } catch (err: unknown) {
+        handleStreamAbort(err, controller);
+      } finally {
+        finishStreamFlush();
+      }
+      return;
+    }
+
     const req = buildRequest(withDedup);
     if (!req) {
       setMatchError("Pick at least one Source table + column and one matching Target table + column.");
       return;
     }
     lastRunRequestRef.current = req;
-    setMatchStatus("loading");
-    setMatchError(null);
-    setMatchColumns([]);
-    setMatchRows([]);
-    setMatchSql("");
-    setMatchTotalRows(null);
-    setMatchCountIsPartial(false);
-    setMatchTooManyToDisplay(false);
-    pendingRowsRef.current = [];
-    rowsSeenRef.current = 0;
-    if (flushIntervalRef.current !== null) {
-      clearInterval(flushIntervalRef.current);
-    }
-    flushIntervalRef.current = setInterval(flushPendingRows, 100);
+    lastRunMultiRequestRef.current = null;
+    beginMatchStream();
 
     const controller = new AbortController();
     try {
@@ -523,24 +866,7 @@ export default function AnalysisPage() {
             setMatchColumns(meta.columns);
             setMatchSql(meta.sql);
           },
-          onRow: (row) => {
-            rowsSeenRef.current += 1;
-            if (rowsSeenRef.current <= MAX_DISPLAYED_ROWS) {
-              pendingRowsRef.current.push(row);
-            } else if (rowsSeenRef.current === MAX_DISPLAYED_ROWS + 1) {
-              // One row over the line is enough to know the grid is out. Drop
-              // what was buffered rather than rendering a slice the officer
-              // would mistake for the whole result — from here the answer is
-              // the count on screen and the CSV, and both are complete.
-              pendingRowsRef.current = [];
-              setMatchTooManyToDisplay(true);
-              setMatchRows([]);
-            }
-            if (rowsSeenRef.current >= MAX_ROWS_TO_PARSE) {
-              setMatchCountIsPartial(true);
-              controller.abort();
-            }
-          },
+          onRow: (row) => appendStreamRow(row, controller),
           onDone: (totalRows) => {
             setMatchTotalRows(totalRows);
             setMatchStatus("ok");
@@ -553,23 +879,16 @@ export default function AnalysisPage() {
         controller.signal,
       );
     } catch (err: unknown) {
-      if (controller.signal.aborted) {
-        // Intentional stop at MAX_ROWS_TO_PARSE, not a real failure — the
-        // true total is unknown past this point, so report a lower bound.
-        setMatchTotalRows(rowsSeenRef.current);
-        setMatchStatus("ok");
-      } else {
-        setMatchError(err instanceof Error ? err.message : String(err));
-        setMatchStatus("error");
-      }
+      handleStreamAbort(err, controller);
     } finally {
-      if (flushIntervalRef.current !== null) {
-        clearInterval(flushIntervalRef.current);
-        flushIntervalRef.current = null;
-      }
-      flushPendingRows();
+      finishStreamFlush();
     }
   }
+
+  const displayedMatchRows =
+    multiMatchMode && targetSetFilter !== "All"
+      ? matchRows.filter((row) => row.match_set_label === targetSetFilter)
+      : matchRows;
 
   return (
     <main className="srse-page">
@@ -581,7 +900,7 @@ export default function AnalysisPage() {
 
       {loadError && <p className="srse-text-danger">{loadError}</p>}
 
-      <label className="srse-checkbox-label" htmlFor="highlight-duplicates" style={{ marginBottom: "1rem", display: "inline-flex" }}>
+      <label className="srse-checkbox-label" htmlFor="highlight-duplicates" style={{ marginBottom: "0.5rem", display: "inline-flex" }}>
         <input
           id="highlight-duplicates"
           type="checkbox"
@@ -590,15 +909,59 @@ export default function AnalysisPage() {
         />
         {" "}
         Highlight Duplicate Records
+        {multiMatchMode && highlightDuplicates && (
+          <span className="srse-text-muted" style={{ marginLeft: "0.5rem", fontSize: "0.78rem" }} title="Scores are per target set and are not comparable across sets.">
+            (match score is per target set)
+          </span>
+        )}
       </label>
+
+      <label className="srse-checkbox-label" htmlFor="multi-match-mode" style={{ marginBottom: "1rem", display: "inline-flex", marginLeft: "1.5rem" }}>
+        <input
+          id="multi-match-mode"
+          type="checkbox"
+          checked={multiMatchMode}
+          onChange={(e) => setMultiMatchMode(e.target.checked)}
+        />
+        {" "}
+        Match against multiple tables
+      </label>
+
+      {multiMatchMode && (
+        <div style={{ marginBottom: "1rem" }}>
+          <span className="srse-text-muted" style={{ fontSize: "0.82rem", marginRight: "0.75rem" }}>Hub is the</span>
+          <label className="srse-checkbox-label" htmlFor="hub-side-source" style={{ display: "inline-flex", marginRight: "1rem" }}>
+            <input
+              id="hub-side-source"
+              type="radio"
+              name="hub-side"
+              checked={hubSide === "SOURCE"}
+              onChange={() => setHubSide("SOURCE")}
+            />
+            {" "}
+            Source side
+          </label>
+          <label className="srse-checkbox-label" htmlFor="hub-side-target" style={{ display: "inline-flex" }}>
+            <input
+              id="hub-side-target"
+              type="radio"
+              name="hub-side"
+              checked={hubSide === "TARGET"}
+              onChange={() => setHubSide("TARGET")}
+            />
+            {" "}
+            Target side
+          </label>
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", width: "100%" }}>
         <CriterionBox
-          title="Select Source"
+          title={multiMatchMode ? "Hub table — match on" : "Select Source"}
           boxId="source"
           rows={sourceRows}
           showFuzzy
-          pairedRows={targetRows}
+          pairedRows={multiMatchMode ? undefined : targetRows}
           isFuzzyMatchable={isFuzzyMatchable}
           businessNameFor={businessNameFor}
           compareAsFor={compareAsFor}
@@ -608,28 +971,271 @@ export default function AnalysisPage() {
           onRemove={(rowId) => handleRemoveRow(setSourceRows, rowId)}
           onAdd={() => setSourceRows((rs) => [...rs, createEmptyRow()])}
           onError={reportError}
+          displaySection={
+            <DisplayColumnBox
+              title="Also show (not matched on)"
+              boxId="source-display"
+              rows={sourceDisplayRows}
+              businessNameFor={businessNameFor}
+              onTableChange={(rowId, ref) => handleDisplayTableChange(setSourceDisplayRows, rowId, ref)}
+              onColumnChange={(rowId, column) =>
+                setSourceDisplayRows((rows) => rows.map((r) => (r.id === rowId ? { ...r, column } : r)))
+              }
+              onRemove={(rowId) => setSourceDisplayRows((rows) => rows.filter((r) => r.id !== rowId))}
+              onAdd={() => {
+                const ref = defaultSideRef(sourceRows);
+                const row = createEmptyDisplayRow(ref);
+                setSourceDisplayRows((rows) => [...rows, row]);
+                if (isCascadeComplete(ref)) {
+                  listAnalysisColumns(ref)
+                    .then((cols) =>
+                      setSourceDisplayRows((rows) =>
+                        rows.map((r) => (r.id === row.id ? { ...r, columns: cols } : r)),
+                      ),
+                    )
+                    .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
+                }
+              }}
+              onError={reportError}
+            />
+          }
         />
-        <CriterionBox
-          title="Select Target"
-          boxId="target"
-          rows={targetRows}
-          showFuzzy={false}
-          isFuzzyMatchable={isFuzzyMatchable}
-          businessNameFor={businessNameFor}
-          compareAsFor={compareAsFor}
-          onTableChange={(rowId, ref) => handleTableChange(setTargetRows, rowId, ref)}
-          onColumnChange={(rowId, column) => handleColumnChange(setTargetRows, rowId, column)}
-          onFuzzyChange={(rowId, value) => handleFuzzyChange(setTargetRows, rowId, value)}
-          onRemove={(rowId) => handleRemoveRow(setTargetRows, rowId)}
-          onAdd={() => setTargetRows((rs) => [...rs, createEmptyRow()])}
-          onError={reportError}
-        />
+        {!multiMatchMode && (
+          <CriterionBox
+            title="Select Target"
+            boxId="target"
+            rows={targetRows}
+            showFuzzy={false}
+            isFuzzyMatchable={isFuzzyMatchable}
+            businessNameFor={businessNameFor}
+            compareAsFor={compareAsFor}
+            onTableChange={(rowId, ref) => handleTableChange(setTargetRows, rowId, ref)}
+            onColumnChange={(rowId, column) => handleColumnChange(setTargetRows, rowId, column)}
+            onFuzzyChange={(rowId, value) => handleFuzzyChange(setTargetRows, rowId, value)}
+            onRemove={(rowId) => handleRemoveRow(setTargetRows, rowId)}
+            onAdd={() => setTargetRows((rs) => [...rs, createEmptyRow()])}
+            onError={reportError}
+            displaySection={
+              <DisplayColumnBox
+                title="Also show (not matched on)"
+                boxId="target-display"
+                rows={targetDisplayRows}
+                businessNameFor={businessNameFor}
+                onTableChange={(rowId, ref) => handleDisplayTableChange(setTargetDisplayRows, rowId, ref)}
+                onColumnChange={(rowId, column) =>
+                  setTargetDisplayRows((rows) => rows.map((r) => (r.id === rowId ? { ...r, column } : r)))
+                }
+                onRemove={(rowId) => setTargetDisplayRows((rows) => rows.filter((r) => r.id !== rowId))}
+                onAdd={() => {
+                  const ref = defaultSideRef(targetRows);
+                  const row = createEmptyDisplayRow(ref);
+                  setTargetDisplayRows((rows) => [...rows, row]);
+                  if (isCascadeComplete(ref)) {
+                    listAnalysisColumns(ref)
+                      .then((cols) =>
+                        setTargetDisplayRows((rows) =>
+                          rows.map((r) => (r.id === row.id ? { ...r, columns: cols } : r)),
+                        ),
+                      )
+                      .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
+                  }
+                }}
+                onError={reportError}
+              />
+            }
+          />
+        )}
       </div>
+
+      {multiMatchMode && (
+        <div style={{ width: "100%", marginTop: "1rem" }}>
+          {targetBlocks.map((block, blockIndex) => (
+            <section key={block.id} className="srse-card" style={{ marginBottom: "1rem" }}>
+              <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", marginBottom: "0.5rem" }}>
+                <label htmlFor={`target-label-${block.id}`} className="srse-text-muted" style={fieldLabelStyle}>
+                  Target set label
+                </label>
+                <input
+                  id={`target-label-${block.id}`}
+                  className="srse-input"
+                  style={{ flex: "1 1 200px" }}
+                  value={block.label}
+                  onChange={(e) =>
+                    setTargetBlocks((blocks) =>
+                      blocks.map((b) => (b.id === block.id ? { ...b, label: e.target.value } : b)),
+                    )
+                  }
+                />
+                {targetBlocks.length > 1 && (
+                  <button
+                    type="button"
+                    className="srse-btn srse-btn-ghost srse-btn-sm"
+                    onClick={() => setTargetBlocks((blocks) => blocks.filter((b) => b.id !== block.id))}
+                  >
+                    Remove set
+                  </button>
+                )}
+              </div>
+              <CriterionBox
+                title={`Target ${blockIndex + 1} — match on (paired with hub rows)`}
+                boxId={`target-block-${block.id}`}
+                rows={block.joinRows}
+                showFuzzy={false}
+                pairedRows={sourceRows}
+                isFuzzyMatchable={isFuzzyMatchable}
+                businessNameFor={businessNameFor}
+                compareAsFor={compareAsFor}
+                onTableChange={(rowId, ref) => {
+                  setTargetBlocks((blocks) =>
+                    blocks.map((b) =>
+                      b.id === block.id
+                        ? {
+                            ...b,
+                            joinRows: updateRowById(b.joinRows, rowId, { ref, column: "", columns: [] }),
+                          }
+                        : b,
+                    ),
+                  );
+                  if (!isCascadeComplete(ref)) return;
+                  listAnalysisColumns(ref)
+                    .then((cols) =>
+                      setTargetBlocks((blocks) =>
+                        blocks.map((b) =>
+                          b.id === block.id
+                            ? { ...b, joinRows: updateRowById(b.joinRows, rowId, { columns: cols }) }
+                            : b,
+                        ),
+                      ),
+                    )
+                    .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
+                }}
+                onColumnChange={(rowId, column) =>
+                  setTargetBlocks((blocks) =>
+                    blocks.map((b) =>
+                      b.id === block.id
+                        ? { ...b, joinRows: updateRowById(b.joinRows, rowId, { column }) }
+                        : b,
+                    ),
+                  )
+                }
+                onFuzzyChange={() => {}}
+                onRemove={(rowId) =>
+                  setTargetBlocks((blocks) =>
+                    blocks.map((b) =>
+                      b.id === block.id ? { ...b, joinRows: removeRowById(b.joinRows, rowId) } : b,
+                    ),
+                  )
+                }
+                onAdd={() =>
+                  setTargetBlocks((blocks) =>
+                    blocks.map((b) =>
+                      b.id === block.id ? { ...b, joinRows: [...b.joinRows, createEmptyRow()] } : b,
+                    ),
+                  )
+                }
+                onError={reportError}
+                displaySection={
+                  <DisplayColumnBox
+                    title="Also show (not matched on)"
+                    boxId={`target-block-display-${block.id}`}
+                    rows={block.displayRows}
+                    businessNameFor={businessNameFor}
+                    onTableChange={(rowId, ref) =>
+                      setTargetBlocks((blocks) =>
+                        blocks.map((b) =>
+                          b.id === block.id
+                            ? {
+                                ...b,
+                                displayRows: b.displayRows.map((r) =>
+                                  r.id === rowId ? { ...r, ref, column: "", columns: [] } : r,
+                                ),
+                              }
+                            : b,
+                        ),
+                      )
+                    }
+                    onColumnChange={(rowId, column) =>
+                      setTargetBlocks((blocks) =>
+                        blocks.map((b) =>
+                          b.id === block.id
+                            ? {
+                                ...b,
+                                displayRows: b.displayRows.map((r) =>
+                                  r.id === rowId ? { ...r, column } : r,
+                                ),
+                              }
+                            : b,
+                        ),
+                      )
+                    }
+                    onRemove={(rowId) =>
+                      setTargetBlocks((blocks) =>
+                        blocks.map((b) =>
+                          b.id === block.id
+                            ? { ...b, displayRows: b.displayRows.filter((r) => r.id !== rowId) }
+                            : b,
+                        ),
+                      )
+                    }
+                    onAdd={() => {
+                      const ref = defaultSideRef(block.joinRows);
+                      const row = createEmptyDisplayRow(ref);
+                      setTargetBlocks((blocks) =>
+                        blocks.map((b) =>
+                          b.id === block.id ? { ...b, displayRows: [...b.displayRows, row] } : b,
+                        ),
+                      );
+                      if (isCascadeComplete(ref)) {
+                        listAnalysisColumns(ref)
+                          .then((cols) =>
+                            setTargetBlocks((blocks) =>
+                              blocks.map((b) =>
+                                b.id === block.id
+                                  ? {
+                                      ...b,
+                                      displayRows: b.displayRows.map((r) =>
+                                        r.id === row.id ? { ...r, columns: cols } : r,
+                                      ),
+                                    }
+                                  : b,
+                              ),
+                            ),
+                          )
+                          .catch((err: unknown) =>
+                            setLoadError(err instanceof Error ? err.message : String(err)),
+                          );
+                      }
+                    }}
+                    onError={reportError}
+                  />
+                }
+              />
+            </section>
+          ))}
+          <button
+            type="button"
+            className="srse-btn srse-btn-ghost srse-btn-sm"
+            disabled={targetBlocks.length >= maxTargetSets}
+            onClick={() =>
+              setTargetBlocks((blocks) => [...blocks, createTargetBlock(`Target ${blocks.length + 1}`)])
+            }
+          >
+            + Add target ({targetBlocks.length}/{maxTargetSets})
+          </button>
+          {dedupEnabled && (
+            <p className="srse-text-muted" style={{ fontSize: "0.78rem", marginTop: "0.5rem" }}>
+              Dedup uses a column on the hub table only (not on individual target tables).
+            </p>
+          )}
+        </div>
+      )}
 
       <p className="srse-text-muted" style={{ fontSize: "0.78rem", marginTop: "0.5rem" }}>
         Fuzzy % applies to columns marked fuzzy-matchable in Admin, or (if unmapped) when a column
-        name contains &quot;name&quot;; other pairs match exactly. Source and Target rows pair up in
-        order — add a matching row on both sides.
+        name contains &quot;name&quot;; other pairs match exactly. Match-on rows pair up in order and form
+        the join. Rows under &quot;Also show (not matched on)&quot; are projected in the result only.
+        {multiMatchMode &&
+          " Multi-target runs one two-table join per target set; the NDJSON stream can include partial results if one set fails — CSV export is all-or-nothing."}
       </p>
 
       <section className="srse-card" style={{ width: "100%", marginTop: "1rem" }}>
@@ -715,11 +1321,49 @@ export default function AnalysisPage() {
         </p>
       )}
 
+      {multiMatchMode && matchProgress.length > 0 && (
+        <ul className="srse-text-muted" style={{ fontSize: "0.82rem", marginTop: "0.75rem", listStyle: "none", padding: 0 }}>
+          {matchProgress.map((p) => (
+            <li key={`${p.label}-${p.phase}-${p.targetIndex}`} style={{ marginBottom: "0.25rem" }}>
+              <strong>{p.label}</strong>:{" "}
+              {p.phase === "started" && "running…"}
+              {p.phase === "done" && `${p.rows ?? 0} rows`}
+              {p.phase === "error" && (
+                <span className="srse-text-danger">{p.message ?? "failed"}</span>
+              )}
+              {p.phase === "skipped" && (
+                <span>skipped ({p.reason ?? "time budget"})</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
       {matchColumns.length > 0 && (
         <div style={{ marginTop: "1.5rem" }}>
+          {multiMatchMode && (
+            <div style={{ marginBottom: "0.75rem" }}>
+              <label htmlFor="target-set-filter" className="srse-text-muted" style={{ marginRight: "0.5rem" }}>
+                Target set
+              </label>
+              <select
+                id="target-set-filter"
+                className="srse-select"
+                value={targetSetFilter}
+                onChange={(e) => setTargetSetFilter(e.target.value)}
+              >
+                <option value="All">All</option>
+                {targetBlocks.map((b) => (
+                  <option key={b.id} value={b.label.trim() || b.id}>
+                    {b.label.trim() || "Unnamed"}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <AnalysisResultsGrid
             columns={matchColumns}
-            rows={matchRows}
+            rows={displayedMatchRows}
             sql={matchSql}
             streaming={matchStreaming}
             totalRows={matchTotalRows}
