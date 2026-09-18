@@ -230,6 +230,13 @@ so those comparisons did not return zero rows — they failed the whole query
   - Caps: 8 groups, `SRSE_ANALYSIS_MAX_GROUP_COLUMNS` (4) columns per side per
     group, `SRSE_ANALYSIS_MAX_ANYOF_GROUPS` (2) ANY_OF groups per side — two
     UNNESTs on one side cross-multiply that side's rows.
+  - **Emitted SQL is checked against Presto's OWN grammar**, not only against
+    the substrings a test expected: `EmittedSqlParsesTest` runs every shape
+    through `com.facebook.presto:presto-parser`, test-scoped and pinned to the
+    same version as the driver. A new construct that a string assertion would
+    wave through fails here instead of in front of an officer. **Syntax only** —
+    it proves nothing about whether the tables exist, the types resolve, or the
+    rows are right; that still needs the live cluster.
 
 ## Reference
 

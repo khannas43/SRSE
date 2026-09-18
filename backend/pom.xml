@@ -59,6 +59,21 @@
             <version>${presto.jdbc.version}</version>
         </dependency>
 
+        <!--
+            TEST ONLY. Presto's own SQL grammar, pinned to the same version as
+            the driver, so EmittedSqlParsesTest can check that what the
+            compiler and the Analysis tab emit actually parses as PrestoDB
+            0.297 SQL instead of merely matching the strings a test expected.
+            Never on the runtime classpath: SRSE sends SQL to the cluster, it
+            does not parse it.
+        -->
+        <dependency>
+            <groupId>com.facebook.presto</groupId>
+            <artifactId>presto-parser</artifactId>
+            <version>${presto.jdbc.version}</version>
+            <scope>test</scope>
+        </dependency>
+
         <!-- Security + JWT -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
