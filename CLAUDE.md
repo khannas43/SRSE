@@ -235,8 +235,14 @@ so those comparisons did not return zero rows — they failed the whole query
     through `com.facebook.presto:presto-parser`, test-scoped and pinned to the
     same version as the driver. A new construct that a string assertion would
     wave through fails here instead of in front of an officer. **Syntax only** —
-    it proves nothing about whether the tables exist, the types resolve, or the
-    rows are right; that still needs the live cluster.
+    it proves nothing about types resolving or rows being right.
+  - Both modes have been **executed end-to-end** against the local
+    `prestodb/presto:0.297` container, cross-catalog (`iceberg` ↔
+    `iceberg_silver`), with a `bigint`/`varchar` ANY_OF candidate pair: the
+    UNNEST pivot returns the same pair once per matching column with
+    `matched_on` naming it, and a COMBINE fold matched `Geeta Kumari` against
+    `Geetha` + `Kumari` at 92.3%. Not automated — it needs the container — so
+    re-run it by hand when this seam changes.
 
 ## Reference
 

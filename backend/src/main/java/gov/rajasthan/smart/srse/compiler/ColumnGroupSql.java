@@ -18,13 +18,21 @@ public final class ColumnGroupSql {
     /**
      * Folds several columns into one text value.
      *
-     * <p>{@code array_join(filter(...))} rather than {@code concat_ws}: a NULL
-     * or empty middle name must not leave a doubled separator in the result.
-     * Against Levenshtein that stray separator is a free edit charged to every
-     * row, and it would systematically depress the similarity of exactly the
-     * records with a missing middle name. Collapsing whitespace afterwards
-     * would fix only the space case; filtering first is correct for any
-     * separator.
+     * <p>{@code array_join(filter(...))} rather than {@code concat_ws}, for two
+     * reasons, both measured against PrestoDB 0.297:
+     * <ul>
+     *   <li>{@code concat_ws} is <b>not a registered function</b> there —
+     *       {@code Function concat_ws not registered} — so it is not an option
+     *       at all, whatever its null semantics elsewhere.</li>
+     *   <li>A NULL or empty middle name must not leave a doubled separator.
+     *       Against Levenshtein that stray separator is a free edit charged to
+     *       every row with a missing middle name, systematically depressing the
+     *       similarity of exactly those records. Verified: folding
+     *       {@code ['Ram', NULL, 'Sharma']} with the filter gives edit distance
+     *       0 against {@code 'Ram Sharma'}; without it, 1.</li>
+     * </ul>
+     * Collapsing whitespace afterwards would fix only the space case; filtering
+     * first is correct for any separator.
      *
      * <p>Every member is cast to VARCHAR: a combined value is textual by
      * construction, and ARRAY requires one element type.
