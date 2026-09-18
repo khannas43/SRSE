@@ -47,7 +47,7 @@ class MultiTargetRecordMatchServiceTest {
     private JdbcTemplate jdbc;
 
     private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30);
-    private final AnalysisProperties analysisProperties = new AnalysisProperties(5, 120);
+    private final AnalysisProperties analysisProperties = new AnalysisProperties(5, 120, 4, 2);
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private MultiTargetRecordMatchService service;
@@ -265,6 +265,58 @@ class MultiTargetRecordMatchServiceTest {
         assertTrue(out.contains("Ration_target_name"), out);
     }
 
+    /**
+     * An ANY_OF group's matched_on column has to reach the merged grid, or the
+     * duplicate rows it produces (one per candidate column that matched) look
+     * like a bug instead of the answer.
+     */
+    @Test
+    void anyOfMatchedOnColumnsLandInTheMergedSuperset() throws Exception {
+        stubHubValidation();
+        when(recordMatchService.planMatch(any())).thenReturn(queryWithSql("JOIN bank ON hub"));
+        stubJdbcRow(Map.of("source_jan_aadhaar", "1", "target_ja_id", "1",
+                "target_g0_matched_on", "ja_id"));
+
+        MatchGroup group = new MatchGroup(
+                List.of(hub("golden", "jan_aadhaar")),
+                List.of(tgt("bank_txn", "ja_id"), tgt("bank_txn", "legacy_id")),
+                GroupMode.ANY_OF, null, null);
+        String out = streamOutput(new MultiTargetRecordMatchRequest(
+                List.of(hub("golden", "jan_aadhaar")),
+                List.of(),
+                HubSide.SOURCE,
+                List.of(new TargetMatchSpec("Bank", CATALOG, SCHEMA, "bank_txn",
+                        List.of(), List.of(), List.of(group))),
+                false, null, null));
+
+        assertTrue(out.contains("\"Bank_target_g0_matched_on\""), out);
+        assertTrue(out.contains("\"Bank_target_ja_id\""), out);
+        assertTrue(out.contains("\"Bank_target_legacy_id\""), out);
+    }
+
+    /** A target's groups name their own hub-side columns; they must be projected too. */
+    @Test
+    void groupHubColumnsAreProjectedOnceAcrossTargets() throws Exception {
+        stubHubValidation();
+        when(recordMatchService.planMatch(any())).thenReturn(queryWithSql("SQL"));
+        stubJdbcRow(Map.of("source_jan_aadhaar", "1", "source_member_name", "A", "target_ja_id", "1"));
+
+        MatchGroup group = new MatchGroup(
+                List.of(hub("golden", "jan_aadhaar"), hub("golden", "member_name")),
+                List.of(tgt("bank_txn", "ja_id")),
+                GroupMode.COMBINE, null, null);
+        String out = streamOutput(new MultiTargetRecordMatchRequest(
+                List.of(hub("golden", "jan_aadhaar")),
+                List.of(),
+                HubSide.SOURCE,
+                List.of(new TargetMatchSpec("Bank", CATALOG, SCHEMA, "bank_txn",
+                        List.of(), List.of(), List.of(group))),
+                false, null, null));
+
+        assertTrue(out.contains("\"source_member_name\""), out);
+        assertEquals(1, out.lines().filter(l -> l.contains("\"type\":\"meta\"")).count(), out);
+    }
+
     @Test
     void dedupOnTargetTableRejectedBeforeStream() {
         stubHubValidation();
@@ -314,7 +366,7 @@ class MultiTargetRecordMatchServiceTest {
     @Test
     void budgetExhaustedSkipsRemainingTargets() throws Exception {
         service = new MultiTargetRecordMatchService(
-                recordMatchService, jdbc, guardrails, new AnalysisProperties(5, 0), objectMapper);
+                recordMatchService, jdbc, guardrails, new AnalysisProperties(5, 0, 4, 2), objectMapper);
         stubHubValidation();
 
         String out = streamOutput(twoTargetRequest(HubSide.SOURCE));

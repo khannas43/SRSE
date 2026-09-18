@@ -2,6 +2,7 @@ package gov.rajasthan.smart.srse.analysis;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import gov.rajasthan.smart.srse.compiler.AliasRebase;
+import gov.rajasthan.smart.srse.compiler.ColumnGroupSql;
 import gov.rajasthan.smart.srse.compiler.CompareAs;
 import gov.rajasthan.smart.srse.compiler.FieldResolver;
 import gov.rajasthan.smart.srse.compiler.FuzzyMatchSql;
@@ -116,6 +117,7 @@ public class RecordMatchService {
     private final GuardrailProperties guardrails;
     private final FieldResolver fields;
     private final AnalysisColumnMetadataRepository columnMetadata;
+    private final AnalysisProperties analysisProperties;
     private final ObjectMapper objectMapper;
 
     public RecordMatchService(@Qualifier("prestoJdbcTemplate") JdbcTemplate jdbc,
@@ -123,12 +125,14 @@ public class RecordMatchService {
                               GuardrailProperties guardrails,
                               FieldResolver fields,
                               AnalysisColumnMetadataRepository columnMetadata,
+                              AnalysisProperties analysisProperties,
                               ObjectMapper objectMapper) {
         this.jdbc = jdbc;
         this.registry = registry;
         this.guardrails = guardrails;
         this.fields = fields;
         this.columnMetadata = columnMetadata;
+        this.analysisProperties = analysisProperties;
         this.objectMapper = objectMapper;
     }
 
@@ -136,8 +140,9 @@ public class RecordMatchService {
      * Validates the request and builds the Presto match query without executing it.
      */
     public MatchQuery planMatch(RecordMatchRequest req) {
-        Sides sides = validateRequest(req);
-        return buildMatchQuery(req, sides);
+        JoinPlan join = normalizeJoin(req);
+        Sides sides = validateRequest(req, join);
+        return buildMatchQuery(req, join, sides);
     }
 
     /** Display-only SQL with bound parameters rendered as literals — never re-executed. */
@@ -185,18 +190,98 @@ public class RecordMatchService {
                          QualifiedTable targetTable, Map<String, RegisteredColumn> targetColumns) {
     }
 
-    private Sides validateRequest(RecordMatchRequest req) {
-        QualifiedTable sourceTable = tableOf(req.sourceCriteria(), "sourceCriteria");
-        QualifiedTable targetTable = tableOf(req.targetCriteria(), "targetCriteria");
-        if (req.sourceCriteria().size() != req.targetCriteria().size()) {
-            throw new IllegalArgumentException("sourceCriteria and targetCriteria must be the same size");
+    /**
+     * The groups that become the ON clause, plus the same columns flattened.
+     *
+     * <p>Everything OUTSIDE the ON clause — the projections, the dedup
+     * partition, the table each side resolves to, the type lookups — still
+     * works from a flat list of columns and is indifferent to how they were
+     * grouped. Only the join and the match score read {@link #groups()}.
+     */
+    private record JoinPlan(List<MatchGroup> groups,
+                            List<MatchCriterion> sourceColumns,
+                            List<MatchCriterion> targetColumns) {
+    }
+
+    /**
+     * Resolves a request to groups, whichever shape it arrived in.
+     *
+     * <p>A request without {@code joinGroups} is zipped into single-column
+     * groups, which every emitter below treats exactly as it treated a
+     * criterion pair — the legacy path stays byte-identical, and the
+     * same-size error it has always produced is still produced here.
+     */
+    private JoinPlan normalizeJoin(RecordMatchRequest req) {
+        if (req.joinGroups().isEmpty()) {
+            if (req.sourceCriteria().size() != req.targetCriteria().size()) {
+                throw new IllegalArgumentException("sourceCriteria and targetCriteria must be the same size");
+            }
+            List<MatchGroup> groups = new ArrayList<>();
+            for (int i = 0; i < req.sourceCriteria().size(); i++) {
+                groups.add(MatchGroup.of(req.sourceCriteria().get(i), req.targetCriteria().get(i)));
+            }
+            return new JoinPlan(groups, req.sourceCriteria(), req.targetCriteria());
         }
+        validateGroups(req.joinGroups());
+        List<MatchCriterion> sourceColumns = new ArrayList<>();
+        List<MatchCriterion> targetColumns = new ArrayList<>();
+        for (MatchGroup g : req.joinGroups()) {
+            sourceColumns.addAll(g.source());
+            targetColumns.addAll(g.target());
+        }
+        return new JoinPlan(req.joinGroups(), List.copyOf(sourceColumns), List.copyOf(targetColumns));
+    }
+
+    private void validateGroups(List<MatchGroup> groups) {
+        if (groups.size() > MAX_CRITERIA_PER_SIDE) {
+            throw new IllegalArgumentException(
+                    "joinGroups must have 1 to " + MAX_CRITERIA_PER_SIDE + " entries");
+        }
+        int anyOfSource = 0;
+        int anyOfTarget = 0;
+        for (int i = 0; i < groups.size(); i++) {
+            MatchGroup g = groups.get(i);
+            validateGroupSide(g.source(), i, "source");
+            validateGroupSide(g.target(), i, "target");
+            if (g.mode() == GroupMode.ANY_OF) {
+                if (g.source().size() > 1) {
+                    anyOfSource++;
+                }
+                if (g.target().size() > 1) {
+                    anyOfTarget++;
+                }
+            }
+        }
+        // Each ANY_OF side becomes its own UNNEST, and two UNNESTs on one side
+        // cross-multiply that side's rows before the join ever runs. The cap is
+        // the only thing standing between an officer and a quiet row explosion.
+        int maxAnyOf = analysisProperties.maxAnyOfGroupsPerSide();
+        if (anyOfSource > maxAnyOf || anyOfTarget > maxAnyOf) {
+            throw new IllegalArgumentException(
+                    "at most " + maxAnyOf + " ANY_OF groups per side are allowed");
+        }
+    }
+
+    private void validateGroupSide(List<MatchCriterion> columns, int index, String side) {
+        if (columns.isEmpty()) {
+            throw new IllegalArgumentException("joinGroups[" + index + "]." + side
+                    + " must have at least one column");
+        }
+        if (columns.size() > analysisProperties.maxGroupColumns()) {
+            throw new IllegalArgumentException("joinGroups[" + index + "]." + side
+                    + " must have at most " + analysisProperties.maxGroupColumns() + " columns");
+        }
+    }
+
+    private Sides validateRequest(RecordMatchRequest req, JoinPlan join) {
+        QualifiedTable sourceTable = sameTable(join.sourceColumns(), "sourceCriteria");
+        QualifiedTable targetTable = sameTable(join.targetColumns(), "targetCriteria");
         validateDisplayColumns(req.sourceDisplayColumns(), sourceTable, "sourceDisplayColumns");
         validateDisplayColumns(req.targetDisplayColumns(), targetTable, "targetDisplayColumns");
 
         Sides sides = new Sides(
-                sourceTable, describeSide(sourceTable, req.sourceCriteria(), req.sourceDisplayColumns()),
-                targetTable, describeSide(targetTable, req.targetCriteria(), req.targetDisplayColumns()));
+                sourceTable, describeSide(sourceTable, join.sourceColumns(), req.sourceDisplayColumns()),
+                targetTable, describeSide(targetTable, join.targetColumns(), req.targetDisplayColumns()));
         if (req.dedup() != null) {
             validateSideMembership(req.dedup().qualifiedTable(), sourceTable, targetTable, "dedup.table");
             registry.validateColumn(req.dedup().qualifiedColumn());
@@ -220,7 +305,7 @@ public class RecordMatchService {
         }
     }
 
-    private MatchQuery buildMatchQuery(RecordMatchRequest req, Sides sides) {
+    private MatchQuery buildMatchQuery(RecordMatchRequest req, JoinPlan join, Sides sides) {
         List<Object> params = new ArrayList<>();
         Set<String> outerColumns = new LinkedHashSet<>();
         StringBuilder select = new StringBuilder();
@@ -229,15 +314,19 @@ public class RecordMatchService {
 
         // Every type-dependent decision is made once, here, and both the join
         // and the match score read the same plan — they MUST agree on which
-        // pairs are fuzzy and on how each side is cast, or the score would be
+        // groups are fuzzy and on how each side is cast, or the score would be
         // computed over different expressions than the join matched on.
-        List<CriterionPair> pairs = planPairs(req, sides);
+        List<UnnestSide> sourceUnnests = new ArrayList<>();
+        List<UnnestSide> targetUnnests = new ArrayList<>();
+        List<GroupPlan> groups = planGroups(join, sides, sourceUnnests, targetUnnests);
 
-        appendCriteriaSelects(select, outerColumns, req);
-        appendJoinConditions(onClause, where, params, pairs);
+        appendCriteriaSelects(select, outerColumns, join, req);
+        appendMatchedOnSelects(select, outerColumns, "src", "source_", sourceUnnests);
+        appendMatchedOnSelects(select, outerColumns, "tgt", "target_", targetUnnests);
+        appendJoinConditions(onClause, where, params, groups);
 
-        String dedupAlias = appendDedupSelect(select, outerColumns, req);
-        appendMatchScoreSelect(select, outerColumns, req, pairs);
+        String dedupAlias = appendDedupSelect(select, outerColumns, req, join);
+        appendMatchScoreSelect(select, outerColumns, req, groups);
         appendAgeFilter(where, params, req, sides);
 
         if (where.length() == 0) {
@@ -247,21 +336,40 @@ public class RecordMatchService {
         // Fully-qualified catalog.schema.table on both sides — the two sides
         // can live in different catalogs entirely (a Silver-vs-Gold
         // reconciliation), which Presto joins natively.
-        String sourceTable = req.sourceCriteria().get(0).qualifiedTable().qualifiedName();
-        String targetTable = req.targetCriteria().get(0).qualifiedTable().qualifiedName();
-        String baseSql = "SELECT " + select + " FROM " + sourceTable + " src JOIN " + targetTable
-                + " tgt ON " + onClause + " WHERE " + where;
+        String sourceFrom = fromSide(sides.sourceTable().qualifiedName(), "src", sourceUnnests);
+        String targetFrom = fromSide(sides.targetTable().qualifiedName(), "tgt", targetUnnests);
+        String baseSql = "SELECT " + select + " FROM " + sourceFrom + " JOIN " + targetFrom
+                + " ON " + onClause + " WHERE " + where;
 
-        String finalSql = wrapWithDedup(baseSql, req, dedupAlias);
+        String finalSql = wrapWithDedup(baseSql, req, join, dedupAlias);
         return new MatchQuery(finalSql, params, List.copyOf(outerColumns));
     }
 
-    private void appendCriteriaSelects(StringBuilder select, Set<String> outerColumns, RecordMatchRequest req) {
-        for (MatchCriterion c : req.sourceCriteria()) {
+    /**
+     * One side's FROM fragment. Without ANY_OF groups it is the bare qualified
+     * table, character for character what it always was; with them the table is
+     * wrapped in a subquery that pivots each ANY_OF group's columns into rows.
+     */
+    private static String fromSide(String qualifiedTable, String alias, List<UnnestSide> unnests) {
+        if (unnests.isEmpty()) {
+            return qualifiedTable + " " + alias;
+        }
+        StringBuilder projected = new StringBuilder("t.*");
+        StringBuilder clauses = new StringBuilder();
+        for (UnnestSide u : unnests) {
+            projected.append(", ").append(u.keyAlias()).append(", ").append(u.matchedAlias());
+            clauses.append(" ").append(u.clause());
+        }
+        return "(SELECT " + projected + " FROM " + qualifiedTable + " t" + clauses + ") " + alias;
+    }
+
+    private void appendCriteriaSelects(StringBuilder select, Set<String> outerColumns,
+                                       JoinPlan join, RecordMatchRequest req) {
+        for (MatchCriterion c : join.sourceColumns()) {
             String baseAlias = "source_" + c.column();
             appendSelect(select, outerColumns, "src", c.column(), allocateUniqueAlias(baseAlias, outerColumns));
         }
-        for (MatchCriterion c : req.targetCriteria()) {
+        for (MatchCriterion c : join.targetColumns()) {
             String baseAlias = "target_" + c.column();
             appendSelect(select, outerColumns, "tgt", c.column(), allocateUniqueAlias(baseAlias, outerColumns));
         }
@@ -282,6 +390,21 @@ public class RecordMatchService {
     }
 
     /**
+     * Projects each ANY_OF group's {@code matched_on} column.
+     *
+     * <p>An ANY_OF group returns the same pair once per column that matched, so
+     * without this the duplicates look like a bug. With it they are the answer:
+     * the row says which of the candidate columns carried the value.
+     */
+    private void appendMatchedOnSelects(StringBuilder select, Set<String> outerColumns, String sqlAlias,
+                                        String outPrefix, List<UnnestSide> unnests) {
+        for (UnnestSide u : unnests) {
+            String outAlias = allocateUniqueAlias(outPrefix + u.matchedAlias(), outerColumns);
+            appendSelect(select, outerColumns, sqlAlias, u.matchedAlias(), outAlias);
+        }
+    }
+
+    /**
      * Reserves a unique output alias when {@code baseAlias} is already taken by
      * a non-skipped projection (e.g. {@code match_score_pct}).
      */
@@ -297,54 +420,94 @@ public class RecordMatchService {
     }
 
     /**
-     * One (source, target) criterion pair with every type-dependent decision
-     * already made: whether the pair is fuzzy, and the SQL each side becomes
-     * after coercion.
+     * One group resolved: whether it is fuzzy, and the SQL each side compares
+     * as once folded and coerced.
      *
      * <p>{@code sourceRef}/{@code targetRef} are what actually goes into SQL.
-     * For a fuzzy pair they are the TEXT forms (Levenshtein and {@code lower}
-     * take nothing else); for an exact pair they are the two sides aligned to
-     * a common type — which is the whole point: the same account number stored
-     * {@code varchar} in one table and {@code bigint} in the other used to
-     * fail the query outright with {@code '=' cannot be applied to varchar,
-     * bigint}.
+     * For a fuzzy group they are the TEXT forms (Levenshtein and {@code lower}
+     * take nothing else); for an exact one they are the two sides aligned to a
+     * common type — which is the whole point: the same account number stored
+     * {@code varchar} in one table and {@code bigint} in the other used to fail
+     * the query outright with {@code '=' cannot be applied to varchar, bigint}.
      */
-    private record CriterionPair(MatchCriterion source, MatchCriterion target, boolean fuzzy,
-                                 String sourceRef, String targetRef) {
+    private record GroupPlan(MatchGroup group, boolean fuzzy, String sourceRef, String targetRef) {
+    }
+
+    /** One ANY_OF side pivoted to rows, and the CROSS JOIN UNNEST that does it. */
+    private record UnnestSide(String keyAlias, String matchedAlias, String clause) {
+    }
+
+    /** A side of a group as SQL, with the type family that expression yields. */
+    private record SideSql(String sql, SqlTypeFamily family) {
     }
 
     /**
-     * Resolves every pair once — fuzzy-or-exact, and the casts each side
-     * needs. Both the join and the match score read this, so they cannot drift
-     * apart, and each column's admin metadata is fetched once instead of once
-     * per use.
+     * Resolves every group once — fuzzy-or-exact, the folding each side needs,
+     * and the casts. Both the join and the match score read this, so they
+     * cannot drift apart, and each column's admin metadata is fetched once
+     * instead of once per use.
+     *
+     * <p>ANY_OF sides are appended to {@code sourceUnnests}/{@code targetUnnests}
+     * as a side effect, because the FROM clause has to know about them before
+     * it can be written.
      */
-    private List<CriterionPair> planPairs(RecordMatchRequest req, Sides sides) {
-        List<CriterionPair> pairs = new ArrayList<>();
-        for (int i = 0; i < req.sourceCriteria().size(); i++) {
-            MatchCriterion sc = req.sourceCriteria().get(i);
-            MatchCriterion tc = req.targetCriteria().get(i);
-            Optional<AnalysisColumnMetadata> sourceMeta = findMetadata(sc);
-            Optional<AnalysisColumnMetadata> targetMeta = findMetadata(tc);
+    private List<GroupPlan> planGroups(JoinPlan join, Sides sides,
+                                       List<UnnestSide> sourceUnnests, List<UnnestSide> targetUnnests) {
+        List<GroupPlan> plans = new ArrayList<>();
+        for (int i = 0; i < join.groups().size(); i++) {
+            MatchGroup g = join.groups().get(i);
+            SideSql src = sideSql(g, g.source(), "src", sides.sourceColumns(), i, sourceUnnests);
+            SideSql tgt = sideSql(g, g.target(), "tgt", sides.targetColumns(), i, targetUnnests);
 
-            String srcCol = "src." + sc.column();
-            String tgtCol = "tgt." + tc.column();
-            SqlTypeFamily srcType = familyOf(sides.sourceColumns(), sc.column());
-            SqlTypeFamily tgtType = familyOf(sides.targetColumns(), tc.column());
-
-            if (isFuzzyMatchable(sc, tc, sourceMeta, targetMeta)) {
-                // CompareAs does not enter into a fuzzy pair: Levenshtein
+            if (isGroupFuzzy(g)) {
+                // CompareAs does not enter into a fuzzy group: Levenshtein
                 // similarity is a string measure, so both sides go to text
                 // whatever the admin set for a direct comparison.
-                pairs.add(new CriterionPair(sc, tc, true,
-                        TypeCoercion.asText(srcCol, srcType), TypeCoercion.asText(tgtCol, tgtType)));
+                plans.add(new GroupPlan(g, true,
+                        TypeCoercion.asText(src.sql(), src.family()),
+                        TypeCoercion.asText(tgt.sql(), tgt.family())));
             } else {
-                CompareAs mode = CompareAs.resolve(compareAsOf(sourceMeta), compareAsOf(targetMeta));
-                TypeCoercion.Aligned aligned = TypeCoercion.align(srcCol, srcType, tgtCol, tgtType, mode);
-                pairs.add(new CriterionPair(sc, tc, false, aligned.left(), aligned.right()));
+                CompareAs mode = groupCompareAs(g);
+                TypeCoercion.Aligned aligned =
+                        TypeCoercion.align(src.sql(), src.family(), tgt.sql(), tgt.family(), mode);
+                plans.add(new GroupPlan(g, false, aligned.left(), aligned.right()));
             }
         }
-        return pairs;
+        return plans;
+    }
+
+    /**
+     * One side of a group as a single SQL expression.
+     *
+     * <p>A single column is emitted bare, exactly as before groups existed.
+     * A COMBINE side is folded to text. An ANY_OF side is pivoted with UNNEST
+     * and the expression becomes a reference to the unnested key, so
+     * everything downstream — blocking key, similarity, equality — treats it
+     * as the ordinary single column it now is.
+     */
+    private SideSql sideSql(MatchGroup group, List<MatchCriterion> columns, String alias,
+                            Map<String, RegisteredColumn> described, int groupIndex,
+                            List<UnnestSide> unnests) {
+        if (columns.size() == 1) {
+            String column = columns.get(0).column();
+            return new SideSql(alias + "." + column, familyOf(described, column));
+        }
+        List<String> names = columns.stream().map(MatchCriterion::column).toList();
+        if (group.mode() == GroupMode.ANY_OF) {
+            // Within one family Presto already unifies the array's element type
+            // (integer with bigint, varchar(20) with varchar(50)); a cast there
+            // would only change what the comparison means. Across families it
+            // cannot, so the array goes to text.
+            SqlTypeFamily first = familyOf(described, names.get(0));
+            boolean uniform = names.stream().allMatch(n -> familyOf(described, n) == first);
+            String keyAlias = "g" + groupIndex + "_key";
+            String matchedAlias = "g" + groupIndex + "_matched_on";
+            unnests.add(new UnnestSide(keyAlias, matchedAlias, ColumnGroupSql.unnestClause(
+                    "t", names, !uniform, "u" + groupIndex, keyAlias, matchedAlias)));
+            return new SideSql(alias + "." + keyAlias, uniform ? first : SqlTypeFamily.TEXT);
+        }
+        List<String> refs = names.stream().map(n -> alias + "." + n).toList();
+        return new SideSql(ColumnGroupSql.combine(refs, group.separator()), SqlTypeFamily.TEXT);
     }
 
     private static SqlTypeFamily familyOf(Map<String, RegisteredColumn> columns, String column) {
@@ -352,46 +515,75 @@ public class RecordMatchService {
         return described == null ? SqlTypeFamily.UNKNOWN : SqlTypeFamily.of(described.dataType());
     }
 
-    private static CompareAs compareAsOf(Optional<AnalysisColumnMetadata> meta) {
-        return meta.map(AnalysisColumnMetadata::getCompareAs).orElse(CompareAs.AUTO);
+    /**
+     * The admin's {@code compare_as} for a group.
+     *
+     * <p>A multi-column COMBINE is folded with {@code array_join}, so it is
+     * text by construction and nothing else can be honoured: reading a
+     * concatenated name as a number would {@code TRY_CAST} every row to NULL
+     * and return nothing, silently. Otherwise this is the single-column rule
+     * unchanged — an explicit setting on either side wins, TEXT breaking a tie.
+     */
+    private CompareAs groupCompareAs(MatchGroup group) {
+        if (group.mode() == GroupMode.COMBINE && !group.isSingleColumnPair()) {
+            return CompareAs.TEXT;
+        }
+        return CompareAs.resolve(sideCompareAs(group.source()), sideCompareAs(group.target()));
     }
 
+    private CompareAs sideCompareAs(List<MatchCriterion> columns) {
+        for (MatchCriterion c : columns) {
+            Optional<AnalysisColumnMetadata> meta = findMetadata(c);
+            if (meta.isPresent()) {
+                return meta.get().getCompareAs();
+            }
+        }
+        return CompareAs.AUTO;
+    }
+
+    /**
+     * AND-s every group into the ON clause. Never an OR: a disjunctive ON costs
+     * Presto the hash join and falls back to a nested loop over the cross
+     * product, which is why ANY_OF is pivoted with UNNEST in
+     * {@link #sideSql} instead of being written as alternatives here.
+     */
     private void appendJoinConditions(StringBuilder onClause, StringBuilder where, List<Object> params,
-                                      List<CriterionPair> pairs) {
-        for (int i = 0; i < pairs.size(); i++) {
-            CriterionPair pair = pairs.get(i);
+                                      List<GroupPlan> groups) {
+        for (int i = 0; i < groups.size(); i++) {
+            GroupPlan group = groups.get(i);
             if (onClause.length() > 0) {
                 onClause.append(" AND ");
             }
-            if (pair.fuzzy()) {
-                appendFuzzyJoin(onClause, where, params, i, pair);
+            if (group.fuzzy()) {
+                appendFuzzyJoin(onClause, where, params, i, group);
             } else {
-                onClause.append(pair.sourceRef()).append(" = ").append(pair.targetRef());
+                onClause.append(group.sourceRef()).append(" = ").append(group.targetRef());
             }
         }
     }
 
     private static void appendFuzzyJoin(StringBuilder onClause, StringBuilder where, List<Object> params,
-                                      int index, CriterionPair pair) {
-        if (pair.source().fuzzyThresholdPercent() == null) {
+                                      int index, GroupPlan group) {
+        if (group.group().fuzzyThresholdPercent() == null) {
             throw new IllegalArgumentException(
                     "sourceCriteria[" + index + "].fuzzyThresholdPercent is required for a name column");
         }
-        double threshold = pair.source().fuzzyThresholdPercent();
+        double threshold = group.group().fuzzyThresholdPercent();
         if (threshold < 0 || threshold > 100) {
             throw new IllegalArgumentException("fuzzyThresholdPercent must be between 0 and 100");
         }
-        onClause.append(blockingKeyExpr(pair.sourceRef())).append(" = ")
-                .append(blockingKeyExpr(pair.targetRef()));
-        appendWhereClause(where, FuzzyMatchSql.similarityExpr(pair.sourceRef(), pair.targetRef()) + " >= ?");
+        onClause.append(blockingKeyExpr(group.sourceRef())).append(" = ")
+                .append(blockingKeyExpr(group.targetRef()));
+        appendWhereClause(where, FuzzyMatchSql.similarityExpr(group.sourceRef(), group.targetRef()) + " >= ?");
         params.add(threshold / 100.0);
     }
 
-    private String appendDedupSelect(StringBuilder select, Set<String> outerColumns, RecordMatchRequest req) {
+    private String appendDedupSelect(StringBuilder select, Set<String> outerColumns, RecordMatchRequest req,
+                                     JoinPlan join) {
         if (req.dedup() == null) {
             return null;
         }
-        QualifiedTable sourceTable = req.sourceCriteria().get(0).qualifiedTable();
+        QualifiedTable sourceTable = join.sourceColumns().get(0).qualifiedTable();
         String side = req.dedup().qualifiedTable().equals(sourceTable) ? "src" : "tgt";
         String dedupAlias = "dedup_last_updated";
         appendSelect(select, outerColumns, side, req.dedup().column(), dedupAlias);
@@ -399,15 +591,15 @@ public class RecordMatchService {
     }
 
     /**
-     * Match score reflects JOIN criterion pairs only — display-only columns do
-     * not enter the average.
+     * Match score reflects JOIN groups only — display-only columns do not enter
+     * the average, and a group counts once however many columns it folds.
      */
     private void appendMatchScoreSelect(StringBuilder select, Set<String> outerColumns,
-                                        RecordMatchRequest req, List<CriterionPair> pairs) {
+                                        RecordMatchRequest req, List<GroupPlan> groups) {
         if (!req.highlightDuplicates()) {
             return;
         }
-        String scoreExpr = buildMatchScoreExpr(pairs);
+        String scoreExpr = buildMatchScoreExpr(groups);
         select.append(", ").append(scoreExpr).append(" AS \"match_score_pct\"");
         outerColumns.add("match_score_pct");
     }
@@ -497,11 +689,15 @@ public class RecordMatchService {
         };
     }
 
-    private static String wrapWithDedup(String baseSql, RecordMatchRequest req, String dedupAlias) {
+    private static String wrapWithDedup(String baseSql, RecordMatchRequest req, JoinPlan join,
+                                        String dedupAlias) {
         if (req.dedup() == null) {
             return baseSql;
         }
-        String partitionCols = req.sourceCriteria().stream()
+        // Partitions over every source-side JOIN column, across all groups. An
+        // ANY_OF group can return the same hub key several times — once per
+        // candidate column that matched — and this is what collapses them.
+        String partitionCols = join.sourceColumns().stream()
                 .map(c -> "\"source_" + c.column() + "\"")
                 .reduce((a, b) -> a + ", " + b).orElseThrow();
         return "SELECT * FROM (SELECT base.*, ROW_NUMBER() OVER ("
@@ -606,11 +802,11 @@ public class RecordMatchService {
         return "substr(lower(" + columnRef + "), 1, " + BLOCKING_PREFIX_LEN + ")";
     }
 
-    private static String buildMatchScoreExpr(List<CriterionPair> pairs) {
+    private static String buildMatchScoreExpr(List<GroupPlan> groups) {
         List<String> terms = new ArrayList<>();
-        for (CriterionPair pair : pairs) {
-            terms.add(pair.fuzzy()
-                    ? FuzzyMatchSql.similarityExpr(pair.sourceRef(), pair.targetRef())
+        for (GroupPlan group : groups) {
+            terms.add(group.fuzzy()
+                    ? FuzzyMatchSql.similarityExpr(group.sourceRef(), group.targetRef())
                     : "1.0");
         }
         String sum = String.join(" + ", terms);
@@ -618,22 +814,46 @@ public class RecordMatchService {
     }
 
     /**
-     * Admin-registered {@link AnalysisColumnMetadata} takes precedence over
-     * the name-substring guess, on either side — this MUST stay in sync with
-     * the frontend's own fuzzy-eligibility check (analysis/page.tsx), or the
-     * officer could see a Fuzzy % control that the backend then silently
-     * ignores (or vice versa: a submitted threshold the backend never uses).
+     * Whether a whole GROUP is fuzzy — a combined name is one value and gets
+     * one decision, and one threshold.
+     *
+     * <p>Admin-registered {@link AnalysisColumnMetadata} takes precedence over
+     * the name-substring guess. When a folded group's registrations DISAGREE —
+     * a fuzzy {@code first_name} beside an exact {@code emp_code} — fuzzy wins.
+     * The two mistakes are not symmetric: a group wrongly forced exact returns
+     * almost nothing and reads to the officer as "these datasets do not
+     * overlap", while one wrongly made fuzzy returns extra rows that carry
+     * {@code match_score_pct} and are tunable with the threshold the officer
+     * already controls. Visible over silent, the same trade
+     * {@link CompareAs#resolve} makes when it lets TEXT win.
+     *
+     * <p>This MUST stay in sync with the frontend's own
+     * fuzzy-eligibility check (analysis/page.tsx), or the officer could see a
+     * Fuzzy % control that the backend then silently ignores (or vice versa: a
+     * submitted threshold the backend never uses).
      */
-    private static boolean isFuzzyMatchable(MatchCriterion sc, MatchCriterion tc,
-                                            Optional<AnalysisColumnMetadata> srcMeta,
-                                            Optional<AnalysisColumnMetadata> tgtMeta) {
-        if (srcMeta.isPresent()) {
-            return srcMeta.get().isFuzzyMatchable();
+    private boolean isGroupFuzzy(MatchGroup group) {
+        List<MatchCriterion> columns = new ArrayList<>(group.source());
+        columns.addAll(group.target());
+
+        // Registered columns decide as a BLOC, and an unregistered column
+        // sitting beside a registered one gets no vote — otherwise the
+        // name-substring guess could overturn an explicit admin setting, which
+        // is the one thing the single-column rule has always refused to do.
+        boolean anyRegistered = false;
+        for (MatchCriterion c : columns) {
+            Optional<AnalysisColumnMetadata> meta = findMetadata(c);
+            if (meta.isPresent()) {
+                anyRegistered = true;
+                if (meta.get().isFuzzyMatchable()) {
+                    return true;
+                }
+            }
         }
-        if (tgtMeta.isPresent()) {
-            return tgtMeta.get().isFuzzyMatchable();
+        if (anyRegistered) {
+            return false;
         }
-        return sc.column().toLowerCase().contains("name") || tc.column().toLowerCase().contains("name");
+        return columns.stream().anyMatch(c -> c.column().toLowerCase().contains("name"));
     }
 
     private Optional<AnalysisColumnMetadata> findMetadata(MatchCriterion c) {
@@ -662,6 +882,19 @@ public class RecordMatchService {
     private static QualifiedTable tableOf(List<MatchCriterion> criteria, String label) {
         if (criteria == null || criteria.isEmpty() || criteria.size() > MAX_CRITERIA_PER_SIDE) {
             throw new IllegalArgumentException(label + " must have 1 to " + MAX_CRITERIA_PER_SIDE + " entries");
+        }
+        return sameTable(criteria, label);
+    }
+
+    /**
+     * The same one-table rule without the per-side column cap, for a list that
+     * has already been bounded as GROUPS — eight groups of four columns is a
+     * legitimate thirty-two entries, and counting them against the old
+     * eight-picks limit would reject a request the group caps just allowed.
+     */
+    private static QualifiedTable sameTable(List<MatchCriterion> criteria, String label) {
+        if (criteria == null || criteria.isEmpty()) {
+            throw new IllegalArgumentException(label + " must have at least one entry");
         }
         QualifiedTable table = criteria.get(0).qualifiedTable();
         for (MatchCriterion c : criteria) {

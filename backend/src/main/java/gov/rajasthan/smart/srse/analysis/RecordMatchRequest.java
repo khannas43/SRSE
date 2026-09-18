@@ -17,6 +17,12 @@ import java.util.List;
  * match score, dedup partition, or age filter. Null or empty lists preserve
  * legacy behaviour (every compared column is also projected).
  *
+ * <p>{@code joinGroups}, when present, REPLACES the positional pairing: each
+ * group compares 1..N source columns against 1..M target columns, so the two
+ * sides no longer have to be the same size (see {@link MatchGroup}). When it
+ * is absent the criteria lists are zipped into single-column groups, which
+ * emit exactly the SQL they emitted before groups existed.
+ *
  * <p>{@code dedup} and {@code ageFilter} are optional.
  */
 public record RecordMatchRequest(
@@ -24,6 +30,7 @@ public record RecordMatchRequest(
         List<MatchCriterion> targetCriteria,
         List<DisplayColumn> sourceDisplayColumns,
         List<DisplayColumn> targetDisplayColumns,
+        List<MatchGroup> joinGroups,
         boolean highlightDuplicates,
         DedupSpec dedup,
         AgeFilterSpec ageFilter) {
@@ -31,5 +38,21 @@ public record RecordMatchRequest(
     public RecordMatchRequest {
         sourceDisplayColumns = sourceDisplayColumns == null ? List.of() : sourceDisplayColumns;
         targetDisplayColumns = targetDisplayColumns == null ? List.of() : targetDisplayColumns;
+        joinGroups = joinGroups == null ? List.of() : List.copyOf(joinGroups);
+    }
+
+    /**
+     * The pre-groups shape: two criteria lists paired positionally. Equivalent
+     * to passing no groups at all, which is what makes the SQL identical.
+     */
+    public RecordMatchRequest(List<MatchCriterion> sourceCriteria,
+                              List<MatchCriterion> targetCriteria,
+                              List<DisplayColumn> sourceDisplayColumns,
+                              List<DisplayColumn> targetDisplayColumns,
+                              boolean highlightDuplicates,
+                              DedupSpec dedup,
+                              AgeFilterSpec ageFilter) {
+        this(sourceCriteria, targetCriteria, sourceDisplayColumns, targetDisplayColumns,
+                List.of(), highlightDuplicates, dedup, ageFilter);
     }
 }

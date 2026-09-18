@@ -198,6 +198,39 @@ so those comparisons did not return zero rows — they failed the whole query
   flushed before any target has been planned, so anything it promised about
   them could only be null.
 
+- **Analysis column groups.** A match criterion is a **group** of 1..N columns
+  per side, so the two sides need not be the same size — one `full_name` against
+  `first_name` + `last_name`. A group with one column on each side emits
+  byte-identical SQL to the criterion pair it replaced.
+  - **COMBINE** folds the many side with
+    `array_join(filter(ARRAY[...], x -> x IS NOT NULL AND x <> ''), sep)` — NOT
+    `concat_ws`, which would leave a doubled separator where a middle name is
+    NULL and charge every such row a Levenshtein edit. Column order is the
+    officer's and it matters.
+  - **ANY_OF** matches when one side equals any of the other's columns, and is
+    emitted with **`CROSS JOIN UNNEST`, NEVER as `OR` in the ON clause**. A
+    disjunctive ON costs Presto the hash join and drops it to a nested loop over
+    the cross product — the same failure the top-500 pre-sample was removed for.
+    Each ANY_OF side projects a `matched_on` column saying which candidate
+    column matched, since two columns holding one value legitimately return the
+    pair twice.
+  - A **multi-column COMBINE always compares as text**, so `compare_as` does not
+    apply to it: reading a concatenated name as a number would `TRY_CAST` every
+    row to NULL and return nothing, silently.
+  - **Fuzzy is decided per GROUP, not per column.** Registered columns decide as
+    a bloc — an unregistered column beside a registered one gets no vote, so the
+    `*name*` guess can never overturn an explicit Admin setting, and the guess
+    applies only when nothing in the group is registered. When registrations
+    inside a group **disagree, fuzzy wins**: a group wrongly forced exact
+    returns almost nothing and reads as "these datasets do not overlap", while
+    one wrongly made fuzzy returns extra rows that carry `match_score_pct` and
+    are tunable with the officer's own threshold. Visible over silent — the same
+    trade `CompareAs.resolve` makes when TEXT wins. `RecordMatchService.isGroupFuzzy`
+    and `analysis/page.tsx`'s `pairIsFuzzy` must stay in lockstep.
+  - Caps: 8 groups, `SRSE_ANALYSIS_MAX_GROUP_COLUMNS` (4) columns per side per
+    group, `SRSE_ANALYSIS_MAX_ANYOF_GROUPS` (2) ANY_OF groups per side — two
+    UNNESTs on one side cross-multiply that side's rows.
+
 ## Reference
 
 - Full spec: `docs/SRSE_Technical_Design_Document.docx`

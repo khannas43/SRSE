@@ -42,6 +42,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -70,6 +71,7 @@ class RecordMatchServiceTest {
 
     /** queryTimeoutSeconds=30. */
     private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30);
+    private final AnalysisProperties analysisProperties = new AnalysisProperties(5, 120, 4, 2);
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -86,7 +88,7 @@ class RecordMatchServiceTest {
         // That is what every age test below assumed before the filter learned
         // to check — the tests that care about a side WITHOUT it say so.
         lenient().when(registry.hasColumns(any(), any())).thenReturn(true);
-        service = new RecordMatchService(jdbc, registry, guardrails, fieldResolver, columnMetadata, objectMapper);
+        service = new RecordMatchService(jdbc, registry, guardrails, fieldResolver, columnMetadata, analysisProperties, objectMapper);
     }
 
     /** Every criterion in these tests lives in one catalog+schema unless a test says otherwise. */
@@ -499,7 +501,7 @@ class RecordMatchServiceTest {
             }
             throw new FieldResolver.UnknownFieldException(fieldKey);
         };
-        service = new RecordMatchService(jdbc, registry, guardrails, dobResolver, columnMetadata, objectMapper);
+        service = new RecordMatchService(jdbc, registry, guardrails, dobResolver, columnMetadata, analysisProperties, objectMapper);
         when(registry.hasColumns(eq(new QualifiedTable(CATALOG, SCHEMA, "tbl_txn_member_id")), any()))
                 .thenReturn(false);
         when(registry.hasColumns(eq(new QualifiedTable(CATALOG, SCHEMA, "citizen_360")), any()))
@@ -653,6 +655,350 @@ class RecordMatchServiceTest {
         verify(jdbc, never()).query(anyString(), any(Object[].class), any(RowCallbackHandler.class));
     }
 
+    // ---- column groups: 1 column on one side vs N on the other (PR 3) ----
+
+    private static MatchGroup combine(List<MatchCriterion> source, List<MatchCriterion> target,
+                                      Double thresholdPercent) {
+        return new MatchGroup(source, target, GroupMode.COMBINE, thresholdPercent, null);
+    }
+
+    private static MatchGroup anyOf(List<MatchCriterion> source, List<MatchCriterion> target) {
+        return new MatchGroup(source, target, GroupMode.ANY_OF, null, null);
+    }
+
+    private static RecordMatchRequest grouped(List<MatchGroup> groups) {
+        return new RecordMatchRequest(List.of(), List.of(), null, null, groups, false, null, null);
+    }
+
+    /**
+     * The whole point of normalising legacy requests into single-column groups:
+     * a group that folds nothing must emit what the criterion pair emitted, or
+     * every test above is testing a path officers no longer take.
+     */
+    @Test
+    void singleColumnGroupEmitsTheSameSqlAsTheLegacyPair() throws Exception {
+        Captured grouped = runAndCapture(grouped(List.of(combine(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("beneficiary", "district")),
+                null))));
+        reset(jdbc);
+        Captured legacy = runAndCapture(exactMatchRequest());
+
+        assertEquals(legacy.sql(), grouped.sql());
+    }
+
+    @Test
+    void combineFoldsTheManySideIntoOneJoinPredicate() throws Exception {
+        Captured c = runAndCapture(grouped(List.of(combine(
+                List.of(exact("txn", "addr_full")),
+                List.of(exact("golden", "line1"), exact("golden", "line2")),
+                null))));
+
+        assertTrue(c.sql().contains(
+                "src.addr_full = array_join(filter(ARRAY[CAST(tgt.line1 AS VARCHAR), "
+                        + "CAST(tgt.line2 AS VARCHAR)], x -> x IS NOT NULL AND x <> ''), ' ')"),
+                c.sql());
+        // One predicate, not two: the fold is the comparison.
+        assertEquals(1, countOccurrences(onClauseOf(c.sql()), " = "), c.sql());
+    }
+
+    /**
+     * A NULL middle name must not leave a doubled separator. Against Levenshtein
+     * that stray character is an edit charged to every row with a missing middle
+     * name — exactly the records the officer is trying to match.
+     */
+    @Test
+    void combineFiltersNullAndEmptyMembersOutOfTheFold() throws Exception {
+        Captured c = runAndCapture(grouped(List.of(combine(
+                List.of(exact("txn", "addr_full")),
+                List.of(exact("golden", "line1"), exact("golden", "line2"), exact("golden", "line3")),
+                null))));
+
+        assertTrue(c.sql().contains("x -> x IS NOT NULL AND x <> ''"), c.sql());
+        assertFalse(c.sql().contains("concat_ws"), c.sql());
+    }
+
+    /** Exact matching is case-sensitive today; folding must not quietly change that. */
+    @Test
+    void exactCombineIsNotLowercased() throws Exception {
+        Captured c = runAndCapture(grouped(List.of(combine(
+                List.of(exact("txn", "addr")),
+                List.of(exact("golden", "line1"), exact("golden", "line2")),
+                null))));
+
+        assertFalse(onClauseOf(c.sql()).contains("lower("), c.sql());
+    }
+
+    /**
+     * A folded value is text by construction. Reading it as a number would
+     * TRY_CAST a concatenated name to NULL on every row and return nothing —
+     * so a multi-column COMBINE overrides the type alignment entirely.
+     */
+    @Test
+    void multiColumnCombineComparesAsTextEvenAgainstANumericColumn() throws Exception {
+        stubTypes("txn", "ref_no", "bigint");
+        stubTypes("golden", "part_a", "varchar(10)", "part_b", "varchar(10)");
+
+        Captured c = runAndCapture(grouped(List.of(combine(
+                List.of(exact("txn", "ref_no")),
+                List.of(exact("golden", "part_a"), exact("golden", "part_b")),
+                null))));
+
+        assertTrue(c.sql().contains("CAST(src.ref_no AS VARCHAR) = array_join("), c.sql());
+        assertFalse(c.sql().contains("TRY_CAST(array_join"), c.sql());
+    }
+
+    @Test
+    void anyOfPivotsTheManySideWithUnnestAndProjectsMatchedOn() throws Exception {
+        Captured c = runAndCapture(grouped(List.of(anyOf(
+                List.of(exact("txn", "account_no")),
+                List.of(exact("golden", "ja_id"), exact("golden", "legacy_id"))))));
+
+        assertTrue(c.sql().contains("CROSS JOIN UNNEST(ARRAY[t.ja_id, t.legacy_id], "
+                + "ARRAY['ja_id', 'legacy_id']) AS u0 (g0_key, g0_matched_on)"), c.sql());
+        assertTrue(c.sql().contains("src.account_no = tgt.g0_key"), c.sql());
+        assertTrue(c.sql().contains("tgt.g0_matched_on AS \"target_g0_matched_on\""), c.sql());
+        // The pivot lives in a subquery that still exposes the whole table, so
+        // display columns and the age filter reach it exactly as before.
+        assertTrue(c.sql().contains("JOIN (SELECT t.*, g0_key, g0_matched_on FROM "
+                + qualified("golden") + " t CROSS JOIN UNNEST("), c.sql());
+        assertTrue(c.sql().contains(") tgt ON "), c.sql());
+        // The hub side has no ANY_OF group, so it stays a bare table reference.
+        assertTrue(c.sql().contains("FROM " + qualified("txn") + " src JOIN ("), c.sql());
+    }
+
+    /**
+     * The non-negotiable. A disjunctive ON costs Presto the hash join and drops
+     * it to a nested loop over the cross product — the failure this service's
+     * javadoc records having already removed once.
+     */
+    @Test
+    void noGroupShapeEverEmitsOrInTheOnClause() throws Exception {
+        List<List<MatchGroup>> shapes = List.of(
+                List.of(anyOf(List.of(exact("txn", "a")),
+                        List.of(exact("golden", "x"), exact("golden", "y")))),
+                List.of(anyOf(List.of(exact("txn", "a"), exact("txn", "b")),
+                        List.of(exact("golden", "x"), exact("golden", "y")))),
+                List.of(combine(List.of(exact("txn", "full_name")),
+                        List.of(exact("golden", "first_name"), exact("golden", "last_name")), 85.0)),
+                List.of(anyOf(List.of(exact("txn", "a")), List.of(exact("golden", "x"), exact("golden", "y"))),
+                        combine(List.of(exact("txn", "district")), List.of(exact("golden", "district")), null)));
+
+        for (List<MatchGroup> shape : shapes) {
+            reset(jdbc);
+            Captured c = runAndCapture(grouped(shape));
+            assertFalse(onClauseOf(c.sql()).contains(" OR "), c.sql());
+        }
+    }
+
+    /** Both sides may be ANY_OF — each gets its own UNNEST, neither becomes an OR. */
+    @Test
+    void anyOfOnBothSidesUnnestsBoth() throws Exception {
+        Captured c = runAndCapture(grouped(List.of(anyOf(
+                List.of(exact("txn", "a1"), exact("txn", "a2")),
+                List.of(exact("golden", "b1"), exact("golden", "b2"))))));
+
+        assertEquals(2, countOccurrences(c.sql(), "CROSS JOIN UNNEST("), c.sql());
+        assertTrue(c.sql().contains("src.g0_key = tgt.g0_key"), c.sql());
+    }
+
+    /** Within one family Presto unifies the array's element type; across families it cannot. */
+    @Test
+    void anyOfCastsToTextOnlyWhenTheCandidateColumnsDisagreeOnFamily() throws Exception {
+        stubTypes("txn", "account_no", "varchar(20)");
+        stubTypes("golden", "ja_id", "bigint", "legacy_id", "varchar(30)");
+
+        Captured c = runAndCapture(grouped(List.of(anyOf(
+                List.of(exact("txn", "account_no")),
+                List.of(exact("golden", "ja_id"), exact("golden", "legacy_id"))))));
+
+        assertTrue(c.sql().contains("ARRAY[CAST(t.ja_id AS VARCHAR), CAST(t.legacy_id AS VARCHAR)]"), c.sql());
+    }
+
+    @Test
+    void fuzzyGroupBlocksAndScoresOverTheFoldedValue() throws Exception {
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(), List.of(),
+                null, null,
+                List.of(combine(
+                        List.of(exact("txn", "full_name")),
+                        List.of(exact("golden", "first_name"), exact("golden", "last_name")),
+                        85.0)),
+                true, null, null));
+
+        assertTrue(c.sql().contains("substr(lower(array_join("), c.sql());
+        assertTrue(c.sql().contains("levenshtein_distance(lower(src.full_name)"), c.sql());
+        assertEquals(1, c.params().length);
+        assertEquals(0.85, (Double) c.params()[0], 1e-9);
+    }
+
+    /** A group scores once however many columns it folds — N single-column groups score as before. */
+    @Test
+    void matchScoreAveragesOverGroupsNotColumns() throws Exception {
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(), List.of(),
+                null, null,
+                List.of(
+                        combine(List.of(exact("txn", "full_name")),
+                                List.of(exact("golden", "first_name"), exact("golden", "last_name")), 80.0),
+                        combine(List.of(exact("txn", "district")), List.of(exact("golden", "district")), null)),
+                true, null, null));
+
+        assertTrue(c.sql().contains(") / 2 * 100, 1) AS \"match_score_pct\""), c.sql());
+    }
+
+    @Test
+    void dedupPartitionsOverEverySourceSideJoinColumnAcrossGroups() throws Exception {
+        Captured c = runAndCapture(new RecordMatchRequest(
+                List.of(), List.of(),
+                null, null,
+                List.of(
+                        combine(List.of(exact("txn", "a"), exact("txn", "b")),
+                                List.of(exact("golden", "x")), null),
+                        combine(List.of(exact("txn", "c")), List.of(exact("golden", "y")), null)),
+                false,
+                new DedupSpec(CATALOG, SCHEMA, "golden", "updated_at"),
+                null));
+
+        assertTrue(c.sql().contains("PARTITION BY \"source_a\", \"source_b\", \"source_c\""), c.sql());
+    }
+
+    @Test
+    void rejectsAGroupWithNoColumnsOnASide() {
+        RecordMatchRequest req = grouped(List.of(
+                combine(List.of(exact("txn", "a")), List.of(), null)));
+        assertThrows(IllegalArgumentException.class, () -> service.match(req));
+    }
+
+    @Test
+    void rejectsMoreColumnsInAGroupThanTheCapAllows() {
+        RecordMatchRequest req = grouped(List.of(combine(
+                List.of(exact("txn", "a")),
+                List.of(exact("golden", "w"), exact("golden", "x"), exact("golden", "y"),
+                        exact("golden", "z"), exact("golden", "zz")),
+                null)));
+        assertThrows(IllegalArgumentException.class, () -> service.match(req));
+    }
+
+    @Test
+    void rejectsMoreAnyOfGroupsOnOneSideThanTheCapAllows() {
+        RecordMatchRequest req = grouped(List.of(
+                anyOf(List.of(exact("txn", "a")), List.of(exact("golden", "x1"), exact("golden", "x2"))),
+                anyOf(List.of(exact("txn", "b")), List.of(exact("golden", "y1"), exact("golden", "y2"))),
+                anyOf(List.of(exact("txn", "c")), List.of(exact("golden", "z1"), exact("golden", "z2")))));
+        assertThrows(IllegalArgumentException.class, () -> service.match(req));
+    }
+
+    @Test
+    void rejectsGroupColumnsFromDifferentTablesOnOneSide() {
+        RecordMatchRequest req = grouped(List.of(combine(
+                List.of(exact("txn", "a")),
+                List.of(exact("golden", "x"), exact("other", "y")),
+                null)));
+        assertThrows(IllegalArgumentException.class, () -> service.match(req));
+    }
+
+    /** Eight groups of four columns is 32 picks — the old per-side cap of 8 must not reject it. */
+    @Test
+    void groupsMayTotalMoreColumnsThanTheLegacyPerSideCap() throws Exception {
+        List<MatchGroup> groups = new java.util.ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            groups.add(combine(
+                    List.of(exact("txn", "s" + i)),
+                    List.of(exact("golden", "t" + i + "a"), exact("golden", "t" + i + "b"),
+                            exact("golden", "t" + i + "c"), exact("golden", "t" + i + "d")),
+                    null));
+        }
+        Captured c = runAndCapture(grouped(groups));
+        assertEquals(8, countOccurrences(onClauseOf(c.sql()), "array_join("), c.sql());
+    }
+
+    // ---- fuzzy eligibility across a folded group ----
+
+    /** Registers one column's Admin fuzzy flag. */
+    private void stubFuzzyFlag(String table, String column, boolean fuzzyMatchable) {
+        when(columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
+                CATALOG, SCHEMA, table, column))
+                .thenReturn(Optional.of(new AnalysisColumnMetadata(
+                        1L, new QualifiedColumn(CATALOG, SCHEMA, table, column),
+                        null, fuzzyMatchable, true)));
+    }
+
+    /**
+     * The case the group model made reachable and the single-column rule never
+     * had to answer: two registered columns in one group disagreeing.
+     *
+     * <p>Fuzzy wins. A group wrongly forced exact returns almost nothing and
+     * reads to the officer as "these datasets do not overlap" — a wrong answer
+     * that looks like an answer. Wrongly fuzzy returns extra rows that carry a
+     * match score and are tunable with the threshold they already control.
+     */
+    @Test
+    void conflictingRegistrationsInOneGroupResolveToFuzzy() throws Exception {
+        stubFuzzyFlag("golden", "emp_code", false);
+        stubFuzzyFlag("golden", "given_part", true);
+
+        // emp_code is listed FIRST deliberately: under the old "first
+        // registered column wins" rule this group would have come out exact.
+        Captured c = runAndCapture(grouped(List.of(combine(
+                List.of(exact("txn", "ref")),
+                List.of(exact("golden", "emp_code"), exact("golden", "given_part")),
+                85.0))));
+
+        assertTrue(c.sql().contains("levenshtein_distance"), c.sql());
+    }
+
+    /** Same rule across the two SIDES of a group, not just within one side. */
+    @Test
+    void conflictingRegistrationsAcrossTheTwoSidesResolveToFuzzy() throws Exception {
+        // Source side registered exact, target side registered fuzzy — the old
+        // rule short-circuited on the source and returned exact.
+        stubFuzzyFlag("txn", "ref", false);
+        stubFuzzyFlag("golden", "ref", true);
+
+        Captured c = runAndCapture(grouped(List.of(combine(
+                List.of(exact("txn", "ref")),
+                List.of(exact("golden", "ref")),
+                85.0))));
+
+        assertTrue(c.sql().contains("levenshtein_distance"), c.sql());
+    }
+
+    /**
+     * Registered columns decide as a bloc: an UNREGISTERED "*name*" column
+     * beside a registered exact one must not drag the group back to fuzzy, or
+     * the admin's explicit setting would be overturned by the guess.
+     */
+    @Test
+    void anUnregisteredNameColumnDoesNotOutvoteARegisteredExactOne() throws Exception {
+        stubFuzzyFlag("golden", "scheme_code", false);
+
+        Captured c = runAndCapture(grouped(List.of(combine(
+                List.of(exact("txn", "ref")),
+                List.of(exact("golden", "scheme_code"), exact("golden", "holder_name")),
+                null))));
+
+        assertFalse(c.sql().contains("levenshtein_distance"), c.sql());
+    }
+
+    /** With nothing registered anywhere in the group, the name guess still applies. */
+    @Test
+    void anUnregisteredGroupStillFallsBackToTheNameGuess() throws Exception {
+        Captured c = runAndCapture(grouped(List.of(combine(
+                List.of(exact("txn", "ref")),
+                List.of(exact("golden", "part_a"), exact("golden", "holder_name")),
+                85.0))));
+
+        assertTrue(c.sql().contains("levenshtein_distance"), c.sql());
+    }
+
+    /** The ON clause only — the SELECT list and WHERE legitimately contain other text. */
+    private static String onClauseOf(String sql) {
+        int on = sql.indexOf(" ON ");
+        int where = sql.lastIndexOf(" WHERE ");
+        return on < 0 ? "" : sql.substring(on, where > on ? where : sql.length());
+    }
+
     // ---- mixed column types (CLAUDE.md: two tables rarely agree on a type) ----
 
     /**
@@ -791,7 +1137,7 @@ class RecordMatchServiceTest {
             throw new FieldResolver.UnknownFieldException(fieldKey);
         };
         RecordMatchService dobService = new RecordMatchService(
-                jdbc, registry, guardrails, dobResolver, columnMetadata, objectMapper);
+                jdbc, registry, guardrails, dobResolver, columnMetadata, analysisProperties, objectMapper);
 
         StreamingResponseBody body = dobService.match(new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),
@@ -822,7 +1168,7 @@ class RecordMatchServiceTest {
             throw new FieldResolver.UnknownFieldException(fieldKey);
         };
         RecordMatchService qualifiedService = new RecordMatchService(
-                jdbc, registry, guardrails, qualifiedResolver, columnMetadata, objectMapper);
+                jdbc, registry, guardrails, qualifiedResolver, columnMetadata, analysisProperties, objectMapper);
 
         StreamingResponseBody body = qualifiedService.match(new RecordMatchRequest(
                 List.of(exact("beneficiary", "district")),

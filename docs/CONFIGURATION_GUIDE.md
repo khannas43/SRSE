@@ -281,6 +281,8 @@ Copy `.env.example` to `.env` and set values per environment.
 |----------|---------|-------------|
 | `SRSE_ANALYSIS_MAX_TARGET_SETS` | `5` | Maximum target tables in one multi-match run |
 | `SRSE_ANALYSIS_MULTI_MATCH_BUDGET_SECONDS` | `120` | Wall-clock budget for the whole `match-multi` stream |
+| `SRSE_ANALYSIS_MAX_GROUP_COLUMNS` | `4` | Columns one side of a match group may fold (a `full_name` against `first_name` + `last_name`) |
+| `SRSE_ANALYSIS_MAX_ANYOF_GROUPS` | `2` | "Any one of" groups per side. Each becomes its own `UNNEST`, and two on one side multiply that side's rows before the join runs — raise with care |
 
 Each sub-match still uses `min(SRSE_QUERY_TIMEOUT_SECONDS, remaining budget)` as its JDBC timeout — five targets does **not** mean five full query timeouts of wall clock.
 

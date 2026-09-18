@@ -90,6 +90,24 @@ export type AgeFilterSpec = {
   unit: AgeUnit;
 };
 
+export type GroupMode = "COMBINE" | "ANY_OF";
+
+/**
+ * One comparison in the JOIN, over 1..N columns per side — this is what lets
+ * one `full_name` match `first_name` + `last_name`. The two sides need NOT be
+ * the same length. A group with one column on each side is exactly the
+ * criterion pair it replaces, so leaving groups off keeps the old payload.
+ */
+export type MatchGroup = {
+  source: MatchCriterion[];
+  target: MatchCriterion[];
+  mode: GroupMode;
+  fuzzyThresholdPercent: number | null;
+  // Joins a multi-column COMBINE side. Order is the officer's and it matters:
+  // Levenshtein is order-sensitive.
+  separator: string | null;
+};
+
 export type DisplayColumn = TableRef & {
   column: string;
 };
@@ -99,6 +117,7 @@ export type RecordMatchRequest = {
   targetCriteria: MatchCriterion[];
   sourceDisplayColumns?: DisplayColumn[];
   targetDisplayColumns?: DisplayColumn[];
+  joinGroups?: MatchGroup[];
   highlightDuplicates: boolean;
   dedup: DedupSpec | null;
   ageFilter: AgeFilterSpec | null;
@@ -110,6 +129,7 @@ export type TargetMatchSpec = TableRef & {
   label: string;
   joinCriteria: MatchCriterion[];
   displayColumns?: DisplayColumn[];
+  joinGroups?: MatchGroup[];
 };
 
 export type MultiTargetRecordMatchRequest = {

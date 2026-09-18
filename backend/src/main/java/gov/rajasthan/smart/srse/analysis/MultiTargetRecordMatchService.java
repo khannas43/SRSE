@@ -283,6 +283,7 @@ public class MultiTargetRecordMatchService {
                 target.joinCriteria(),
                 req.hubDisplayColumns(),
                 target.displayColumns(),
+                target.joinGroups(),
                 req.highlightDuplicates(),
                 req.dedup(),
                 req.ageFilter());
@@ -351,6 +352,23 @@ public class MultiTargetRecordMatchService {
                 columns.add(out);
                 hubBindings.add(new HubColumnBinding(out, "source_" + d.column()));
             }
+            // A target's groups name their own hub-side columns, which need not
+            // all appear in hubCriteria. They are projected once, here, not per
+            // target: a hub column a single target joins on is simply null on
+            // the other targets' rows.
+            for (TargetMatchSpec target : req.targets()) {
+                for (MatchGroup g : target.joinGroups()) {
+                    for (MatchCriterion c : g.source()) {
+                        String baseOut = hubOutPrefix + c.column();
+                        if (used.contains(baseOut)) {
+                            continue;
+                        }
+                        used.add(baseOut);
+                        columns.add(baseOut);
+                        hubBindings.add(new HubColumnBinding(baseOut, "source_" + c.column()));
+                    }
+                }
+            }
 
             // Per-target bindings are collected first and the mappers built
             // afterwards: `columns` is still growing while this loop runs, so a
@@ -365,7 +383,7 @@ public class MultiTargetRecordMatchService {
                         ? sanitized + "_target_"
                         : sanitized + "_source_";
                 List<PeerColumnBinding> peerBindings = new ArrayList<>();
-                for (MatchCriterion c : target.joinCriteria()) {
+                for (MatchCriterion c : target.effectiveJoinColumns()) {
                     String out = RecordMatchService.allocateUniqueAlias(peerOutPrefix + c.column(), used);
                     used.add(out);
                     columns.add(out);
@@ -380,6 +398,14 @@ public class MultiTargetRecordMatchService {
                     used.add(out);
                     columns.add(out);
                     peerBindings.add(new PeerColumnBinding(out, "target_" + d.column()));
+                }
+                // ANY_OF groups return the same pair once per candidate column
+                // that matched; these say which one did.
+                for (String matchedOn : target.matchedOnColumns()) {
+                    String out = RecordMatchService.allocateUniqueAlias(peerOutPrefix + matchedOn, used);
+                    used.add(out);
+                    columns.add(out);
+                    peerBindings.add(new PeerColumnBinding(out, "target_" + matchedOn));
                 }
                 String scoreOut = null;
                 if (req.highlightDuplicates()) {

@@ -15,6 +15,9 @@ import {
   runRecordMatchStream,
   type AgeUnit,
   type ColumnMetadata,
+  type GroupMode,
+  type MatchCriterion,
+  type MatchGroup,
   type CompareAs,
   type HubSide,
   type MatchProgressEvent,
@@ -54,6 +57,15 @@ type CriterionRow = {
   column: string;
   columns: RegisteredColumn[];
   fuzzyThresholdPercent: number;
+  // Columns folded in alongside `column` — a target's first_name + last_name
+  // against the hub's one full_name. Empty for every row until the officer
+  // clicks "+ add column", which is what keeps the request shape unchanged for
+  // everyone who does not need this.
+  extraColumns: string[];
+  // How this row's side folds. Only read from the SOURCE row of a pair, which
+  // already owns the pair's fuzzy threshold.
+  mode: GroupMode;
+  separator: string;
 };
 
 type DisplayRow = {
@@ -70,7 +82,24 @@ function createEmptyRow(): CriterionRow {
     column: "",
     columns: [],
     fuzzyThresholdPercent: 80,
+    extraColumns: [],
+    mode: "COMBINE",
+    separator: " ",
   };
+}
+
+/** Every column this row contributes to its side of the group, in officer order. */
+function rowColumns(row: CriterionRow): string[] {
+  return [row.column, ...row.extraColumns].filter(Boolean);
+}
+
+function rowFolds(row: CriterionRow): boolean {
+  return rowColumns(row).length > 1;
+}
+
+/** The criteria one side of a group sends, with the threshold on the group instead. */
+function rowCriteria(row: CriterionRow): MatchCriterion[] {
+  return rowColumns(row).map((column) => ({ ...row.ref, column, fuzzyThresholdPercent: null }));
 }
 
 function createEmptyDisplayRow(defaultRef: CascadeValue): DisplayRow {
@@ -105,6 +134,58 @@ function metadataKey(ref: TableRef, column: string): string {
 /** A row is usable only once all four levels are picked. */
 function isRowFilled(row: CriterionRow): boolean {
   return isCascadeComplete(row.ref) && Boolean(row.column);
+}
+
+/**
+ * Whether a whole pair is fuzzy — MUST mirror RecordMatchService.isGroupFuzzy,
+ * or the officer sees a Fuzzy % the backend ignores (or the reverse). Every
+ * column on both sides counts, not just the first of each.
+ *
+ * Registered columns decide as a bloc and an unregistered column beside a
+ * registered one gets no vote, so the name guess can never overturn an
+ * explicit Admin setting. When registrations disagree within a group, fuzzy
+ * wins: a group wrongly forced exact returns almost nothing and reads as "no
+ * overlap", while one wrongly made fuzzy returns extra rows the officer can
+ * see scored and tune away with the threshold.
+ */
+function pairIsFuzzy(
+  source: CriterionRow,
+  target: CriterionRow | undefined,
+  registeredFuzzyFor: (ref: TableRef, column: string) => boolean | null,
+): boolean {
+  const sides: Array<[CascadeValue, string]> = rowColumns(source).map((c) => [source.ref, c]);
+  if (target) {
+    sides.push(...rowColumns(target).map((c) => [target.ref, c] as [CascadeValue, string]));
+  }
+  let anyRegistered = false;
+  for (const [ref, column] of sides) {
+    const registered = registeredFuzzyFor(ref, column);
+    if (registered !== null) {
+      anyRegistered = true;
+      if (registered) return true;
+    }
+  }
+  if (anyRegistered) return false;
+  return sides.some(([, column]) => isNameColumn(column));
+}
+
+/**
+ * The group a source row and its paired target row describe. Returns null when
+ * neither side folds anything — the caller then sends the legacy criteria
+ * pair, so a request that does not use groups looks exactly as it always did.
+ */
+function buildGroup(
+  source: CriterionRow,
+  target: CriterionRow,
+  fuzzy: boolean,
+): MatchGroup {
+  return {
+    source: rowCriteria(source),
+    target: rowCriteria(target),
+    mode: source.mode,
+    fuzzyThresholdPercent: fuzzy ? source.fuzzyThresholdPercent : null,
+    separator: source.mode === "COMBINE" ? source.separator : null,
+  };
 }
 
 function isNameColumn(column: string): boolean {
@@ -201,12 +282,15 @@ type CriterionBoxProps = Readonly<{
   rows: CriterionRow[];
   showFuzzy: boolean;
   pairedRows?: CriterionRow[];
-  isFuzzyMatchable: (ref: TableRef, column: string) => boolean;
+  registeredFuzzyFor: (ref: TableRef, column: string) => boolean | null;
   businessNameFor: (ref: TableRef, column: string) => string | null;
   compareAsFor: (ref: TableRef, column: string) => CompareAs;
   onTableChange: (rowId: string, ref: CascadeValue) => void;
   onColumnChange: (rowId: string, column: string) => void;
   onFuzzyChange: (rowId: string, value: number) => void;
+  onExtraColumnsChange: (rowId: string, extraColumns: string[]) => void;
+  onModeChange: (rowId: string, mode: GroupMode) => void;
+  onSeparatorChange: (rowId: string, separator: string) => void;
   onRemove: (rowId: string) => void;
   onAdd: () => void;
   onError: (message: string) => void;
@@ -216,11 +300,74 @@ function rowShowsFuzzy(
   row: CriterionRow,
   index: number,
   pairedRows: CriterionRow[] | undefined,
-  isFuzzyMatchable: (ref: TableRef, column: string) => boolean,
+  registeredFuzzyFor: (ref: TableRef, column: string) => boolean | null,
 ): boolean {
-  if (isFuzzyMatchable(row.ref, row.column)) return true;
-  const paired = pairedRows?.[index];
-  return paired ? isFuzzyMatchable(paired.ref, paired.column) : false;
+  return pairIsFuzzy(row, pairedRows?.[index], registeredFuzzyFor);
+}
+
+/**
+ * The fold controls for one pair. Shown only once a side actually holds more
+ * than one column, so the box looks exactly as it did for anyone matching one
+ * column against one column.
+ */
+function GroupControls({
+  row,
+  boxId,
+  anyOfCount,
+  onModeChange,
+  onSeparatorChange,
+}: Readonly<{
+  row: CriterionRow;
+  boxId: string;
+  anyOfCount: number;
+  onModeChange: (rowId: string, mode: GroupMode) => void;
+  onSeparatorChange: (rowId: string, separator: string) => void;
+}>) {
+  return (
+    <div style={{ flex: "1 1 100%", display: "flex", gap: "0.6rem", alignItems: "flex-end", flexWrap: "wrap" }}>
+      <div style={{ flex: "0 1 180px" }}>
+        <label htmlFor={`${boxId}-mode-${row.id}`} className="srse-text-muted" style={fieldLabelStyle}>
+          Compare as
+        </label>
+        <select
+          id={`${boxId}-mode-${row.id}`}
+          className="srse-select"
+          style={{ width: "100%" }}
+          value={row.mode}
+          onChange={(e) => onModeChange(row.id, e.target.value as GroupMode)}
+        >
+          <option value="COMBINE">Combined into one value</option>
+          <option value="ANY_OF">Any one of them</option>
+        </select>
+      </div>
+      {row.mode === "COMBINE" && (
+        <div style={{ flex: "0 1 110px" }}>
+          <label htmlFor={`${boxId}-sep-${row.id}`} className="srse-text-muted" style={fieldLabelStyle}>
+            Joined by
+          </label>
+          <input
+            id={`${boxId}-sep-${row.id}`}
+            type="text"
+            className="srse-input"
+            style={{ width: "100%" }}
+            value={row.separator}
+            onChange={(e) => onSeparatorChange(row.id, e.target.value)}
+          />
+        </div>
+      )}
+      <p className="srse-text-muted" style={{ fontSize: "0.7rem", margin: 0, flex: "1 1 220px" }}>
+        {row.mode === "COMBINE"
+          ? "Joined in the order listed — order matters for fuzzy scoring. Empty values are skipped."
+          : "Matches if the other side equals any one of these columns; the result says which one."}
+      </p>
+      {row.mode === "ANY_OF" && anyOfCount > 1 && (
+        <p style={{ fontSize: "0.7rem", margin: 0, flex: "1 1 100%", color: "var(--srse-warning)" }}>
+          More than one &quot;any one of&quot; group on the same side multiplies that side&apos;s rows
+          before the match runs, and can be slow on large tables.
+        </p>
+      )}
+    </div>
+  );
 }
 
 type DisplayColumnBoxProps = Readonly<{
@@ -316,12 +463,15 @@ function CriterionBox({
   rows,
   showFuzzy,
   pairedRows,
-  isFuzzyMatchable,
+  registeredFuzzyFor,
   businessNameFor,
   compareAsFor,
   onTableChange,
   onColumnChange,
   onFuzzyChange,
+  onExtraColumnsChange,
+  onModeChange,
+  onSeparatorChange,
   onRemove,
   onAdd,
   onError,
@@ -392,7 +542,7 @@ function CriterionBox({
               ) : null;
             })()}
           </div>
-          {showFuzzy && rowShowsFuzzy(row, index, pairedRows, isFuzzyMatchable) && (
+          {showFuzzy && rowShowsFuzzy(row, index, pairedRows, registeredFuzzyFor) && (
             <div style={{ flex: "0 1 100px" }}>
               <label htmlFor={`${boxId}-fuzzy-${row.id}`} className="srse-text-muted" style={fieldLabelStyle}>
                 Fuzzy %
@@ -418,6 +568,74 @@ function CriterionBox({
             >
               ✕
             </button>
+          )}
+
+          {/* Folded columns: one full_name here against first_name + last_name there. */}
+          {row.extraColumns.map((extra, extraIndex) => (
+            <div key={`${row.id}-extra-${extraIndex}`} style={{ flex: "1 1 100%", display: "flex", gap: "0.4rem", alignItems: "flex-end" }}>
+              <div style={{ flex: "1 1 150px" }}>
+                <label
+                  htmlFor={`${boxId}-extra-${row.id}-${extraIndex}`}
+                  className="srse-text-muted"
+                  style={fieldLabelStyle}
+                >
+                  …and column {extraIndex + 2}
+                </label>
+                <select
+                  id={`${boxId}-extra-${row.id}-${extraIndex}`}
+                  className="srse-select"
+                  style={{ width: "100%" }}
+                  value={extra}
+                  onChange={(e) =>
+                    onExtraColumnsChange(
+                      row.id,
+                      row.extraColumns.map((c, k) => (k === extraIndex ? e.target.value : c)),
+                    )
+                  }
+                >
+                  <option value="">— select —</option>
+                  {row.columns.map((c) => (
+                    <option key={c.name} value={c.name}>
+                      {businessNameFor(row.ref, c.name) ?? c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button
+                type="button"
+                className="srse-btn srse-btn-ghost srse-btn-sm"
+                onClick={() =>
+                  onExtraColumnsChange(row.id, row.extraColumns.filter((_, k) => k !== extraIndex))
+                }
+                title="Remove this column from the group"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+
+          {isCascadeComplete(row.ref) && Boolean(row.column) && (
+            <button
+              type="button"
+              className="srse-btn srse-btn-ghost srse-btn-sm"
+              style={{ flex: "0 0 auto" }}
+              onClick={() => onExtraColumnsChange(row.id, [...row.extraColumns, ""])}
+              title="Match this against more than one column on this side"
+            >
+              + add column
+            </button>
+          )}
+
+          {showFuzzy && (rowFolds(row) || (pairedRows?.[index] ? rowFolds(pairedRows[index]) : false)) && (
+            <GroupControls
+              row={row}
+              boxId={boxId}
+              anyOfCount={rows.filter((r, i) =>
+                r.mode === "ANY_OF"
+                && (rowFolds(r) || (pairedRows?.[i] ? rowFolds(pairedRows[i]) : false))).length}
+              onModeChange={onModeChange}
+              onSeparatorChange={onSeparatorChange}
+            />
           )}
         </div>
       ))}
@@ -515,6 +733,11 @@ export default function AnalysisPage() {
     return entry ? entry.fuzzyMatchable : isNameColumn(column);
   }
 
+  /** The Admin setting for one column, or null when it has none — see pairIsFuzzy. */
+  function registeredFuzzyFor(ref: TableRef, column: string): boolean | null {
+    return columnMetadata.get(metadataKey(ref, column))?.fuzzyMatchable ?? null;
+  }
+
   function businessNameFor(ref: TableRef, column: string): string | null {
     return columnMetadata.get(metadataKey(ref, column))?.businessName ?? null;
   }
@@ -557,6 +780,30 @@ export default function AnalysisPage() {
     setRows((rows) => updateRowById(rows, rowId, { fuzzyThresholdPercent }));
   }
 
+  function handleExtraColumnsChange(
+    setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>,
+    rowId: string,
+    extraColumns: string[],
+  ) {
+    setRows((rows) => updateRowById(rows, rowId, { extraColumns }));
+  }
+
+  function handleModeChange(
+    setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>,
+    rowId: string,
+    mode: GroupMode,
+  ) {
+    setRows((rows) => updateRowById(rows, rowId, { mode }));
+  }
+
+  function handleSeparatorChange(
+    setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>,
+    rowId: string,
+    separator: string,
+  ) {
+    setRows((rows) => updateRowById(rows, rowId, { separator }));
+  }
+
   function handleRemoveRow(setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>, rowId: string) {
     setRows((rows) => removeRowById(rows, rowId));
   }
@@ -593,18 +840,22 @@ export default function AnalysisPage() {
     const dedupRef = targetRows[0]?.ref;
     const filledSourceDisplay = sourceDisplayRows.filter(isDisplayRowFilled);
     const filledTargetDisplay = targetDisplayRows.filter(isDisplayRowFilled);
+    const pairs = filledSource.slice(0, n).map((r, i) => ({ source: r, target: filledTarget[i] }));
+    // Groups are sent only when a row actually folds more than one column.
+    // Otherwise the payload is byte-for-byte what it has always been, and so is
+    // the SQL the backend builds from it.
+    const usesGroups = pairs.some(({ source, target }) => rowFolds(source) || rowFolds(target));
     const req: RecordMatchRequest = {
-      sourceCriteria: filledSource.slice(0, n).map((r, i) => ({
-        ...r.ref,
-        column: r.column,
-        fuzzyThresholdPercent:
-          isFuzzyMatchable(r.ref, r.column) || isFuzzyMatchable(filledTarget[i].ref, filledTarget[i].column)
-            ? r.fuzzyThresholdPercent
-            : null,
+      sourceCriteria: pairs.map(({ source, target }) => ({
+        ...source.ref,
+        column: source.column,
+        fuzzyThresholdPercent: pairIsFuzzy(source, target, registeredFuzzyFor)
+          ? source.fuzzyThresholdPercent
+          : null,
       })),
-      targetCriteria: filledTarget.slice(0, n).map((r) => ({
-        ...r.ref,
-        column: r.column,
+      targetCriteria: pairs.map(({ target }) => ({
+        ...target.ref,
+        column: target.column,
         fuzzyThresholdPercent: null,
       })),
       highlightDuplicates,
@@ -619,6 +870,11 @@ export default function AnalysisPage() {
     }
     if (filledTargetDisplay.length > 0) {
       req.targetDisplayColumns = filledTargetDisplay.map((r) => ({ ...r.ref, column: r.column }));
+    }
+    if (usesGroups) {
+      req.joinGroups = pairs.map(({ source, target }) =>
+        buildGroup(source, target, pairIsFuzzy(source, target, registeredFuzzyFor)),
+      );
     }
     return req;
   }
@@ -637,22 +893,27 @@ export default function AnalysisPage() {
       const tableRef = filledJoin[0].ref;
       if (!isCascadeComplete(tableRef)) return null;
       const filledDisplay = block.displayRows.filter(isDisplayRowFilled);
+      const pairs = filledJoin.slice(0, n).map((r, i) => ({ source: filledHub[i], target: r }));
+      const usesGroups = pairs.some(({ source, target }) => rowFolds(source) || rowFolds(target));
       targets.push({
         label,
         ...tableRef,
-        joinCriteria: filledJoin.slice(0, n).map((r, i) => ({
-          ...r.ref,
-          column: r.column,
-          fuzzyThresholdPercent:
-            isFuzzyMatchable(filledHub[i].ref, filledHub[i].column) ||
-            isFuzzyMatchable(r.ref, r.column)
-              ? filledHub[i].fuzzyThresholdPercent
-              : null,
+        joinCriteria: pairs.map(({ source, target }) => ({
+          ...target.ref,
+          column: target.column,
+          fuzzyThresholdPercent: pairIsFuzzy(source, target, registeredFuzzyFor)
+            ? source.fuzzyThresholdPercent
+            : null,
         })),
         displayColumns:
           filledDisplay.length > 0
             ? filledDisplay.map((r) => ({ ...r.ref, column: r.column }))
             : undefined,
+        joinGroups: usesGroups
+          ? pairs.map(({ source, target }) =>
+              buildGroup(source, target, pairIsFuzzy(source, target, registeredFuzzyFor)),
+            )
+          : undefined,
       });
     }
     if (targets.length === 0) return null;
@@ -969,12 +1230,15 @@ export default function AnalysisPage() {
           rows={sourceRows}
           showFuzzy
           pairedRows={multiMatchMode ? undefined : targetRows}
-          isFuzzyMatchable={isFuzzyMatchable}
+          registeredFuzzyFor={registeredFuzzyFor}
           businessNameFor={businessNameFor}
           compareAsFor={compareAsFor}
           onTableChange={(rowId, ref) => handleTableChange(setSourceRows, rowId, ref)}
           onColumnChange={(rowId, column) => handleColumnChange(setSourceRows, rowId, column)}
           onFuzzyChange={(rowId, value) => handleFuzzyChange(setSourceRows, rowId, value)}
+          onExtraColumnsChange={(rowId, cols) => handleExtraColumnsChange(setSourceRows, rowId, cols)}
+          onModeChange={(rowId, mode) => handleModeChange(setSourceRows, rowId, mode)}
+          onSeparatorChange={(rowId, sep) => handleSeparatorChange(setSourceRows, rowId, sep)}
           onRemove={(rowId) => handleRemoveRow(setSourceRows, rowId)}
           onAdd={() => setSourceRows((rs) => [...rs, createEmptyRow()])}
           onError={reportError}
@@ -1013,12 +1277,15 @@ export default function AnalysisPage() {
             boxId="target"
             rows={targetRows}
             showFuzzy={false}
-            isFuzzyMatchable={isFuzzyMatchable}
+            registeredFuzzyFor={registeredFuzzyFor}
             businessNameFor={businessNameFor}
             compareAsFor={compareAsFor}
             onTableChange={(rowId, ref) => handleTableChange(setTargetRows, rowId, ref)}
             onColumnChange={(rowId, column) => handleColumnChange(setTargetRows, rowId, column)}
             onFuzzyChange={(rowId, value) => handleFuzzyChange(setTargetRows, rowId, value)}
+            onExtraColumnsChange={(rowId, cols) => handleExtraColumnsChange(setTargetRows, rowId, cols)}
+            onModeChange={(rowId, mode) => handleModeChange(setTargetRows, rowId, mode)}
+            onSeparatorChange={(rowId, sep) => handleSeparatorChange(setTargetRows, rowId, sep)}
             onRemove={(rowId) => handleRemoveRow(setTargetRows, rowId)}
             onAdd={() => setTargetRows((rs) => [...rs, createEmptyRow()])}
             onError={reportError}
@@ -1089,7 +1356,7 @@ export default function AnalysisPage() {
                 rows={block.joinRows}
                 showFuzzy={false}
                 pairedRows={sourceRows}
-                isFuzzyMatchable={isFuzzyMatchable}
+                registeredFuzzyFor={registeredFuzzyFor}
                 businessNameFor={businessNameFor}
                 compareAsFor={compareAsFor}
                 onTableChange={(rowId, ref) => {
@@ -1126,6 +1393,17 @@ export default function AnalysisPage() {
                   )
                 }
                 onFuzzyChange={() => {}}
+                onExtraColumnsChange={(rowId, cols) =>
+                  setTargetBlocks((blocks) =>
+                    blocks.map((b) =>
+                      b.id === block.id
+                        ? { ...b, joinRows: updateRowById(b.joinRows, rowId, { extraColumns: cols }) }
+                        : b,
+                    ),
+                  )
+                }
+                onModeChange={() => {}}
+                onSeparatorChange={() => {}}
                 onRemove={(rowId) =>
                   setTargetBlocks((blocks) =>
                     blocks.map((b) =>
