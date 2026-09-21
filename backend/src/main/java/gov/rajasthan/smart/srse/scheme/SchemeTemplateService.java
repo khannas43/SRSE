@@ -50,6 +50,11 @@ public class SchemeTemplateService {
         schemeRepository.save(scheme);
     }
 
+    /**
+     * Clears {@code template_scenario_id} when a nominated scenario is removed.
+     * Staged for a future scenario-delete endpoint — intentionally uncalled until
+     * that API exists; do not wire from UI without the delete contract.
+     */
     @Transactional
     public void clearTemplateIfScenarioDeleted(Long scenarioId) {
         schemeRepository.findByTemplateScenarioId(scenarioId).ifPresent(scheme -> {

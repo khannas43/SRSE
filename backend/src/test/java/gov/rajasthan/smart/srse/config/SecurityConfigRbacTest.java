@@ -122,6 +122,18 @@ class SecurityConfigRbacTest {
     }
 
     @Test
+    void officerForbiddenOnPostMetadataFields() throws Exception {
+        mockMvc.perform(post("/api/metadata/fields")
+                        .header("Authorization", "Bearer " + officerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"fieldKey":"officer_cannot_create","displayLabel":"X","tier":"TIER_1",\
+                                "dataType":"NUMBER","groupName":"","allowedValues":[],"fuzzyMatchable":false}
+                                """))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
     void officerForbiddenOnPutMapping() throws Exception {
         mockMvc.perform(put("/api/metadata/mappings/age?dataMode=SYNTHETIC")
                         .header("Authorization", "Bearer " + officerToken)

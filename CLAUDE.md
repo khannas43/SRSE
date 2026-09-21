@@ -254,9 +254,14 @@ This is enforced by construction today, not only by UI copy:
   only on the preserved source side, RIGHT only on the preserved target side; FULL
   rejects the age filter. **Dedup** is rejected with RIGHT/FULL — partitioning on
   `source_*` columns collapses unmatched rows (NULL keys) into one partition.
-  **ANY_OF** on a preserved outer side uses `LEFT JOIN UNNEST ... ON TRUE` instead
-  of `CROSS JOIN UNNEST` so all-null candidate columns do not drop the row before
-  the join. **Self-join:** pick the same registered table on source and target —
+  **Do not re-add `LEFT JOIN UNNEST` for ANY_OF (Presto rejects it).** PrestoDB 0.297
+  fails at analysis with “UNNEST on other than the right side of CROSS JOIN is not
+  supported” — the SQL parses and is submitted, so `EmittedSqlParsesTest` cannot
+  catch it. It is also unnecessary: unlike COMBINE’s `filter(...)` array, the ANY_OF
+  array is positional (`ARRAY[a, b]`) and never empty, so an all-null candidate row
+  yields N null-keyed rows and survives `CROSS JOIN UNNEST` regardless. ANY_OF
+  therefore always emits **`CROSS JOIN UNNEST`**, including on a preserved outer side.
+  **Self-join:** pick the same registered table on source and target —
   no separate feature. **`POST /api/analysis/match.sql`** plans and returns display
   SQL without executing (same path as the streamed match).
 
@@ -311,6 +316,14 @@ This is enforced by construction today, not only by UI copy:
     side under LEFT, (c) a source row with no target match visible under LEFT.
     `EmittedSqlParsesTest` proves syntax only; outer joins that parse but mis-route
     predicates pass it while returning wrong rows.
+    **Recorded run (2026-09, `prestodb/presto:0.297`, cross-catalog
+    `iceberg.srse.beneficiary` 86,000 rows ↔ `iceberg_silver.silver_txn.tbl_txn_bankdtl`
+    20,001 rows):** LEFT with fuzzy similarity in **ON** → 86,000 rows (unmatched
+    source preserved). Same plan with similarity in **WHERE** → **0 rows** (silent
+    INNER). RIGHT → 100 rows (unmatched target preserved). FULL → 200 rows (100 with
+    NULL source). LEFT + ANY_OF on preserved side with **`CROSS JOIN UNNEST`** → 200
+    unmatched preserved rows. All-null ANY_OF candidate through `CROSS JOIN UNNEST`
+    → 2 null-keyed rows (survives).
 
 ## Reference
 
