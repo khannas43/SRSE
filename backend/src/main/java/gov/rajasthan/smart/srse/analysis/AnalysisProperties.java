@@ -19,7 +19,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *
  * <p>{@code blockingPrefixLen} is the fuzzy blocking-key prefix length in
  * {@link RecordMatchService}. {@code maxEstimatedRows} is the ceiling on the
- * product of per-key {@code approx_distinct} estimates before a match runs.
+ * equi-join fan-out estimate ({@code count(*) × count(*) / ∏ max(distinct)})
+ * before a match runs.
  */
 @ConfigurationProperties(prefix = "srse.analysis")
 public record AnalysisProperties(

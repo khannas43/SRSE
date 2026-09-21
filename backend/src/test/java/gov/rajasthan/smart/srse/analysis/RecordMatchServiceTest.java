@@ -32,6 +32,7 @@ import java.util.Set;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -1447,14 +1448,70 @@ class RecordMatchServiceTest {
         assertTrue(sql.contains(", 6)"), sql);
     }
 
+    /**
+     * Stubs row counts and {@code approx_distinct} like
+     * beneficiary (86k) ↔ bank_txn (20k) on the local Presto container.
+     */
+    private void stubReconciliationCardinalities(long sourceDistinct, long targetDistinct) {
+        reset(jdbc);
+        when(jdbc.queryForObject(anyString(), eq(Long.class))).thenAnswer(inv -> {
+            String sql = inv.getArgument(0, String.class);
+            if (sql.toLowerCase().contains("count(")) {
+                if (sql.contains("beneficiary")) {
+                    return 86_000L;
+                }
+                if (sql.contains("bank_txn")) {
+                    return 20_001L;
+                }
+                return 1L;
+            }
+            if (sql.contains("approx_distinct")) {
+                if (sql.contains("district")) {
+                    return 7L;
+                }
+                if (sql.contains("m_id")) {
+                    if (sql.contains("beneficiary")) {
+                        return sourceDistinct;
+                    }
+                    if (sql.contains("bank_txn")) {
+                        return targetDistinct;
+                    }
+                }
+            }
+            return 1L;
+        });
+    }
+
+    private static RecordMatchRequest idKeyCrossTableMatch() {
+        return new RecordMatchRequest(
+                List.of(exact("beneficiary", "m_id")),
+                List.of(exact("bank_txn", "m_id")),
+                null, null,
+                false, null, null);
+    }
+
+    private static RecordMatchRequest districtCrossTableMatch() {
+        return new RecordMatchRequest(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("bank_txn", "district")),
+                null, null,
+                false, null, null);
+    }
+
     @Test
-    void estimatedFanOutAboveCeilingRefusesWithMessage() {
-        analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10, 3, 1_000L);
+    void estimatedFanOutHighCardinalityKeyIsAllowed() {
+        stubReconciliationCardinalities(88_749L, 19_675L);
+        assertDoesNotThrow(() -> service.planMatch(idKeyCrossTableMatch()));
+    }
+
+    @Test
+    void estimatedFanOutLowCardinalityKeyIsRefusedWithMessage() {
+        analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L);
         service = new RecordMatchService(jdbc, registry, guardrails, fieldResolver, columnMetadata, analysisProperties, objectMapper);
-        when(jdbc.queryForObject(anyString(), eq(Long.class))).thenReturn(50L);
-        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> service.planMatch(exactMatchRequest()));
+        stubReconciliationCardinalities(7L, 7L);
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> service.planMatch(districtCrossTableMatch()));
         assertTrue(ex.getMessage().contains("Estimated match fan-out"), ex.getMessage());
-        assertTrue(ex.getMessage().contains("1,000"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("245"), ex.getMessage());
     }
 
     @Test

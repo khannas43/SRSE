@@ -244,10 +244,10 @@ This is enforced by construction today, not only by UI copy:
   **`match-multi.csv` is all-or-nothing** (one failed target aborts the download).
   Each target's SQL rides its own `started` progress event, never the `meta` line.
 - **Match fan-out guard:** before executing, `RecordMatchService` estimates
-  candidate row count as the product of {@code approx_distinct} on each join key
-  (blocking-key expression for fuzzy pairs). Above
-  `SRSE_ANALYSIS_MAX_ESTIMATED_ROWS` (default 50,000,000) the request is refused
-  with the estimate in the message — not a silent query timeout.
+  equi-join output as {@code sourceRows × targetRows / ∏ max(sourceDistinct,
+  targetDistinct)} per group (`count(*)` per side; distincts on the blocking key
+  for fuzzy pairs). Above `SRSE_ANALYSIS_MAX_ESTIMATED_ROWS` (default 50,000,000)
+  the request is refused with the estimate in the message — not a silent query timeout.
   `SRSE_ANALYSIS_BLOCKING_PREFIX_LEN` (default 3) controls fuzzy blocking;
   longer prefixes block harder and cost recall on typos in the first N characters;
   shorter ones explode the candidate set.
@@ -338,6 +338,9 @@ This is enforced by construction today, not only by UI copy:
     target joinType LEFT, fuzzy name pair):** hub rows with no match in that target
     appear in the merged grid with hub columns populated and that target's
     prefixed columns empty (not dropped, not the string "null").
+    **Fan-out pre-check (2026-09, same tables):** `m_id` join estimate
+    ~19,382 vs **20,001** actual rows (allowed). `district` join estimate
+    ~245,726,571 vs **245,675,819** actual (refused above 50M ceiling).
 
 ## Reference
 

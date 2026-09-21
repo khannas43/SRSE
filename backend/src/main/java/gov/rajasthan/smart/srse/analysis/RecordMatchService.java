@@ -858,8 +858,9 @@ public class RecordMatchService {
     }
 
     /**
-     * Upper-bound fan-out from {@code approx_distinct} on each join key (product
-     * across groups). Refuses before JDBC execution when above
+     * Equi-join fan-out estimate before the match query runs:
+     * {@code sourceRows × targetRows / ∏ max(sourceDistinct_g, targetDistinct_g)}.
+     * Distincts use the blocking-key expression on fuzzy groups. Refuses when above
      * {@link AnalysisProperties#maxEstimatedRows()}.
      */
     private void enforceEstimatedRowCeiling(Sides sides, List<GroupPlan> groups) {
@@ -867,19 +868,44 @@ public class RecordMatchService {
         if (ceiling <= 0 || groups.isEmpty()) {
             return;
         }
-        long estimate = 1;
+        long sourceRows = queryRowCount(sides.sourceTable());
+        long targetRows = queryRowCount(sides.targetTable());
+        if (sourceRows == 0 || targetRows == 0) {
+            return;
+        }
+        long numerator = multiplyCap(sourceRows, targetRows, Long.MAX_VALUE);
+        if (numerator <= 0) {
+            return;
+        }
+        long denominator = 1;
         for (GroupPlan group : groups) {
             long sourceDistinct = sideDistinctEstimate(sides.sourceTable(), group.group().source(), group.fuzzy());
             long targetDistinct = sideDistinctEstimate(sides.targetTable(), group.group().target(), group.fuzzy());
-            estimate = multiplyCap(estimate, multiplyCap(sourceDistinct, targetDistinct, ceiling), ceiling);
-            if (estimate > ceiling) {
-                throw new IllegalArgumentException(
-                        "Estimated match fan-out is about " + formatEstimate(estimate)
-                                + " rows (limit " + formatEstimate(ceiling) + "). "
-                                + "Try a longer blocking prefix (SRSE_ANALYSIS_BLOCKING_PREFIX_LEN), "
-                                + "a more selective join key, or fewer folded groups.");
+            long groupMax = Math.max(sourceDistinct, targetDistinct);
+            if (groupMax <= 0) {
+                return;
+            }
+            denominator = multiplyCap(denominator, groupMax, Long.MAX_VALUE);
+            if (denominator <= 0) {
+                return;
             }
         }
+        long estimate = numerator / denominator;
+        if (numerator == Long.MAX_VALUE || estimate < 0) {
+            estimate = ceiling + 1;
+        }
+        if (estimate > ceiling) {
+            throw new IllegalArgumentException(
+                    "Estimated match fan-out is about " + formatEstimate(estimate)
+                            + " rows (limit " + formatEstimate(ceiling) + "). "
+                            + "Try a longer blocking prefix (SRSE_ANALYSIS_BLOCKING_PREFIX_LEN), "
+                            + "a more selective join key, or fewer folded groups.");
+        }
+    }
+
+    private long queryRowCount(QualifiedTable table) {
+        Long count = jdbc.queryForObject("SELECT count(*) FROM " + table.qualifiedName(), Long.class);
+        return count == null ? 0 : Math.max(0, count);
     }
 
     private long sideDistinctEstimate(QualifiedTable table, List<MatchCriterion> columns, boolean fuzzy) {
