@@ -13,7 +13,12 @@ import { useCallback, useEffect, useState } from "react";
  * same table name exists under more than one catalog, so a leftover value
  * would silently point at the wrong layer rather than failing loudly.
  *
- * Deliberately source-agnostic — the caller supplies the three fetchers. The
+ * When {@link CascadeFetchers.listLayers} is supplied (Analysis registry
+ * cascade), a Layer rung appears first. Layer is component-internal state
+ * only — it is never part of {@link CascadeValue}, so it cannot ride into
+ * match payloads via spread.
+ *
+ * Deliberately source-agnostic — the caller supplies the fetchers. The
  * Admin page passes the live-browse endpoints (everything the Presto
  * connection can reach); the Analysis tab passes the registry endpoints (only
  * what an admin registered). Same component, two different reaches.
@@ -35,9 +40,10 @@ export function isCascadeComplete(v: CascadeValue): boolean {
 export type TableOption = { name: string; layer?: string | null };
 
 export type CascadeFetchers = {
-  listCatalogs: () => Promise<string[]>;
-  listSchemas: (catalog: string) => Promise<string[]>;
-  listTables: (catalog: string, schema: string) => Promise<TableOption[]>;
+  listLayers?: () => Promise<string[]>;
+  listCatalogs: (layer?: string) => Promise<string[]>;
+  listSchemas: (catalog: string, layer?: string) => Promise<string[]>;
+  listTables: (catalog: string, schema: string, layer?: string) => Promise<TableOption[]>;
 };
 
 type Props = Readonly<{
@@ -55,6 +61,11 @@ type Props = Readonly<{
 
 const selectStyle = { minWidth: 150 } as const;
 
+/** Must stay in lockstep with {@code LakehouseLayers.UNTAGGED} on the backend. */
+function layerOptionLabel(layer: string): string {
+  return layer === "UNTAGGED" ? "Untagged (legacy)" : layer;
+}
+
 export default function LakehouseCascade({
   value,
   onChange,
@@ -65,22 +76,49 @@ export default function LakehouseCascade({
   compact = false,
   onError,
 }: Props) {
+  const [layers, setLayers] = useState<string[]>([]);
+  const [selectedLayer, setSelectedLayer] = useState("");
   const [catalogs, setCatalogs] = useState<string[]>([]);
   const [schemas, setSchemas] = useState<string[]>([]);
   const [tables, setTables] = useState<TableOption[]>([]);
   const [loading, setLoading] = useState(false);
+
+  const layerRequired = fetchers.listLayers != null;
+  const layerArg = selectedLayer || undefined;
+  const canFetchCatalogs =
+    !layerRequired || Boolean(selectedLayer) || Boolean(value.catalog);
+  const catalogDisabled =
+    disabled || (layerRequired && !selectedLayer && !value.catalog);
 
   const report = useCallback(
     (err: unknown) => onError?.(err instanceof Error ? err.message : String(err)),
     [onError],
   );
 
-  const { listCatalogs, listSchemas, listTables } = fetchers;
+  const { listLayers, listCatalogs, listSchemas, listTables } = fetchers;
+
+  useEffect(() => {
+    if (!listLayers) {
+      return undefined;
+    }
+    let cancelled = false;
+    listLayers()
+      .then((l) => {
+        if (!cancelled) setLayers(l);
+      })
+      .catch(report);
+    return () => {
+      cancelled = true;
+    };
+  }, [listLayers, report]);
 
   useEffect(() => {
     let cancelled = false;
+    if (!canFetchCatalogs) {
+      return undefined;
+    }
     setLoading(true);
-    listCatalogs()
+    listCatalogs(layerArg)
       .then((c) => {
         if (!cancelled) setCatalogs(c);
       })
@@ -91,7 +129,10 @@ export default function LakehouseCascade({
     return () => {
       cancelled = true;
     };
-  }, [listCatalogs, report]);
+  }, [canFetchCatalogs, layerArg, listCatalogs, report]);
+
+  const layerOptions = listLayers ? layers : [];
+  const catalogOptions = canFetchCatalogs ? catalogs : [];
 
   useEffect(() => {
     let cancelled = false;
@@ -99,7 +140,7 @@ export default function LakehouseCascade({
       setSchemas([]);
       return undefined;
     }
-    listSchemas(value.catalog)
+    listSchemas(value.catalog, layerArg)
       .then((s) => {
         if (!cancelled) setSchemas(s);
       })
@@ -107,7 +148,7 @@ export default function LakehouseCascade({
     return () => {
       cancelled = true;
     };
-  }, [value.catalog, listSchemas, report]);
+  }, [value.catalog, layerArg, listSchemas, report]);
 
   useEffect(() => {
     let cancelled = false;
@@ -115,7 +156,7 @@ export default function LakehouseCascade({
       setTables([]);
       return undefined;
     }
-    listTables(value.catalog, value.schema)
+    listTables(value.catalog, value.schema, layerArg)
       .then((t) => {
         if (!cancelled) setTables(t);
       })
@@ -123,9 +164,13 @@ export default function LakehouseCascade({
     return () => {
       cancelled = true;
     };
-  }, [value.catalog, value.schema, listTables, report]);
+  }, [value.catalog, value.schema, layerArg, listTables, report]);
 
-  // Each setter clears every level BELOW it — see the component javadoc.
+  function pickLayer(layer: string) {
+    setSelectedLayer(layer);
+    onChange({ catalog: "", schema: "", table: "" });
+  }
+
   function pickCatalog(catalog: string) {
     onChange({ catalog, schema: "", table: "" });
   }
@@ -155,6 +200,27 @@ export default function LakehouseCascade({
         </div>
       )}
       <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "flex-end" }}>
+        {layerRequired && (
+          <div>
+            {caption("Layer", `${idPrefix}-layer`)}
+            <select
+              id={`${idPrefix}-layer`}
+              className="srse-select"
+              style={selectStyle}
+              value={selectedLayer}
+              disabled={disabled}
+              onChange={(e) => pickLayer(e.target.value)}
+            >
+              <option value="">— layer —</option>
+              {layerOptions.map((l) => (
+                <option key={l} value={l}>
+                  {layerOptionLabel(l)}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         <div>
           {caption("Catalog", `${idPrefix}-catalog`)}
           <select
@@ -162,11 +228,11 @@ export default function LakehouseCascade({
             className="srse-select"
             style={selectStyle}
             value={value.catalog}
-            disabled={disabled}
+            disabled={catalogDisabled}
             onChange={(e) => pickCatalog(e.target.value)}
           >
             <option value="">{loading ? "— loading… —" : "— catalog —"}</option>
-            {catalogs.map((c) => (
+            {catalogOptions.map((c) => (
               <option key={c} value={c}>
                 {c}
               </option>

@@ -12,7 +12,7 @@ import {
   type ColumnFiltersState,
   type SortingState,
 } from "@tanstack/react-table";
-import type { BreakdownRow } from "@/lib/decisionApi";
+import type { BreakdownRow, CohortResponse } from "@/lib/decisionApi";
 import { MultiSelectDropdown } from "@/components/MultiSelectDropdown";
 import { ChartsSection, type ChartDimension } from "@/components/ChartsSection";
 
@@ -105,14 +105,42 @@ function sortIndicator(sorted: false | "asc" | "desc"): string {
   return "⇅";
 }
 
+function formatSampleCaption(totalCount: number, sample: CohortResponse): string {
+  const shown = sample.rows.length;
+  let text =
+    `Representative sample — showing ${shown.toLocaleString("en-IN")} of ` +
+    `${totalCount.toLocaleString("en-IN")} eligible beneficiaries`;
+  if (sample.capped) {
+    text +=
+      `. Sample limit (${sample.appliedLimit.toLocaleString("en-IN")}) reached — ` +
+      "additional beneficiaries match this ruleset";
+  }
+  return text;
+}
+
+function sampleColumnKeys(rows: Record<string, unknown>[]): string[] {
+  if (rows.length === 0) return [];
+  return Object.keys(rows[0] ?? {});
+}
+
+function formatCell(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
 export function ResultsPanel({
   totalCount,
   breakdown,
   caption,
+  cohortSample,
+  cohortSampleError,
 }: Readonly<{
   totalCount: number;
   breakdown: BreakdownRow[];
   caption?: string;
+  cohortSample?: CohortResponse | null;
+  cohortSampleError?: string | null;
 }>) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
@@ -152,6 +180,46 @@ export function ResultsPanel({
         {caption && <p style={captionStyle}>{caption}</p>}
         <p style={totalStyle}>{totalCount.toLocaleString("en-IN")}</p>
       </section>
+
+      {(cohortSampleError || cohortSample) && (
+        <section style={{ marginBottom: "2rem" }}>
+          <h2 style={sectionHeadingStyle}>Beneficiary sample</h2>
+          {cohortSampleError && <p className="srse-text-danger">{cohortSampleError}</p>}
+          {cohortSample && (
+            <>
+              <p style={{ ...captionStyle, marginBottom: "0.75rem" }}>
+                {formatSampleCaption(totalCount, cohortSample)}
+              </p>
+              {cohortSample.rows.length === 0 ? (
+                <p className="srse-text-muted">No rows returned for this sample.</p>
+              ) : (
+                <div style={{ overflowX: "auto", maxWidth: "100%" }}>
+                  <table className="srse-table" style={{ fontSize: "0.78rem" }}>
+                    <thead>
+                      <tr>
+                        {sampleColumnKeys(cohortSample.rows).map((key) => (
+                          <th key={key}>{key}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cohortSample.rows.map((row, idx) => (
+                        <tr key={idx}>
+                          {sampleColumnKeys(cohortSample.rows).map((key) => (
+                            <td key={key} style={{ whiteSpace: "nowrap" }}>
+                              {formatCell(row[key])}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+        </section>
+      )}
 
       <section style={{ marginBottom: "2rem" }}>
         <div

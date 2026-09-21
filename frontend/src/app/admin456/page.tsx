@@ -14,6 +14,7 @@ import {
   importAdminConfig,
   listFields,
   listMappings,
+  listLakehouseLayers,
   listRegistrations,
   registerTable,
   unregisterTable,
@@ -41,12 +42,24 @@ import {
   type ColumnMetadata,
   type CompareAs,
 } from "@/lib/analysisApi";
+import { SrseAdminAccessDeniedError } from "@/lib/authToken";
+import { bindingSetLabel, runningEnvironmentLabel } from "@/lib/environmentLabels";
 import LakehouseCascade, {
   EMPTY_CASCADE,
   isCascadeComplete,
   type CascadeFetchers,
   type CascadeValue,
 } from "@/components/LakehouseCascade";
+import { SingleSelectDropdown } from "@/components/MultiSelectDropdown";
+import {
+  ALLOWED_VALUES_FIELD_HELP,
+  ALLOWED_VALUES_IGNORED_NOTE,
+  PHYSICAL_EXPRESSION_FIELD_HELP,
+  TIER_FIELD_HELP,
+  allowedValuesForSubmit,
+  validateDisplayLabel,
+  validateFieldKey,
+} from "@/lib/adminFieldValidation";
 
 /**
  * Admin cascades browse the LIVE lakehouse — everything the current Presto
@@ -96,6 +109,9 @@ function qualified(v: CascadeValue, column?: string): string {
 }
 
 function errorMessage(err: unknown): string {
+  if (err instanceof SrseAdminAccessDeniedError) {
+    return err.message;
+  }
   return err instanceof Error ? err.message : String(err);
 }
 
@@ -330,8 +346,12 @@ function ConnectionsPanel() {
       {connections && (
         <>
           <p className="srse-text-muted" style={{ marginTop: 0, marginBottom: "1rem", lineHeight: 1.5 }}>
-            DATA_MODE: <strong style={{ color: "var(--srse-text)" }}>{connections.dataMode}</strong> — still set
-            via environment config, not editable here.{" "}
+            Running environment:{" "}
+            <strong style={{ color: "var(--srse-text)" }}>
+              {runningEnvironmentLabel(connections.environmentLabel, connections.dataMode)}
+            </strong>{" "}
+            (<code>DATA_MODE={connections.dataMode}</code>, set via environment config — not editable here).{" "}
+            Override the display name with <code>SRSE_ENV_LABEL</code> when this box is UAT or staging.{" "}
             <strong style={{ color: "var(--srse-text)" }}>Analytical</strong> edits below apply immediately, no
             restart. <strong style={{ color: "var(--srse-text)" }}>Operational</strong> edits are tested and saved
             but only take effect after a manual backend restart.
@@ -363,6 +383,20 @@ function ConnectionsPanel() {
 const TIER_OPTIONS: FieldTier[] = ["TIER_1", "TIER_2", "TIER_3"];
 const DATA_TYPE_OPTIONS: FieldDataType[] = ["NUMBER", "STRING", "BOOLEAN", "DATE"];
 
+function FieldHelpButton({ title, label }: Readonly<{ title: string; label: string }>) {
+  return (
+    <button
+      type="button"
+      className="srse-btn srse-btn-ghost srse-btn-sm"
+      title={title}
+      aria-label={label}
+      style={{ minWidth: 28, padding: "0 0.35rem", lineHeight: 1.2 }}
+    >
+      ?
+    </button>
+  );
+}
+
 function AddFieldForm({ onCreated }: Readonly<{ onCreated: () => void }>) {
   const [fieldKey, setFieldKey] = useState("");
   const [displayLabel, setDisplayLabel] = useState("");
@@ -372,10 +406,19 @@ function AddFieldForm({ onCreated }: Readonly<{ onCreated: () => void }>) {
   const [allowedValues, setAllowedValues] = useState("");
   const [fuzzyMatchable, setFuzzyMatchable] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldError, setFieldError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   async function onSubmit() {
-    if (!fieldKey.trim() || !displayLabel.trim()) return;
+    const keyErr = validateFieldKey(fieldKey);
+    const labelErr = validateDisplayLabel(displayLabel);
+    const { values: allowedList, clientError: allowedErr } = allowedValuesForSubmit(dataType, allowedValues);
+    const clientErr = keyErr ?? labelErr ?? allowedErr;
+    if (clientErr) {
+      setFieldError(clientErr);
+      return;
+    }
+    setFieldError(null);
     setSaving(true);
     setError(null);
     try {
@@ -385,10 +428,7 @@ function AddFieldForm({ onCreated }: Readonly<{ onCreated: () => void }>) {
         tier,
         dataType,
         groupName: groupName.trim(),
-        allowedValues: allowedValues
-          .split(",")
-          .map((v) => v.trim())
-          .filter(Boolean),
+        allowedValues: allowedList,
         fuzzyMatchable,
       });
       setFieldKey("");
@@ -409,9 +449,13 @@ function AddFieldForm({ onCreated }: Readonly<{ onCreated: () => void }>) {
       <input
         placeholder="field_key"
         value={fieldKey}
-        onChange={(e) => setFieldKey(e.target.value)}
+        onChange={(e) => {
+          setFieldKey(e.target.value);
+          setFieldError(null);
+        }}
         className="srse-input"
         style={{ width: 160 }}
+        aria-invalid={fieldError !== null && validateFieldKey(fieldKey) !== null}
       />
       <input
         placeholder="Display label"
@@ -420,13 +464,21 @@ function AddFieldForm({ onCreated }: Readonly<{ onCreated: () => void }>) {
         className="srse-input"
         style={{ width: 180 }}
       />
-      <select value={tier} onChange={(e) => setTier(e.target.value as FieldTier)} className="srse-select">
-        {TIER_OPTIONS.map((t) => (
-          <option key={t} value={t}>
-            {t}
-          </option>
-        ))}
-      </select>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: "0.2rem" }}>
+        <select
+          aria-label="Tier"
+          value={tier}
+          onChange={(e) => setTier(e.target.value as FieldTier)}
+          className="srse-select"
+        >
+          {TIER_OPTIONS.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+        <FieldHelpButton title={TIER_FIELD_HELP} label="Tier definitions" />
+      </span>
       <select
         value={dataType}
         onChange={(e) => setDataType(e.target.value as FieldDataType)}
@@ -445,13 +497,26 @@ function AddFieldForm({ onCreated }: Readonly<{ onCreated: () => void }>) {
         className="srse-input"
         style={{ width: 160 }}
       />
-      <input
-        placeholder="Allowed values (comma-separated, STRING only)"
-        value={allowedValues}
-        onChange={(e) => setAllowedValues(e.target.value)}
-        className="srse-input"
-        style={{ width: 260 }}
-      />
+      <span style={{ display: "inline-flex", alignItems: "center", gap: "0.2rem" }}>
+        <input
+          placeholder="Allowed values (comma-separated, STRING only)"
+          value={allowedValues}
+          onChange={(e) => {
+            setAllowedValues(e.target.value);
+            setFieldError(null);
+          }}
+          className="srse-input"
+          style={{ width: 260 }}
+          title={ALLOWED_VALUES_FIELD_HELP}
+          disabled={dataType !== "STRING"}
+        />
+        <FieldHelpButton title={ALLOWED_VALUES_FIELD_HELP} label="Allowed values help" />
+      </span>
+      {dataType !== "STRING" && (
+        <span className="srse-text-muted" style={{ fontSize: "0.75rem" }}>
+          {ALLOWED_VALUES_IGNORED_NOTE}
+        </span>
+      )}
         <label className="srse-checkbox-label" htmlFor="add-field-fuzzy">
         <input id="add-field-fuzzy" type="checkbox" checked={fuzzyMatchable} onChange={(e) => setFuzzyMatchable(e.target.checked)} />
         {" "}
@@ -460,9 +525,9 @@ function AddFieldForm({ onCreated }: Readonly<{ onCreated: () => void }>) {
       <button type="button" className="srse-btn srse-btn-primary" disabled={saving} onClick={onSubmit}>
         {saving ? "Adding…" : "+ Add field"}
       </button>
-      {error && (
+      {(fieldError || error) && (
         <p className="srse-text-danger" style={{ width: "100%", margin: 0 }}>
-          {error}
+          {fieldError ?? error}
         </p>
       )}
     </div>
@@ -494,6 +559,7 @@ function FieldCatalogRowEditor({
   const [allowedValues, setAllowedValues] = useState((field.allowedValues ?? []).join(", "));
   const [fuzzyMatchable, setFuzzyMatchable] = useState(field.fuzzyMatchable);
   const [saving, setSaving] = useState(false);
+  const [fieldError, setFieldError] = useState<string | null>(null);
 
   // Re-seed from the row rather than keeping half-typed edits around, so
   // Cancel really is a cancel.
@@ -504,10 +570,19 @@ function FieldCatalogRowEditor({
     setGroupName(field.groupName ?? "");
     setAllowedValues((field.allowedValues ?? []).join(", "));
     setFuzzyMatchable(field.fuzzyMatchable);
+    setFieldError(null);
     setEditing(true);
   }
 
   async function onSave() {
+    const labelErr = validateDisplayLabel(displayLabel);
+    const { values: allowedList, clientError: allowedErr } = allowedValuesForSubmit(dataType, allowedValues);
+    const clientErr = labelErr ?? allowedErr;
+    if (clientErr) {
+      setFieldError(clientErr);
+      return;
+    }
+    setFieldError(null);
     setSaving(true);
     try {
       await updateField(field.fieldKey, {
@@ -516,10 +591,7 @@ function FieldCatalogRowEditor({
         tier,
         dataType,
         groupName: groupName.trim(),
-        allowedValues: allowedValues
-          .split(",")
-          .map((v) => v.trim())
-          .filter(Boolean),
+        allowedValues: allowedList,
         fuzzyMatchable,
       });
       setEditing(false);
@@ -586,7 +658,7 @@ function FieldCatalogRowEditor({
         />
       </td>
       <td>
-        <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap", alignItems: "center" }}>
           <select
             aria-label={`Tier for ${field.fieldKey}`}
             value={tier}
@@ -599,6 +671,7 @@ function FieldCatalogRowEditor({
               </option>
             ))}
           </select>
+          <FieldHelpButton title={TIER_FIELD_HELP} label={`Tier definitions for ${field.fieldKey}`} />
           <select
             aria-label={`Data type for ${field.fieldKey}`}
             value={dataType}
@@ -623,14 +696,30 @@ function FieldCatalogRowEditor({
         />
       </td>
       <td>
-        <input
-          aria-label={`Allowed values for ${field.fieldKey}`}
-          value={allowedValues}
-          placeholder="comma-separated"
-          onChange={(e) => setAllowedValues(e.target.value)}
-          className="srse-input"
-          style={{ width: 200 }}
-        />
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: "0.2rem" }}>
+            <input
+              aria-label={`Allowed values for ${field.fieldKey}`}
+              value={allowedValues}
+              placeholder="comma-separated"
+              onChange={(e) => {
+                setAllowedValues(e.target.value);
+                setFieldError(null);
+              }}
+              className="srse-input"
+              style={{ width: 200 }}
+              title={ALLOWED_VALUES_FIELD_HELP}
+              disabled={dataType !== "STRING"}
+            />
+            <FieldHelpButton title={ALLOWED_VALUES_FIELD_HELP} label={`Allowed values help for ${field.fieldKey}`} />
+          </span>
+          {dataType !== "STRING" && (
+            <span className="srse-text-muted" style={{ fontSize: "0.68rem" }}>
+              {ALLOWED_VALUES_IGNORED_NOTE}
+            </span>
+          )}
+          {fieldError && <span className="srse-text-danger" style={{ fontSize: "0.72rem" }}>{fieldError}</span>}
+        </div>
       </td>
       <td>
         <label className="srse-checkbox-label" htmlFor={`field-fuzzy-${field.fieldKey}`}>
@@ -712,16 +801,31 @@ function ColumnPickerForMapping({
 }>) {
   const [cascade, setCascade] = useState<CascadeValue>(EMPTY_CASCADE);
   const [columns, setColumns] = useState<LakehouseColumnInfo[]>([]);
+  const [columnsForTable, setColumnsForTable] = useState<string | null>(null);
+
+  const cascadeComplete = isCascadeComplete(cascade);
+  const tableKey = cascadeComplete ? qualified(cascade) : null;
 
   useEffect(() => {
-    if (!isCascadeComplete(cascade)) {
-      setColumns([]);
-      return;
-    }
+    if (!tableKey) return;
+    let cancelled = false;
     browseColumns(cascade.catalog, cascade.schema, cascade.table)
-      .then(setColumns)
+      .then((cols) => {
+        if (!cancelled) {
+          setColumns(cols);
+          setColumnsForTable(tableKey);
+        }
+      })
       .catch((err: unknown) => onError(errorMessage(err)));
-  }, [cascade, onError]);
+    return () => {
+      cancelled = true;
+    };
+  }, [tableKey, cascade.catalog, cascade.schema, cascade.table, onError]);
+
+  const columnOptions =
+    tableKey && tableKey === columnsForTable
+      ? columns.map((c) => ({ value: c.name, label: `${c.name} (${c.dataType})` }))
+      : [];
 
   return (
     <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "flex-end", marginTop: "0.4rem" }}>
@@ -733,23 +837,19 @@ function ColumnPickerForMapping({
         compact
         onError={onError}
       />
-      <select
-        className="srse-select"
-        value=""
-        disabled={!isCascadeComplete(cascade)}
-        onChange={(e) => {
-          if (e.target.value) {
-            onPick(qualified(cascade, e.target.value));
+      <SingleSelectDropdown
+        options={columnOptions}
+        selected=""
+        onChange={(columnName) => {
+          if (columnName && cascadeComplete) {
+            onPick(qualified(cascade, columnName));
           }
         }}
-      >
-        <option value="">— pick column —</option>
-        {columns.map((c) => (
-          <option key={c.name} value={c.name}>
-            {c.name} ({c.dataType})
-          </option>
-        ))}
-      </select>
+        placeholder="— pick column —"
+        disabled={!cascadeComplete || columnOptions.length === 0}
+        width={280}
+        ariaLabel={`Pick column (${idPrefix})`}
+      />
     </div>
   );
 }
@@ -889,6 +989,7 @@ function MappingRowEditor({
               onChange={(e) => setValue(e.target.value)}
               className="srse-input"
               style={{ width: 340, fontFamily: "monospace" }}
+              title={PHYSICAL_EXPRESSION_FIELD_HELP}
             />
           )
         )}
@@ -982,7 +1083,7 @@ function MappingsPanel({
     // showing synthetic values. Keying by mode alone does not fix that; the
     // stale intermediate render has to not happen at all.
     setRows([]);
-    listMappings(dataMode)
+    listMappings(dataMode, "admin")
       .then(setRows)
       .catch((err: unknown) => setError(errorMessage(err)));
   }, [dataMode, refreshKey]);
@@ -991,7 +1092,7 @@ function MappingsPanel({
   // field has to drop it from the mapping table above in the same beat, since
   // the backend stops listing mappings for a deactivated field.
   useEffect(() => {
-    listFields()
+    listFields("admin")
       .then(setFields)
       .catch((err: unknown) => setError(errorMessage(err)));
   }, [refreshKey]);
@@ -1017,24 +1118,32 @@ function MappingsPanel({
   return (
     <section className="srse-card">
       <h2 className="srse-card-title">Field → catalog/schema/table/column mappings</h2>
+      <p className="srse-text-muted" style={{ marginTop: 0, lineHeight: 1.5 }}>
+        Editing bindings for: choose which <code>field_column_mapping</code> set below — this is{" "}
+        <strong>not</strong> the same as the running environment shown under Connections. Each set is
+        keyed by wire value <code>SYNTHETIC</code> or <code>LIVE</code>; switching radios only changes
+        which rows you edit.
+      </p>
       <div style={{ display: "flex", gap: "1.25rem", alignItems: "center", marginBottom: "0.85rem" }}>
+        <span className="srse-text-muted" style={{ fontSize: "0.85rem" }}>
+          Binding set:
+        </span>
         <label className="srse-checkbox-label" htmlFor="mapping-data-mode-synthetic">
           <input id="mapping-data-mode-synthetic" type="radio" checked={dataMode === "SYNTHETIC"} onChange={() => setDataMode("SYNTHETIC")} />
           {" "}
-          Synthetic
+          {bindingSetLabel("SYNTHETIC")}
         </label>
         <label className="srse-checkbox-label" htmlFor="mapping-data-mode-live">
           <input id="mapping-data-mode-live" type="radio" checked={dataMode === "LIVE"} onChange={() => setDataMode("LIVE")} />
           {" "}
-          Live
+          {bindingSetLabel("LIVE")}
         </label>
       </div>
 
       <p className="srse-text-success" style={{ marginTop: 0 }}>
-        Edits take effect immediately (cache is evicted on save) — no restart needed.{" "}
-        {dataMode === "SYNTHETIC"
-          ? "You are editing the bindings the local synthetic stack resolves against."
-          : "You are editing the bindings the deployed Golden Layer resolves against."}
+        Edits take effect immediately (cache is evicted on save) — no restart needed. Currently editing
+        the <strong>{bindingSetLabel(dataMode)}</strong> binding set (
+        <code>{dataMode}</code>).
       </p>
 
       {/*
@@ -1045,8 +1154,9 @@ function MappingsPanel({
       */}
       {unconfiguredCount > 0 && (
         <p className="srse-text-danger" style={{ marginTop: 0, fontWeight: 600 }}>
-          ⚠ {unconfiguredCount} of {rows.length} {dataMode === "LIVE" ? "live" : "synthetic"} fields
-          are unconfigured — either still a <code>CHANGE_ME</code> placeholder or not bound at all.
+          ⚠ {unconfiguredCount} of {rows.length} fields in the{" "}
+          <strong>{bindingSetLabel(dataMode)}</strong> binding set are unconfigured — either still a{" "}
+          <code>CHANGE_ME</code> placeholder or not bound at all.
           Simulations using them will fail until each is bound to a real column below.
         </p>
       )}
@@ -1064,10 +1174,11 @@ function MappingsPanel({
       )}
 
       <p className="srse-text-muted" style={{ marginTop: 0, lineHeight: 1.5 }}>
-        Live expressions must be <strong>fully qualified</strong> —{" "}
-        <code>catalog.schema.table.column</code>. The connection no longer pins a single catalog and
-        schema, so a bare <code>table.column</code> only resolves if the JDBC URL still carries a
-        default. Use <em>Pick from lakehouse…</em> to build one from the live schema rather than typing it.
+        In the <strong>{bindingSetLabel("LIVE")}</strong> binding set, physical expressions must be{" "}
+        <strong>fully qualified</strong> — <code>catalog.schema.table.column</code>. The connection
+        no longer pins a single catalog and schema, so a bare <code>table.column</code> only resolves
+        if the JDBC URL still carries a default. Use <em>Pick from lakehouse…</em> to build one from
+        the lakehouse schema rather than typing it.
         {registrations.length > 0 && (
           <>
             {" "}Registered tables: {registrations.map((r) => r.qualifiedName).join(", ")}.
@@ -1339,6 +1450,7 @@ function RegisterColumnMetadataForm({
   // rejects it anyway (registration is the first of its two gates).
   const [registrationId, setRegistrationId] = useState("");
   const [columns, setColumns] = useState<LakehouseColumnInfo[]>([]);
+  const [columnsForTable, setColumnsForTable] = useState<string | null>(null);
   const [column, setColumn] = useState("");
   const [businessName, setBusinessName] = useState("");
   const [fuzzyMatchable, setFuzzyMatchable] = useState(false);
@@ -1349,18 +1461,30 @@ function RegisterColumnMetadataForm({
 
   const selected = registrations.find((r) => String(r.id) === registrationId) ?? null;
 
+  const tableKey = selected?.qualifiedName ?? null;
+
   useEffect(() => {
-    setColumn("");
-    if (!selected) {
-      setColumns([]);
-      return;
-    }
+    if (!selected || !tableKey) return;
+    let cancelled = false;
     browseColumns(selected.catalog, selected.schema, selected.table)
-      .then(setColumns)
+      .then((cols) => {
+        if (!cancelled) {
+          setColumns(cols);
+          setColumnsForTable(tableKey);
+        }
+      })
       .catch((err: unknown) => setError(errorMessage(err)));
+    return () => {
+      cancelled = true;
+    };
     // Re-fetch keyed on the qualified name, not the object identity, so a
     // list refresh that returns an equal-but-new object doesn't re-query.
-  }, [selected?.qualifiedName]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tableKey, selected?.catalog, selected?.schema, selected?.table]);
+
+  const columnOptions =
+    selected && tableKey === columnsForTable
+      ? columns.map((c) => ({ value: c.name, label: `${c.name} (${c.dataType})` }))
+      : [];
 
   async function onSubmit() {
     if (!selected || !column) return;
@@ -1399,7 +1523,10 @@ function RegisterColumnMetadataForm({
     <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
       <select
         value={registrationId}
-        onChange={(e) => setRegistrationId(e.target.value)}
+        onChange={(e) => {
+          setRegistrationId(e.target.value);
+          setColumn("");
+        }}
         className="srse-select"
         style={{ minWidth: 320 }}
       >
@@ -1411,19 +1538,15 @@ function RegisterColumnMetadataForm({
           </option>
         ))}
       </select>
-      <select
-        value={column}
-        onChange={(e) => setColumn(e.target.value)}
-        className="srse-select"
-        disabled={!selected}
-      >
-        <option value="">— select column —</option>
-        {columns.map((c) => (
-          <option key={c.name} value={c.name}>
-            {c.name}
-          </option>
-        ))}
-      </select>
+      <SingleSelectDropdown
+        options={columnOptions}
+        selected={column}
+        onChange={setColumn}
+        placeholder="— select column —"
+        disabled={!selected || columnOptions.length === 0}
+        width={260}
+        ariaLabel="Analysis column metadata column"
+      />
       <input
         placeholder="Business name (e.g. Account Number)"
         value={businessName}
@@ -1539,11 +1662,13 @@ function ColumnMetadataPanel({
 function RegistrationRow({
   registration,
   curatedColumnCount,
+  layerOptions,
   onChanged,
   onError,
 }: Readonly<{
   registration: TableRegistration;
   curatedColumnCount: number;
+  layerOptions: string[];
   onChanged: () => void;
   onError: (message: string) => void;
 }>) {
@@ -1557,9 +1682,10 @@ function RegistrationRow({
   }
 
   async function onSave() {
+    if (!layer.trim()) return;
     setSaving(true);
     try {
-      await updateTableRegistration(registration.id, layer.trim() || null);
+      await updateTableRegistration(registration.id, layer.trim());
       setEditing(false);
       onChanged();
     } catch (err: unknown) {
@@ -1576,21 +1702,26 @@ function RegistrationRow({
       <td style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{registration.table}</td>
       <td>
         {editing ? (
-          <input
+          <select
             aria-label={`Layer for ${registration.qualifiedName}`}
-            list="srse-layer-suggestions"
-            placeholder="SILVER / GOLD"
             value={layer}
             onChange={(e) => setLayer(e.target.value)}
-            className="srse-input"
-            style={{ width: 130 }}
-          />
+            className="srse-select"
+            style={{ width: 140 }}
+          >
+            <option value="">— layer —</option>
+            {layerOptions.map((opt) => (
+              <option key={opt} value={opt}>
+                {opt}
+              </option>
+            ))}
+          </select>
         ) : (
           <>
             {registration.layer ? (
               <span className="srse-badge">{registration.layer}</span>
             ) : (
-              <span className="srse-text-muted">—</span>
+              <span className="srse-text-muted">Untagged</span>
             )}
           </>
         )}
@@ -1599,7 +1730,12 @@ function RegistrationRow({
         <div style={{ display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
           {editing ? (
             <>
-              <button type="button" className="srse-btn srse-btn-sm" disabled={saving} onClick={onSave}>
+              <button
+                type="button"
+                className="srse-btn srse-btn-sm"
+                disabled={saving || !layer.trim()}
+                onClick={onSave}
+              >
                 {saving ? "Saving…" : "Save"}
               </button>
               <button
@@ -1666,10 +1802,17 @@ function LakehouseRegistryPanel({
 }>) {
   const [cascade, setCascade] = useState<CascadeValue>(EMPTY_CASCADE);
   const [layer, setLayer] = useState("");
+  const [layerOptions, setLayerOptions] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
   const onCascadeError = useCallback((message: string) => setFormError(message), []);
+
+  useEffect(() => {
+    listLakehouseLayers()
+      .then(setLayerOptions)
+      .catch((err: unknown) => setFormError(errorMessage(err)));
+  }, []);
 
   // How many column settings each table carries, so unregistering says what
   // curation it is putting out of reach (the rows are kept, not deleted).
@@ -1694,7 +1837,7 @@ function LakehouseRegistryPanel({
     setSaving(true);
     setFormError(null);
     try {
-      await registerTable({ ...cascade, layer: layer.trim() || null });
+      await registerTable({ ...cascade, layer: layer.trim() });
       setCascade(EMPTY_CASCADE);
       setLayer("");
       onChanged();
@@ -1711,8 +1854,9 @@ function LakehouseRegistryPanel({
       <p className="srse-page-description" style={{ maxWidth: "none", marginTop: 0 }}>
         Browse the live lakehouse and register the tables SRSE may use. Officers only ever see registered
         tables. Registering exposes all of the table&apos;s columns — hide individual ones below. Tag each
-        table with its layer (e.g. <code>SILVER</code> / <code>GOLD</code>) so the same table name in two
-        layers stays distinguishable.{" "}
+        table with its layer (<code>BRONZE</code>, <code>SILVER</code>, <code>GOLD</code>, or another
+        display tag) so the same table name in two layers stays distinguishable. Older registrations
+        without a tag remain reachable in Analysis under <strong>Untagged</strong>.{" "}
         <strong>Edit</strong> re-tags that layer; <strong>Delete</strong> withdraws the table from officers
         without touching anything in the lakehouse, and keeps its column settings in case you register it
         again.
@@ -1731,26 +1875,27 @@ function LakehouseRegistryPanel({
         />
         <div>
           <label htmlFor="register-layer" className="srse-text-muted" style={{ fontSize: "0.72rem", display: "block" }}>
-            Layer (optional)
+            Layer (required)
           </label>
-          <input
+          <select
             id="register-layer"
-            list="srse-layer-suggestions"
-            placeholder="SILVER / GOLD"
             value={layer}
             onChange={(e) => setLayer(e.target.value)}
-            className="srse-input"
+            className="srse-select"
             style={{ width: 140 }}
-          />
-          <datalist id="srse-layer-suggestions">
-            <option value="SILVER" />
-            <option value="GOLD" />
-          </datalist>
+          >
+            <option value="">— layer —</option>
+            {layerOptions.map((opt) => (
+              <option key={opt} value={opt}>
+                {opt}
+              </option>
+            ))}
+          </select>
         </div>
         <button
           type="button"
           className="srse-btn srse-btn-primary"
-          disabled={saving || !isCascadeComplete(cascade)}
+          disabled={saving || !isCascadeComplete(cascade) || !layer.trim()}
           onClick={onRegister}
         >
           {registerButtonLabel(saving, alreadyRegistered)}
@@ -1790,6 +1935,7 @@ function LakehouseRegistryPanel({
                   key={r.id}
                   registration={r}
                   curatedColumnCount={curatedByTable.get(r.qualifiedName) ?? 0}
+                  layerOptions={layerOptions}
                   onChanged={onChanged}
                   onError={setFormError}
                 />
@@ -1927,7 +2073,7 @@ export default function AdminPage() {
   }, [refreshKey]);
 
   useEffect(() => {
-    listColumnMetadata()
+    listColumnMetadata("admin")
       .then((m) => {
         setColumnMetadata(m);
         setMetadataError(null);

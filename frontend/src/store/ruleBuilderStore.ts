@@ -73,6 +73,8 @@ interface RuleBuilderState {
   removeNode: (path: NodePath) => void;
   moveNode: (path: NodePath, direction: "up" | "down") => void;
   reset: () => void;
+  /** Replace the whole tree (e.g. when loading a scheme's official template). */
+  loadRuleset: (root: GroupNode, name?: string) => void;
 }
 
 export const useRuleBuilder = create<RuleBuilderState>((set) => ({
@@ -153,4 +155,11 @@ export const useRuleBuilder = create<RuleBuilderState>((set) => ({
     }),
 
   reset: () => set({ name: "", schemeIds: [], root: emptyGroup() }),
+
+  loadRuleset: (root, name) =>
+    set((s) => ({
+      root,
+      ...(name !== undefined ? { name } : {}),
+      schemeIds: s.schemeIds,
+    })),
 }));

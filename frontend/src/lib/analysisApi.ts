@@ -11,32 +11,19 @@
 // layers. Officers pick through a four-level cascade that offers only what an
 // admin registered on the Admin page.
 
+import {
+  authorizedFetch as scopedAuthorizedFetch,
+  type AuthScope,
+} from "@/lib/authToken";
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 
-let cachedToken: Promise<string> | null = null;
-
-async function getAuthToken(): Promise<string> {
-  cachedToken ??= fetch(`${API_BASE}/api/auth/mock-login`, { method: "POST" })
-      .then(async (res) => {
-        if (!res.ok) {
-          throw new Error(`Mock login failed ${res.status}: ${await res.text()}`);
-        }
-        const body = (await res.json()) as { token: string };
-        return body.token;
-      })
-      .catch((err) => {
-        cachedToken = null;
-        throw err;
-      });
-  return cachedToken;
-}
-
-async function authorizedFetch(input: string, init: RequestInit = {}): Promise<Response> {
-  const token = await getAuthToken();
-  return fetch(input, {
-    ...init,
-    headers: { ...init.headers, Authorization: `Bearer ${token}` },
-  });
+async function authorizedFetch(
+  input: string,
+  init: RequestInit = {},
+  scope: AuthScope = "officer",
+): Promise<Response> {
+  return scopedAuthorizedFetch(scope, input, init);
 }
 
 export type ColumnInfo = { name: string; dataType: string };
@@ -112,12 +99,15 @@ export type DisplayColumn = TableRef & {
   column: string;
 };
 
+export type JoinType = "INNER" | "LEFT" | "RIGHT" | "FULL";
+
 export type RecordMatchRequest = {
   sourceCriteria: MatchCriterion[];
   targetCriteria: MatchCriterion[];
   sourceDisplayColumns?: DisplayColumn[];
   targetDisplayColumns?: DisplayColumn[];
   joinGroups?: MatchGroup[];
+  joinType?: JoinType;
   highlightDuplicates: boolean;
   dedup: DedupSpec | null;
   ageFilter: AgeFilterSpec | null;
@@ -176,23 +166,36 @@ async function analysisGet<T>(path: string): Promise<T> {
 
 const e = encodeURIComponent;
 
-// ---- officer-facing cascade: Catalog → Schema → Table → Column ----
-// Every level is answered from the admin's registry, NOT the live cluster —
-// an officer is only ever offered what an admin registered. (The one live
-// read is the column list of an already-registered table, server-side, so a
-// column added upstream appears without re-registration.)
+// ---- officer-facing cascade: Layer → Catalog → Schema → Table → Column ----
+// Layer is a registry filter only — never part of TableRef or match payloads.
+// Every level is answered from the admin's registry, NOT the live cluster.
 
-export function listAnalysisCatalogs(): Promise<string[]> {
-  return analysisGet<string[]>(`/api/analysis/lakehouse/catalogs`);
+function layerQuery(layer?: string): string {
+  if (!layer) return "";
+  return `?layer=${e(layer)}`;
 }
 
-export function listAnalysisSchemas(catalog: string): Promise<string[]> {
-  return analysisGet<string[]>(`/api/analysis/lakehouse/catalogs/${e(catalog)}/schemas`);
+export function listAnalysisLayers(): Promise<string[]> {
+  return analysisGet<string[]>(`/api/analysis/lakehouse/layers`);
 }
 
-export function listAnalysisTables(catalog: string, schema: string): Promise<RegisteredTable[]> {
+export function listAnalysisCatalogs(layer?: string): Promise<string[]> {
+  return analysisGet<string[]>(`/api/analysis/lakehouse/catalogs${layerQuery(layer)}`);
+}
+
+export function listAnalysisSchemas(catalog: string, layer?: string): Promise<string[]> {
+  return analysisGet<string[]>(
+    `/api/analysis/lakehouse/catalogs/${e(catalog)}/schemas${layerQuery(layer)}`,
+  );
+}
+
+export function listAnalysisTables(
+  catalog: string,
+  schema: string,
+  layer?: string,
+): Promise<RegisteredTable[]> {
   return analysisGet<RegisteredTable[]>(
-    `/api/analysis/lakehouse/catalogs/${e(catalog)}/schemas/${e(schema)}/tables`,
+    `/api/analysis/lakehouse/catalogs/${e(catalog)}/schemas/${e(schema)}/tables${layerQuery(layer)}`,
   );
 }
 
@@ -212,6 +215,20 @@ export function listAnalysisColumns(ref: TableRef): Promise<RegisteredColumn[]> 
  * silently truncated export. The cost is that the match query runs again —
  * which is why this is on an explicit download click, never automatic.
  */
+/** Plans the match and returns display SQL — same query {@link runRecordMatchStream} would run. */
+export async function fetchMatchSql(req: RecordMatchRequest): Promise<string> {
+  const res = await authorizedFetch(`${API_BASE}/api/analysis/match.sql`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
+  }
+  return res.text();
+}
+
 export async function downloadRecordMatchCsv(req: RecordMatchRequest): Promise<Blob> {
   const res = await authorizedFetch(`${API_BASE}/api/analysis/match.csv`, {
     method: "POST",
@@ -435,8 +452,8 @@ export type ColumnMetadata = TableRef & {
  */
 export type CompareAs = "AUTO" | "NUMBER" | "TEXT";
 
-export async function listColumnMetadata(): Promise<ColumnMetadata[]> {
-  const res = await authorizedFetch(`${API_BASE}/api/analysis/column-metadata`, { credentials: "include" });
+export async function listColumnMetadata(scope: AuthScope = "officer"): Promise<ColumnMetadata[]> {
+  const res = await authorizedFetch(`${API_BASE}/api/analysis/column-metadata`, { credentials: "include" }, scope);
   if (!res.ok) {
     throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
   }
@@ -454,7 +471,7 @@ export async function deleteColumnMetadata(ref: TableRef, column: string): Promi
   const res = await authorizedFetch(`${API_BASE}/api/analysis/column-metadata?${params}`, {
     method: "DELETE",
     credentials: "include",
-  });
+  }, "admin");
   if (!res.ok) {
     throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
   }
@@ -473,9 +490,38 @@ export async function upsertColumnMetadata(
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify({ ...ref, column, businessName, fuzzyMatchable, visible, compareAs }),
-  });
+  }, "admin");
   if (!res.ok) {
     throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
+}
+
+export type JoinKeySuggestion = {
+  sourceColumn: string;
+  targetColumn: string;
+  sourceType: string;
+  targetType: string;
+  reason: string;
+};
+
+export async function suggestJoinKeys(req: {
+  sourceCatalog: string;
+  sourceSchema: string;
+  sourceTable: string;
+  targetCatalog: string;
+  targetSchema: string;
+  targetTable: string;
+  probe?: boolean;
+}): Promise<JoinKeySuggestion[]> {
+  const res = await authorizedFetch(`${API_BASE}/api/analysis/suggest-keys`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ ...req, probe: req.probe ?? false }),
+  });
+  if (!res.ok) {
+    throw new Error(`Suggest keys failed ${res.status}: ${await res.text()}`);
   }
   return res.json();
 }

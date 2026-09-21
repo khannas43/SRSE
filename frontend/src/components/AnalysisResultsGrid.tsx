@@ -28,8 +28,15 @@ function prettify(columnId: string): string {
 }
 
 function csvEscape(value: unknown): string {
+  if (value === null || value === undefined) return "";
   const s = String(value);
   return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+}
+
+function displayCell(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
 function downloadCsv(rows: Row[], visibleIds: string[], labelFor: (id: string) => string) {
@@ -79,8 +86,12 @@ type AnalysisResultsGridProps = Readonly<{
   highlightDuplicates: boolean;
   dedupAvailable: boolean;
   dedupEnabled: boolean;
+  /** When set, dedup is disabled and this explains why (e.g. RIGHT/FULL join). */
+  dedupDisabledReason?: string;
   onDedupToggle: (enabled: boolean) => void;
   columnLabels?: Record<string, string>;
+  /** Shown near full-result CSV download (e.g. multi-target all-or-nothing export). */
+  fullCsvDownloadNote?: string;
 }>;
 
 function sortIndicator(sorted: false | "asc" | "desc"): string {
@@ -142,12 +153,14 @@ function TooManyRowsPanel({
   displayLimit,
   streaming,
   onDownloadFullCsv,
+  fullCsvDownloadNote,
 }: Readonly<{
   totalRows: number | null | undefined;
   totalRowsIsPartial: boolean | undefined;
   displayLimit: number | undefined;
   streaming: boolean;
   onDownloadFullCsv?: () => Promise<void>;
+  fullCsvDownloadNote?: string;
 }>) {
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -208,6 +221,11 @@ function TooManyRowsPanel({
         )}
         {error && <span className="srse-text-danger">{error}</span>}
       </div>
+      {fullCsvDownloadNote && (
+        <p className="srse-text-muted" style={{ fontSize: "0.78rem", marginTop: "0.75rem", marginBottom: 0 }}>
+          {fullCsvDownloadNote}
+        </p>
+      )}
     </div>
   );
 }
@@ -225,8 +243,10 @@ export function AnalysisResultsGrid({
   highlightDuplicates,
   dedupAvailable,
   dedupEnabled,
+  dedupDisabledReason,
   onDedupToggle,
   columnLabels,
+  fullCsvDownloadNote,
 }: AnalysisResultsGridProps) {
   const labelFor = (id: string) => columnLabels?.[id] ?? prettify(id);
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -246,9 +266,11 @@ export function AnalysisResultsGrid({
         columnHelper.accessor((row) => row[id], {
           id,
           header: labelFor(id),
+          cell: (info) => displayCell(info.getValue()),
           filterFn: (row, columnId, filterValue) => {
             if (!filterValue) return true;
-            return String(row.getValue(columnId))
+            const cell = row.getValue(columnId);
+            return displayCell(cell)
               .toLowerCase()
               .includes(String(filterValue).toLowerCase());
           },
@@ -308,11 +330,19 @@ export function AnalysisResultsGrid({
         {rows.length > 0 && !tooManyToDisplay && (
           <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
             {dedupAvailable && (
-              <label className="srse-checkbox-label" htmlFor="hide-duplicate-records" title="Hides older duplicate rows, keeping the latest by last-updated date">
+              <label
+                className="srse-checkbox-label"
+                htmlFor="hide-duplicate-records"
+                title={
+                  dedupDisabledReason
+                  ?? "Hides older duplicate rows, keeping the latest by last-updated date"
+                }
+              >
                 <input
                   id="hide-duplicate-records"
                   type="checkbox"
-                  checked={dedupEnabled}
+                  checked={dedupEnabled && !dedupDisabledReason}
+                  disabled={Boolean(dedupDisabledReason) || streaming}
                   onChange={(e) => onDedupToggle(e.target.checked)}
                 />
                 {" "}
@@ -347,6 +377,7 @@ export function AnalysisResultsGrid({
           displayLimit={displayLimit}
           streaming={!!streaming}
           onDownloadFullCsv={onDownloadFullCsv}
+          fullCsvDownloadNote={fullCsvDownloadNote}
         />
       )}
 

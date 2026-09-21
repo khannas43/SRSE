@@ -3,11 +3,15 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
+  cohortSample,
   createScheme,
+  fetchDecisionLimits,
+  fetchSchemeTemplate,
   listFields,
   listSchemes,
   previewRuleset,
   saveScenario,
+  type CohortResponse,
   type FieldCatalogEntry,
   type PredicateNode,
   type PreviewResponse,
@@ -42,6 +46,13 @@ const DROPDOWN_ALL_LABEL: Record<string, string> = {
 
 /** Mutually-exclusive categorical fields rendered as radio buttons (single value, EQ) instead of a checkbox list (IN). */
 const RADIO_FIELD_KEYS = new Set(["tsp_classification"]);
+
+const BASE_SAMPLE_SIZES = [25, 50, 100] as const;
+
+function sampleSizeOptions(defaultSize: number, cohortCap: number): number[] {
+  const sizes = new Set<number>([...BASE_SAMPLE_SIZES, defaultSize]);
+  return [...sizes].filter((n) => n <= cohortCap).sort((a, b) => a - b);
+}
 
 const INCOME_BY_FY_GROUP = "Income by Financial Year";
 
@@ -637,7 +648,8 @@ function RulesPageInner() {
   const searchParams = useSearchParams();
   const preselectScheme = searchParams.get("scheme");
 
-  const { name, schemeIds, root, setName, setSchemeIds, reset } = useRuleBuilder();
+  const { name, schemeIds, root, setName, setSchemeIds, reset, loadRuleset } = useRuleBuilder();
+  const [templateSchemeName, setTemplateSchemeName] = useState<string | null>(null);
   const [targetPath, setTargetPath] = useState<NodePath>([]);
   const [ruleCollapsed, setRuleCollapsed] = useState(true);
 
@@ -652,6 +664,10 @@ function RulesPageInner() {
   const [previewStatus, setPreviewStatus] = useState<"idle" | "loading" | "ok" | "error">("idle");
   const [previewData, setPreviewData] = useState<PreviewResponse | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [sampleSize, setSampleSize] = useState(50);
+  const [sampleChoices, setSampleChoices] = useState<number[]>([25, 50, 100]);
+  const [cohortSampleData, setCohortSampleData] = useState<CohortResponse | null>(null);
+  const [cohortSampleError, setCohortSampleError] = useState<string | null>(null);
 
   const [saveStatus, setSaveStatus] = useState<"idle" | "loading" | "ok" | "error">("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -664,6 +680,14 @@ function RulesPageInner() {
     listSchemes()
       .then(setSchemes)
       .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
+    fetchDecisionLimits()
+      .then((limits) => {
+        setSampleSize(limits.previewSampleSize);
+        setSampleChoices(sampleSizeOptions(limits.previewSampleSize, limits.cohortCap));
+      })
+      .catch(() => {
+        setSampleChoices(sampleSizeOptions(50, 1000));
+      });
   }, []);
 
   useEffect(() => {
@@ -675,16 +699,59 @@ function RulesPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preselectScheme, schemes]);
 
+  async function loadTemplateForScheme(schemeId: number, schemeName: string) {
+    const hasEdits = countPredicates(root) > 0 || name.trim().length > 0;
+    if (hasEdits) {
+      const ok = globalThis.confirm(
+        "Replace the current rules with this scheme's official criteria? Unsaved edits will be lost.",
+      );
+      if (!ok) return;
+    }
+    try {
+      const spec = await fetchSchemeTemplate(schemeId);
+      if (!spec?.root || spec.root.type !== "GROUP") {
+        setTemplateSchemeName(null);
+        return;
+      }
+      loadRuleset(spec.root, `${schemeName} — from official criteria`);
+      setTemplateSchemeName(schemeName);
+      setRuleCollapsed(false);
+    } catch (err: unknown) {
+      setLoadError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function onPreview() {
     setPreviewStatus("loading");
     setPreviewError(null);
-    try {
-      const result = await previewRuleset({ ruleset: { root }, includeBreakdown: true });
-      setPreviewData(result);
+    setCohortSampleData(null);
+    setCohortSampleError(null);
+
+    const previewReq = { ruleset: { root }, includeBreakdown: true };
+    const cohortReq = { ruleset: { root }, limit: sampleSize };
+
+    const [previewResult, cohortResult] = await Promise.allSettled([
+      previewRuleset(previewReq),
+      cohortSample(cohortReq),
+    ]);
+
+    if (previewResult.status === "fulfilled") {
+      setPreviewData(previewResult.value);
       setPreviewStatus("ok");
-    } catch (err: unknown) {
+    } else {
+      const err = previewResult.reason;
       setPreviewError(err instanceof Error ? err.message : String(err));
       setPreviewStatus("error");
+      setPreviewData(null);
+    }
+
+    if (cohortResult.status === "fulfilled") {
+      setCohortSampleData(cohortResult.value);
+      setCohortSampleError(null);
+    } else {
+      const err = cohortResult.reason;
+      setCohortSampleError(err instanceof Error ? err.message : String(err));
+      setCohortSampleData(null);
     }
   }
 
@@ -700,6 +767,8 @@ function RulesPageInner() {
       });
       setSavedScenarioId(result.scenarioId);
       setPreviewData({ totalCount: result.totalCount, breakdown: result.breakdown });
+      setCohortSampleData(null);
+      setCohortSampleError(null);
       setSaveStatus("ok");
     } catch (err: unknown) {
       setSaveError(err instanceof Error ? err.message : String(err));
@@ -739,7 +808,20 @@ function RulesPageInner() {
           <MultiSelectDropdown
             options={schemes.map((scheme) => ({ value: String(scheme.id), label: `${scheme.name} (${scheme.code})` }))}
             selected={schemeIds.map(String)}
-            onChange={(next) => setSchemeIds(next.map(Number))}
+            onChange={(next) => {
+              const nums = next.map(Number);
+              const added = nums.find((id) => !schemeIds.includes(id));
+              setSchemeIds(nums);
+              if (added != null) {
+                const scheme = schemes.find((s) => s.id === added);
+                if (scheme) {
+                  void loadTemplateForScheme(added, scheme.name);
+                }
+              }
+              if (nums.length === 0) {
+                setTemplateSchemeName(null);
+              }
+            }}
             allLabel="No scheme selected"
             width="100%"
           />
@@ -807,6 +889,24 @@ function RulesPageInner() {
             <>
               <RuleGroupEditor node={root} path={[]} fields={fields} targetPath={targetPath} onSetTarget={setTargetPath} />
 
+              {templateSchemeName && (
+                <div
+                  className="srse-text-muted"
+                  style={{
+                    marginTop: "0.75rem",
+                    padding: "0.65rem 0.75rem",
+                    border: "1px solid var(--srse-border)",
+                    borderRadius: 6,
+                    lineHeight: 1.5,
+                    fontSize: "0.85rem",
+                  }}
+                >
+                  Loaded from <strong style={{ color: "var(--srse-text)" }}>{templateSchemeName}</strong>
+                  &apos;s official criteria. Your changes will be saved as a <strong>new scenario</strong>, not as the
+                  scheme&apos;s official criteria.
+                </div>
+              )}
+
               <div style={{ marginTop: "1rem", paddingTop: "1rem", borderTop: "1px solid var(--srse-border)" }}>
                 <label htmlFor="ruleset-name" style={{ display: "block", marginBottom: "0.75rem" }}>
                   <span style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.35rem", color: "var(--srse-text-muted)" }}>
@@ -821,7 +921,24 @@ function RulesPageInner() {
                     style={{ width: "100%" }}
                   />
                 </label>
-                <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", alignItems: "center" }}>
+                  <label htmlFor="preview-sample-size" className="srse-text-muted" style={{ fontSize: "0.85rem" }}>
+                    Sample size
+                    <select
+                      id="preview-sample-size"
+                      className="srse-select"
+                      style={{ marginLeft: "0.4rem" }}
+                      value={sampleSize}
+                      disabled={previewStatus === "loading"}
+                      onChange={(e) => setSampleSize(Number(e.target.value))}
+                    >
+                      {sampleChoices.map((n) => (
+                        <option key={n} value={n}>
+                          {n}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <button type="button" className="srse-btn" disabled={previewStatus === "loading"} onClick={onPreview}>
                     {previewStatus === "loading" ? "Previewing…" : "Preview"}
                   </button>
@@ -832,7 +949,7 @@ function RulesPageInner() {
                     onClick={onSave}
                     title={schemeIds.length === 0 ? "Select at least one scheme first" : undefined}
                   >
-                    {saveStatus === "loading" ? "Saving…" : "Save & tag"}
+                    {saveStatus === "loading" ? "Saving…" : "Save as new scenario"}
                   </button>
                   <button type="button" className="srse-btn srse-btn-ghost" onClick={reset}>
                     Reset
@@ -855,6 +972,8 @@ function RulesPageInner() {
             totalCount={previewData.totalCount}
             breakdown={previewData.breakdown}
             caption="Eligible beneficiaries"
+            cohortSample={cohortSampleData}
+            cohortSampleError={cohortSampleError}
           />
         </div>
       )}

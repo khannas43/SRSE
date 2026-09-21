@@ -1,4 +1,8 @@
 import type { CompareAs } from "@/lib/analysisApi";
+import {
+  authorizedFetch as scopedAuthorizedFetch,
+  type AuthScope,
+} from "@/lib/authToken";
 
 // Typed client for the SRSE decision-service seam (design doc §8.1 / CLAUDE.md #6).
 // Full-ruleset preview/save model — caller sends the complete PredicateSpec on every call.
@@ -7,34 +11,12 @@ import type { CompareAs } from "@/lib/analysisApi";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8080";
 
-// /api/decision/**, /api/schemes/** and /api/metadata/** now require a
-// STATE_OFFICER-scoped bearer token (backend SecurityConfig). RajSewadwar SSO
-// isn't wired up yet, so this fetches a mock token once per page load and
-// caches it — see MockJwtIssuer on the backend.
-let cachedToken: Promise<string> | null = null;
-
-async function getAuthToken(): Promise<string> {
-  cachedToken ??= fetch(`${API_BASE}/api/auth/mock-login`, { method: "POST" })
-      .then(async (res) => {
-        if (!res.ok) {
-          throw new Error(`Mock login failed ${res.status}: ${await res.text()}`);
-        }
-        const body = (await res.json()) as { token: string };
-        return body.token;
-      })
-      .catch((err) => {
-        cachedToken = null; // let the next call retry instead of caching the failure
-        throw err;
-      });
-  return cachedToken;
-}
-
-async function authorizedFetch(input: string, init: RequestInit = {}): Promise<Response> {
-  const token = await getAuthToken();
-  return fetch(input, {
-    ...init,
-    headers: { ...init.headers, Authorization: `Bearer ${token}` },
-  });
+async function authorizedFetch(
+  input: string,
+  init: RequestInit = {},
+  scope: AuthScope = "officer",
+): Promise<Response> {
+  return scopedAuthorizedFetch(scope, input, init);
 }
 
 export type Operator =
@@ -121,6 +103,7 @@ export type ConnectionPlaneInfo = {
 
 export type ConnectionsInfo = {
   dataMode: string;
+  environmentLabel: string;
   operational: ConnectionPlaneInfo;
   analytical: ConnectionPlaneInfo;
 };
@@ -166,6 +149,22 @@ export type PreviewResponse = {
   breakdown: BreakdownRow[];
 };
 
+export type CohortRequest = {
+  ruleset: PredicateSpec;
+  limit: number;
+};
+
+export type CohortResponse = {
+  rows: Record<string, unknown>[];
+  appliedLimit: number;
+  capped: boolean;
+};
+
+export type DecisionLimits = {
+  previewSampleSize: number;
+  cohortCap: number;
+};
+
 export type SaveScenarioRequest = {
   name: string;
   schemeIds: number[];
@@ -203,6 +202,28 @@ export type CompareResponse = {
   totalCountDelta: number;
   breakdownDeltas: BreakdownDelta[];
 };
+
+export function fetchDecisionLimits(): Promise<DecisionLimits> {
+  return authorizedFetch(`${API_BASE}/api/decision/limits`, { credentials: "include" }).then(async (res) => {
+    if (!res.ok) {
+      throw new Error(`Decision service error ${res.status}: ${await res.text()}`);
+    }
+    return res.json() as Promise<DecisionLimits>;
+  });
+}
+
+export async function cohortSample(req: CohortRequest): Promise<CohortResponse> {
+  const res = await authorizedFetch(`${API_BASE}/api/decision/cohort`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    throw new Error(`Decision service error ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
+}
 
 export async function previewRuleset(req: PreviewRequest): Promise<PreviewResponse> {
   const res = await authorizedFetch(`${API_BASE}/api/decision/preview`, {
@@ -287,8 +308,36 @@ export async function createScheme(req: {
   return res.json();
 }
 
-export async function listFields(): Promise<FieldCatalogEntry[]> {
-  const res = await authorizedFetch(`${API_BASE}/api/metadata/fields`, { credentials: "include" });
+export async function fetchSchemeTemplate(
+  schemeId: number,
+): Promise<PredicateSpec | null> {
+  const res = await authorizedFetch(`${API_BASE}/api/schemes/${schemeId}/template`, {
+    credentials: "include",
+  });
+  if (res.status === 204) {
+    return null;
+  }
+  if (!res.ok) {
+    throw new Error(`Scheme template error ${res.status}: ${await res.text()}`);
+  }
+  const body = (await res.json()) as { ruleset: PredicateSpec };
+  return body.ruleset;
+}
+
+export async function setSchemeTemplate(schemeId: number, scenarioId: number): Promise<void> {
+  const res = await authorizedFetch(`${API_BASE}/api/schemes/${schemeId}/template`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ scenarioId }),
+  }, "admin");
+  if (!res.ok) {
+    throw new Error(`Set scheme template error ${res.status}: ${await res.text()}`);
+  }
+}
+
+export async function listFields(scope: AuthScope = "officer"): Promise<FieldCatalogEntry[]> {
+  const res = await authorizedFetch(`${API_BASE}/api/metadata/fields`, { credentials: "include" }, scope);
   if (!res.ok) {
     throw new Error(`Metadata service error ${res.status}: ${await res.text()}`);
   }
@@ -301,7 +350,7 @@ export async function createField(req: FieldCatalogRequest): Promise<FieldCatalo
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(req),
-  });
+  }, "admin");
   if (!res.ok) {
     throw new Error(`Metadata service error ${res.status}: ${await res.text()}`);
   }
@@ -317,7 +366,7 @@ export async function updateField(
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(req),
-  });
+  }, "admin");
   if (!res.ok) {
     throw new Error(`Metadata service error ${res.status}: ${await res.text()}`);
   }
@@ -334,14 +383,14 @@ export async function deleteField(fieldKey: string): Promise<void> {
   const res = await authorizedFetch(`${API_BASE}/api/metadata/fields/${encodeURIComponent(fieldKey)}`, {
     method: "DELETE",
     credentials: "include",
-  });
+  }, "admin");
   if (!res.ok) {
     throw new Error(`Metadata service error ${res.status}: ${await res.text()}`);
   }
 }
 
 export async function getConnections(): Promise<ConnectionsInfo> {
-  const res = await authorizedFetch(`${API_BASE}/api/admin/connections`, { credentials: "include" });
+  const res = await authorizedFetch(`${API_BASE}/api/admin/connections`, { credentials: "include" }, "admin");
   if (!res.ok) {
     throw new Error(`Admin service error ${res.status}: ${await res.text()}`);
   }
@@ -357,7 +406,7 @@ async function updateConnection(
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(req),
-  });
+  }, "admin");
   if (!res.ok) {
     throw new Error(`Connection update error ${res.status}: ${await res.text()}`);
   }
@@ -372,10 +421,11 @@ export function updateOperationalConnection(req: UpdateConnectionRequest): Promi
   return updateConnection("operational", req);
 }
 
-export async function listMappings(dataMode: DataMode): Promise<MappingRow[]> {
+export async function listMappings(dataMode: DataMode, scope: AuthScope = "officer"): Promise<MappingRow[]> {
   const res = await authorizedFetch(
     `${API_BASE}/api/metadata/mappings?dataMode=${encodeURIComponent(dataMode)}`,
     { credentials: "include" },
+    scope,
   );
   if (!res.ok) {
     throw new Error(`Metadata service error ${res.status}: ${await res.text()}`);
@@ -396,6 +446,7 @@ export async function upsertMapping(
       credentials: "include",
       body: JSON.stringify({ physicalExpression }),
     },
+    "admin",
   );
   if (!res.ok) {
     throw new Error(`Metadata service error ${res.status}: ${await res.text()}`);
@@ -431,6 +482,7 @@ export async function deleteMapping(fieldKey: string, dataMode: DataMode): Promi
   const res = await authorizedFetch(
     `${API_BASE}/api/metadata/mappings/${encodeURIComponent(fieldKey)}?dataMode=${encodeURIComponent(dataMode)}`,
     { method: "DELETE", credentials: "include" },
+    "admin",
   );
   if (!res.ok) {
     throw new Error(`Metadata service error ${res.status}: ${await res.text()}`);
@@ -448,7 +500,7 @@ export type TableRegistration = {
 };
 
 async function adminGet<T>(path: string): Promise<T> {
-  const res = await authorizedFetch(`${API_BASE}${path}`, { credentials: "include" });
+  const res = await authorizedFetch(`${API_BASE}${path}`, { credentials: "include" }, "admin");
   if (!res.ok) {
     throw new Error(`Admin service error ${res.status}: ${await res.text()}`);
   }
@@ -486,6 +538,10 @@ export function listRegistrations(): Promise<TableRegistration[]> {
   return adminGet<TableRegistration[]>(`/api/admin/lakehouse/registrations`);
 }
 
+export function listLakehouseLayers(): Promise<string[]> {
+  return adminGet<string[]>(`/api/admin/lakehouse/layers`);
+}
+
 /**
  * Registers a table (or re-tags an already-registered one). Registering
  * exposes ALL of the table's live columns to officers — individual columns
@@ -495,14 +551,14 @@ export async function registerTable(req: {
   catalog: string;
   schema: string;
   table: string;
-  layer: string | null;
+  layer: string;
 }): Promise<TableRegistration> {
   const res = await authorizedFetch(`${API_BASE}/api/admin/lakehouse/registrations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(req),
-  });
+  }, "admin");
   if (!res.ok) {
     throw new Error(`Admin service error ${res.status}: ${await res.text()}`);
   }
@@ -515,16 +571,13 @@ export async function registerTable(req: {
  * and everything downstream refers to a table by that address, so retargeting
  * is unregister + register (see LakehouseRegistryService.updateLayer).
  */
-export async function updateTableRegistration(
-  id: number,
-  layer: string | null,
-): Promise<TableRegistration> {
+export async function updateTableRegistration(id: number, layer: string): Promise<TableRegistration> {
   const res = await authorizedFetch(`${API_BASE}/api/admin/lakehouse/registrations/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify({ layer }),
-  });
+  }, "admin");
   if (!res.ok) {
     throw new Error(`Admin service error ${res.status}: ${await res.text()}`);
   }
@@ -535,7 +588,7 @@ export async function unregisterTable(id: number): Promise<void> {
   const res = await authorizedFetch(`${API_BASE}/api/admin/lakehouse/registrations/${id}`, {
     method: "DELETE",
     credentials: "include",
-  });
+  }, "admin");
   if (!res.ok) {
     throw new Error(`Admin service error ${res.status}: ${await res.text()}`);
   }
@@ -602,7 +655,7 @@ export type AdminConfigImportResult = {
 export async function exportAdminConfig(): Promise<AdminConfigBundle> {
   const res = await authorizedFetch(`${API_BASE}/api/admin/config/export`, {
     credentials: "include",
-  });
+  }, "admin");
   if (!res.ok) {
     throw new Error(`Admin config export failed ${res.status}: ${await res.text()}`);
   }
@@ -623,6 +676,7 @@ export async function importAdminConfig(
       credentials: "include",
       body: JSON.stringify(bundle),
     },
+    "admin",
   );
   if (!res.ok) {
     throw new Error(`Admin config import failed ${res.status}: ${await res.text()}`);

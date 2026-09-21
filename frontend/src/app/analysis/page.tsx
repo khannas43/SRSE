@@ -5,7 +5,9 @@ import {
   downloadMultiTargetMatchCsv,
   downloadRecordMatchCsv,
   fetchAnalysisLimits,
+  fetchMatchSql,
   listAnalysisCatalogs,
+  listAnalysisLayers,
   listAnalysisColumns,
   listAnalysisSchemas,
   listAnalysisTables,
@@ -13,13 +15,15 @@ import {
   qualifiedTableName,
   runMultiTargetMatchStream,
   runRecordMatchStream,
+  suggestJoinKeys,
   type AgeUnit,
+  type JoinKeySuggestion,
   type ColumnMetadata,
   type GroupMode,
   type MatchCriterion,
-  type MatchGroup,
   type CompareAs,
   type HubSide,
+  type JoinType,
   type MatchProgressEvent,
   type MultiTargetRecordMatchRequest,
   type RecordMatchRequest,
@@ -27,6 +31,23 @@ import {
   type TableRef,
 } from "@/lib/analysisApi";
 import { AnalysisResultsGrid } from "@/components/AnalysisResultsGrid";
+import { MultiTargetJoinCanvas, createInitialJoinCanvas } from "@/components/MultiTargetJoinCanvas";
+import {
+  buildMatchGroup,
+  isCriterionRowFilled,
+  isDisplayRowFilled,
+  isNameColumn,
+  pairIsFuzzy,
+  rowColumns,
+  rowFolds,
+} from "@/lib/analysisCriterionModel";
+import {
+  joinCanvasFromForm,
+  buildMultiTargetRequestFromCanvas,
+  canvasTargetNodes,
+} from "@/lib/joinCanvasModel";
+import { buildMultiTargetRecordMatchRequest } from "@/lib/multiTargetMatchBuild";
+import { initTargetProgress, mergeTargetProgress, phaseLabel } from "@/lib/multiTargetProgress";
 import LakehouseCascade, {
   EMPTY_CASCADE,
   isCascadeComplete,
@@ -42,7 +63,15 @@ const fieldLabelStyle = { display: "block", marginBottom: "0.3rem", fontSize: "0
  * Admin page passes live-browse fetchers to this same component; see
  * LakehouseCascade's javadoc.)
  */
+const JOIN_TYPE_OPTIONS: { value: JoinType; label: string; hint: string }[] = [
+  { value: "INNER", label: "Only matching records", hint: "INNER" },
+  { value: "LEFT", label: "All source records", hint: "LEFT" },
+  { value: "RIGHT", label: "All target records", hint: "RIGHT" },
+  { value: "FULL", label: "All records from both", hint: "FULL" },
+];
+
 const REGISTRY_FETCHERS: CascadeFetchers = {
+  listLayers: listAnalysisLayers,
   listCatalogs: listAnalysisCatalogs,
   listSchemas: listAnalysisSchemas,
   listTables: listAnalysisTables,
@@ -88,20 +117,6 @@ function createEmptyRow(): CriterionRow {
   };
 }
 
-/** Every column this row contributes to its side of the group, in officer order. */
-function rowColumns(row: CriterionRow): string[] {
-  return [row.column, ...row.extraColumns].filter(Boolean);
-}
-
-function rowFolds(row: CriterionRow): boolean {
-  return rowColumns(row).length > 1;
-}
-
-/** The criteria one side of a group sends, with the threshold on the group instead. */
-function rowCriteria(row: CriterionRow): MatchCriterion[] {
-  return rowColumns(row).map((column) => ({ ...row.ref, column, fuzzyThresholdPercent: null }));
-}
-
 function createEmptyDisplayRow(defaultRef: CascadeValue): DisplayRow {
   return {
     id: crypto.randomUUID(),
@@ -131,65 +146,8 @@ function metadataKey(ref: TableRef, column: string): string {
   return `${qualifiedTableName(ref)}.${column}`;
 }
 
-/** A row is usable only once all four levels are picked. */
 function isRowFilled(row: CriterionRow): boolean {
-  return isCascadeComplete(row.ref) && Boolean(row.column);
-}
-
-/**
- * Whether a whole pair is fuzzy — MUST mirror RecordMatchService.isGroupFuzzy,
- * or the officer sees a Fuzzy % the backend ignores (or the reverse). Every
- * column on both sides counts, not just the first of each.
- *
- * Registered columns decide as a bloc and an unregistered column beside a
- * registered one gets no vote, so the name guess can never overturn an
- * explicit Admin setting. When registrations disagree within a group, fuzzy
- * wins: a group wrongly forced exact returns almost nothing and reads as "no
- * overlap", while one wrongly made fuzzy returns extra rows the officer can
- * see scored and tune away with the threshold.
- */
-function pairIsFuzzy(
-  source: CriterionRow,
-  target: CriterionRow | undefined,
-  registeredFuzzyFor: (ref: TableRef, column: string) => boolean | null,
-): boolean {
-  const sides: Array<[CascadeValue, string]> = rowColumns(source).map((c) => [source.ref, c]);
-  if (target) {
-    sides.push(...rowColumns(target).map((c) => [target.ref, c] as [CascadeValue, string]));
-  }
-  let anyRegistered = false;
-  for (const [ref, column] of sides) {
-    const registered = registeredFuzzyFor(ref, column);
-    if (registered !== null) {
-      anyRegistered = true;
-      if (registered) return true;
-    }
-  }
-  if (anyRegistered) return false;
-  return sides.some(([, column]) => isNameColumn(column));
-}
-
-/**
- * The group a source row and its paired target row describe. Returns null when
- * neither side folds anything — the caller then sends the legacy criteria
- * pair, so a request that does not use groups looks exactly as it always did.
- */
-function buildGroup(
-  source: CriterionRow,
-  target: CriterionRow,
-  fuzzy: boolean,
-): MatchGroup {
-  return {
-    source: rowCriteria(source),
-    target: rowCriteria(target),
-    mode: source.mode,
-    fuzzyThresholdPercent: fuzzy ? source.fuzzyThresholdPercent : null,
-    separator: source.mode === "COMBINE" ? source.separator : null,
-  };
-}
-
-function isNameColumn(column: string): boolean {
-  return column.toLowerCase().includes("name");
+  return isCriterionRowFilled(row);
 }
 
 // Same auto-detect-by-name-substring pattern as fuzzy-on-"*name*" — no manual
@@ -665,8 +623,28 @@ export default function AnalysisPage() {
   const [maxTargetSets, setMaxTargetSets] = useState(5);
   const [targetSetFilter, setTargetSetFilter] = useState<string>("All");
   const [matchProgress, setMatchProgress] = useState<MatchProgressEvent[]>([]);
+  const [multiUiMode, setMultiUiMode] = useState<"form" | "canvas">("form");
+  const [joinCanvas, setJoinCanvas] = useState(createInitialJoinCanvas);
+  const [targetRunStatus, setTargetRunStatus] = useState<ReturnType<typeof initTargetProgress>>([]);
+
+  const [joinType, setJoinType] = useState<JoinType>("INNER");
+  const [keySuggestions, setKeySuggestions] = useState<JoinKeySuggestion[]>([]);
+  const [keySuggestLoading, setKeySuggestLoading] = useState(false);
+  const [keySuggestError, setKeySuggestError] = useState<string | null>(null);
+  const [sqlPreview, setSqlPreview] = useState<string | null>(null);
+  const [sqlPreviewError, setSqlPreviewError] = useState<string | null>(null);
+  const [sqlPreviewLoading, setSqlPreviewLoading] = useState(false);
 
   const [dedupEnabled, setDedupEnabled] = useState(false);
+  const dedupBlockedByJoin =
+    !multiMatchMode && (joinType === "RIGHT" || joinType === "FULL");
+
+  useEffect(() => {
+    if (dedupBlockedByJoin) {
+      setDedupEnabled(false);
+    }
+  }, [dedupBlockedByJoin]);
+
   const dedupColumn = detectLastUpdatedColumn(
     (multiMatchMode ? sourceRows[0] : targetRows[0])?.columns ?? [],
   );
@@ -772,6 +750,57 @@ export default function AnalysisPage() {
     setRows((rows) => updateRowById(rows, rowId, { column }));
   }
 
+  const twoTableRefsReady =
+    !multiMatchMode
+    && isCascadeComplete(sourceRows[0]?.ref ?? EMPTY_CASCADE)
+    && isCascadeComplete(targetRows[0]?.ref ?? EMPTY_CASCADE);
+
+  async function loadKeySuggestions(probe: boolean) {
+    const src = sourceRows[0].ref;
+    const tgt = targetRows[0].ref;
+    if (!isCascadeComplete(src) || !isCascadeComplete(tgt)) return;
+    setKeySuggestLoading(true);
+    setKeySuggestError(null);
+    try {
+      const list = await suggestJoinKeys({
+        sourceCatalog: src.catalog,
+        sourceSchema: src.schema,
+        sourceTable: src.table,
+        targetCatalog: tgt.catalog,
+        targetSchema: tgt.schema,
+        targetTable: tgt.table,
+        probe,
+      });
+      setKeySuggestions(list);
+    } catch (err: unknown) {
+      setKeySuggestError(err instanceof Error ? err.message : String(err));
+      setKeySuggestions([]);
+    } finally {
+      setKeySuggestLoading(false);
+    }
+  }
+
+  async function applyKeySuggestion(s: JoinKeySuggestion) {
+    const srcRef = sourceRows[0].ref;
+    const tgtRef = targetRows[0].ref;
+    const srcRowId = sourceRows[0].id;
+    const tgtRowId = targetRows[0].id;
+    try {
+      const [srcCols, tgtCols] = await Promise.all([
+        listAnalysisColumns(srcRef),
+        listAnalysisColumns(tgtRef),
+      ]);
+      setSourceRows((rows) =>
+        updateRowById(rows, srcRowId, { columns: srcCols, column: s.sourceColumn }),
+      );
+      setTargetRows((rows) =>
+        updateRowById(rows, tgtRowId, { columns: tgtCols, column: s.targetColumn }),
+      );
+    } catch (err: unknown) {
+      setLoadError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   function handleFuzzyChange(
     setRows: React.Dispatch<React.SetStateAction<CriterionRow[]>>,
     rowId: string,
@@ -811,10 +840,6 @@ export default function AnalysisPage() {
   function defaultSideRef(sideRows: CriterionRow[]): CascadeValue {
     const filled = sideRows.find(isRowFilled);
     return filled?.ref ?? sideRows[0]?.ref ?? EMPTY_CASCADE;
-  }
-
-  function isDisplayRowFilled(row: DisplayRow): boolean {
-    return isCascadeComplete(row.ref) && Boolean(row.column);
   }
 
   async function handleDisplayTableChange(
@@ -873,72 +898,46 @@ export default function AnalysisPage() {
     }
     if (usesGroups) {
       req.joinGroups = pairs.map(({ source, target }) =>
-        buildGroup(source, target, pairIsFuzzy(source, target, registeredFuzzyFor)),
+        buildMatchGroup(source, target, pairIsFuzzy(source, target, registeredFuzzyFor)),
       );
+    }
+    if (joinType !== "INNER") {
+      req.joinType = joinType;
     }
     return req;
   }
 
-  function buildMultiRequest(withDedup: boolean): MultiTargetRecordMatchRequest | null {
-    const filledHub = sourceRows.filter(isRowFilled);
-    if (filledHub.length === 0) return null;
-
-    const targets: MultiTargetRecordMatchRequest["targets"] = [];
-    for (const block of targetBlocks) {
-      const label = block.label.trim();
-      if (!label) return null;
-      const filledJoin = block.joinRows.filter(isRowFilled);
-      const n = Math.min(filledHub.length, filledJoin.length);
-      if (n === 0) continue;
-      const tableRef = filledJoin[0].ref;
-      if (!isCascadeComplete(tableRef)) return null;
-      const filledDisplay = block.displayRows.filter(isDisplayRowFilled);
-      const pairs = filledJoin.slice(0, n).map((r, i) => ({ source: filledHub[i], target: r }));
-      const usesGroups = pairs.some(({ source, target }) => rowFolds(source) || rowFolds(target));
-      targets.push({
-        label,
-        ...tableRef,
-        joinCriteria: pairs.map(({ source, target }) => ({
-          ...target.ref,
-          column: target.column,
-          fuzzyThresholdPercent: pairIsFuzzy(source, target, registeredFuzzyFor)
-            ? source.fuzzyThresholdPercent
-            : null,
-        })),
-        displayColumns:
-          filledDisplay.length > 0
-            ? filledDisplay.map((r) => ({ ...r.ref, column: r.column }))
-            : undefined,
-        joinGroups: usesGroups
-          ? pairs.map(({ source, target }) =>
-              buildGroup(source, target, pairIsFuzzy(source, target, registeredFuzzyFor)),
-            )
-          : undefined,
-      });
-    }
-    if (targets.length === 0) return null;
-
-    const hubRef = filledHub[0].ref;
-    const filledHubDisplay = sourceDisplayRows.filter(isDisplayRowFilled);
-    const req: MultiTargetRecordMatchRequest = {
-      hubCriteria: filledHub.map((r) => ({
-        ...r.ref,
-        column: r.column,
-        fuzzyThresholdPercent: isFuzzyMatchable(r.ref, r.column) ? r.fuzzyThresholdPercent : null,
-      })),
-      hubSide,
-      targets,
+  function multiBuildExtras(withDedup: boolean) {
+    const hubRef = sourceRows.find(isRowFilled)?.ref;
+    return {
       highlightDuplicates,
       dedup:
-        withDedup && dedupColumn && isCascadeComplete(hubRef)
+        withDedup && dedupColumn && hubRef && isCascadeComplete(hubRef)
           ? { ...hubRef, column: dedupColumn }
           : null,
       ageFilter: ageFilterEnabled ? { minAge, maxAge, unit: ageUnit } : null,
+      registeredFuzzyFor,
+      isFuzzyMatchable,
+      maxTargetSets,
     };
-    if (filledHubDisplay.length > 0) {
-      req.hubDisplayColumns = filledHubDisplay.map((r) => ({ ...r.ref, column: r.column }));
-    }
-    return req;
+  }
+
+  function buildMultiRequest(withDedup: boolean): MultiTargetRecordMatchRequest | null {
+    return buildMultiTargetRecordMatchRequest({
+      hubRows: sourceRows,
+      hubDisplayRows: sourceDisplayRows,
+      hubSide,
+      targets: targetBlocks.map((b) => ({
+        label: b.label,
+        joinRows: b.joinRows,
+        displayRows: b.displayRows,
+      })),
+      ...multiBuildExtras(withDedup),
+    });
+  }
+
+  function buildMultiRequestFromCanvas(withDedup: boolean): MultiTargetRecordMatchRequest | null {
+    return buildMultiTargetRequestFromCanvas(joinCanvas, multiBuildExtras(withDedup), maxTargetSets);
   }
 
   function buildColumnLabels(): Record<string, string> {
@@ -1063,16 +1062,21 @@ export default function AnalysisPage() {
 
   async function runMatch(withDedup: boolean) {
     if (multiMatchMode) {
-      const multiReq = buildMultiRequest(withDedup);
+      const multiReq =
+        multiUiMode === "canvas" ? buildMultiRequestFromCanvas(withDedup) : buildMultiRequest(withDedup);
       if (!multiReq) {
         setMatchError(
-          "Pick hub match columns and at least one target set (label + paired match columns on each target).",
+          multiUiMode === "canvas"
+            ? "Complete the join canvas: one hub, target labels, and aligned join edges."
+            : "Pick hub match columns and at least one target set (label + paired match columns on each target).",
         );
         return;
       }
       lastRunMultiRequestRef.current = multiReq;
       lastRunRequestRef.current = null;
       setMatchProgress([]);
+      const labels = multiReq.targets.map((t) => t.label);
+      setTargetRunStatus(initTargetProgress(labels));
       beginMatchStream();
       const controller = new AbortController();
       try {
@@ -1084,10 +1088,8 @@ export default function AnalysisPage() {
               setMatchSql("");
             },
             onProgress: (event) => {
-              setMatchProgress((prev) => {
-                const next = prev.filter((p) => p.label !== event.label || event.phase === "started");
-                return [...next, event];
-              });
+              setMatchProgress((prev) => [...prev, event]);
+              setTargetRunStatus((prev) => mergeTargetProgress(prev, event, labels));
               // Each target announces its own SQL as it is planned — the meta
               // line is written before any of them exist.
               if (event.sql) {
@@ -1153,6 +1155,11 @@ export default function AnalysisPage() {
     }
   }
 
+  const multiTargetLabels =
+    multiMatchMode && multiUiMode === "canvas"
+      ? canvasTargetNodes(joinCanvas).map((n) => n.label.trim()).filter(Boolean)
+      : targetBlocks.map((b) => b.label.trim()).filter(Boolean);
+
   const displayedMatchRows =
     multiMatchMode && targetSetFilter !== "All"
       ? matchRows.filter((row) => row.match_set_label === targetSetFilter)
@@ -1196,6 +1203,45 @@ export default function AnalysisPage() {
       </label>
 
       {multiMatchMode && (
+        <div style={{ marginBottom: "1rem", display: "flex", flexWrap: "wrap", gap: "1rem", alignItems: "center" }}>
+          <span className="srse-text-muted" style={{ fontSize: "0.82rem" }}>Configure with</span>
+          <label className="srse-checkbox-label" htmlFor="multi-ui-form">
+            <input
+              id="multi-ui-form"
+              type="radio"
+              name="multi-ui-mode"
+              checked={multiUiMode === "form"}
+              onChange={() => setMultiUiMode("form")}
+            />
+            {" "}
+            Form
+          </label>
+          <label className="srse-checkbox-label" htmlFor="multi-ui-canvas">
+            <input
+              id="multi-ui-canvas"
+              type="radio"
+              name="multi-ui-mode"
+              checked={multiUiMode === "canvas"}
+              onChange={() => {
+                setMultiUiMode("canvas");
+                setJoinCanvas(
+                  joinCanvasFromForm(
+                    hubSide,
+                    sourceRows,
+                    sourceDisplayRows,
+                    targetBlocks,
+                    defaultSideRef(sourceRows),
+                  ),
+                );
+              }}
+            />
+            {" "}
+            Join canvas
+          </label>
+        </div>
+      )}
+
+      {multiMatchMode && multiUiMode === "form" && (
         <div style={{ marginBottom: "1rem" }}>
           <span className="srse-text-muted" style={{ fontSize: "0.82rem", marginRight: "0.75rem" }}>Hub is the</span>
           <label className="srse-checkbox-label" htmlFor="hub-side-source" style={{ display: "inline-flex", marginRight: "1rem" }}>
@@ -1223,7 +1269,74 @@ export default function AnalysisPage() {
         </div>
       )}
 
+      {!multiMatchMode && twoTableRefsReady && (
+        <section className="srse-card" style={{ marginBottom: "1rem", width: "100%" }}>
+          <h2 className="srse-card-title" style={{ marginTop: 0 }}>
+            Join key suggestions
+          </h2>
+          <p className="srse-text-muted" style={{ marginTop: 0, lineHeight: 1.5 }}>
+            Hints only — pick a row to fill the first criterion pair. Nothing is applied until you choose.
+          </p>
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+            <button
+              type="button"
+              className="srse-btn srse-btn-secondary srse-btn-sm"
+              disabled={keySuggestLoading}
+              onClick={() => loadKeySuggestions(false)}
+            >
+              Suggest keys
+            </button>
+            <button
+              type="button"
+              className="srse-btn srse-btn-ghost srse-btn-sm"
+              disabled={keySuggestLoading}
+              title="Samples the source (10% Bernoulli) and scans the target in full per pair — bounded and may take several seconds"
+              onClick={() => loadKeySuggestions(true)}
+            >
+              Check overlap (sampled)
+            </button>
+          </div>
+          {keySuggestError && <p className="srse-text-danger">{keySuggestError}</p>}
+          {keySuggestLoading && <p className="srse-text-muted">Loading suggestions…</p>}
+          {!keySuggestLoading && keySuggestions.length > 0 && (
+            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+              {keySuggestions.map((s) => (
+                <li key={`${s.sourceColumn}-${s.targetColumn}`} style={{ marginBottom: "0.4rem" }}>
+                  <button
+                    type="button"
+                    className="srse-btn srse-btn-ghost srse-btn-sm"
+                    style={{ textAlign: "left", width: "100%" }}
+                    onClick={() => applyKeySuggestion(s)}
+                  >
+                    <strong>{s.sourceColumn}</strong> ({s.sourceType}) ↔{" "}
+                    <strong>{s.targetColumn}</strong> ({s.targetType}) — {s.reason}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+
+      {multiMatchMode && multiUiMode === "canvas" && (
+        <MultiTargetJoinCanvas
+          fetchers={REGISTRY_FETCHERS}
+          maxTargetSets={maxTargetSets}
+          hubSide={hubSide}
+          onHubSideChange={setHubSide}
+          canvas={joinCanvas}
+          onCanvasChange={setJoinCanvas}
+          buildExtras={multiBuildExtras(false)}
+          targetRunStatus={targetRunStatus}
+          onReportError={reportError}
+          registeredFuzzyFor={registeredFuzzyFor}
+          businessNameFor={businessNameFor}
+        />
+      )}
+
       <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", width: "100%" }}>
+        {!(multiMatchMode && multiUiMode === "canvas") && (
+        <>
         <CriterionBox
           title={multiMatchMode ? "Hub table — match on" : "Select Source"}
           boxId="source"
@@ -1319,9 +1432,11 @@ export default function AnalysisPage() {
             }
           />
         )}
+        </>
+        )}
       </div>
 
-      {multiMatchMode && (
+      {multiMatchMode && multiUiMode === "form" && (
         <div style={{ width: "100%", marginTop: "1rem" }}>
           {targetBlocks.map((block, blockIndex) => (
             <section key={block.id} className="srse-card" style={{ marginBottom: "1rem" }}>
@@ -1589,7 +1704,74 @@ export default function AnalysisPage() {
         </div>
       </section>
 
-      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "1rem" }}>
+      {!multiMatchMode && (
+        <section className="srse-card" style={{ marginTop: "1rem" }}>
+          <h2 className="srse-card-title">Join type</h2>
+          <p className="srse-text-muted" style={{ marginTop: 0, lineHeight: 1.5 }}>
+            Pick the same registered table on source and target for a <strong>self-join</strong> — no
+            separate mode is needed.{" "}
+            {joinType === "FULL" && (
+              <span className="srse-text-danger">
+                FULL joins can be very large: the match is uncapped server-side, so two big tables
+                will usually hit the 10,000-row display limit and the CSV download path.
+              </span>
+            )}
+          </p>
+          <label htmlFor="join-type" className="srse-text-muted" style={{ fontSize: "0.85rem" }}>
+            Records to include
+            <select
+              id="join-type"
+              className="srse-select"
+              style={{ marginLeft: "0.5rem", minWidth: 280 }}
+              value={joinType}
+              onChange={(e) => setJoinType(e.target.value as JoinType)}
+            >
+              {JOIN_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label} ({opt.hint})
+                </option>
+              ))}
+            </select>
+          </label>
+        </section>
+      )}
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          gap: "0.6rem",
+          flexWrap: "wrap",
+          marginTop: "1rem",
+          alignItems: "center",
+        }}
+      >
+        {!multiMatchMode && (
+          <button
+            type="button"
+            className="srse-btn srse-btn-ghost"
+            disabled={sqlPreviewLoading || matchStatus === "loading"}
+            onClick={async () => {
+              const req = buildRequest(false);
+              if (!req) {
+                setSqlPreviewError("Fill in at least one source/target match pair first.");
+                return;
+              }
+              setSqlPreviewLoading(true);
+              setSqlPreviewError(null);
+              try {
+                setSqlPreview(await fetchMatchSql(req));
+              } catch (err: unknown) {
+                setSqlPreview(null);
+                setSqlPreviewError(err instanceof Error ? err.message : String(err));
+              } finally {
+                setSqlPreviewLoading(false);
+              }
+            }}
+          >
+            {sqlPreviewLoading ? "Planning…" : "Preview SQL"}
+          </button>
+        )}
         <button
           type="button"
           className="srse-btn srse-btn-primary"
@@ -1600,24 +1782,43 @@ export default function AnalysisPage() {
         </button>
       </div>
 
+      {sqlPreviewError && (
+        <p className="srse-text-danger" style={{ textAlign: "right", marginTop: "0.5rem" }}>
+          {sqlPreviewError}
+        </p>
+      )}
+      {sqlPreview && (
+        <pre
+          className="srse-card"
+          style={{
+            marginTop: "0.75rem",
+            overflowX: "auto",
+            fontSize: "0.75rem",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+          }}
+        >
+          {sqlPreview}
+        </pre>
+      )}
+
       {matchError && (
         <p className="srse-text-danger" style={{ textAlign: "right" }}>
           {matchError}
         </p>
       )}
 
-      {multiMatchMode && matchProgress.length > 0 && (
+      {multiMatchMode && targetRunStatus.length > 0 && (
         <ul className="srse-text-muted" style={{ fontSize: "0.82rem", marginTop: "0.75rem", listStyle: "none", padding: 0 }}>
-          {matchProgress.map((p) => (
+          {targetRunStatus.map((p) => (
             <li key={`${p.label}-${p.phase}-${p.targetIndex}`} style={{ marginBottom: "0.25rem" }}>
               <strong>{p.label}</strong>:{" "}
-              {p.phase === "started" && "running…"}
-              {p.phase === "done" && `${p.rows ?? 0} rows`}
-              {p.phase === "error" && (
-                <span className="srse-text-danger">{p.message ?? "failed"}</span>
-              )}
-              {p.phase === "skipped" && (
-                <span>skipped ({p.reason ?? "time budget"})</span>
+              {p.phase === "error" ? (
+                <span className="srse-text-danger">{phaseLabel(p)}</span>
+              ) : p.phase === "skipped" ? (
+                <span title="Shared multi-target time budget — skipped is not the same as zero matches">{phaseLabel(p)}</span>
+              ) : (
+                phaseLabel(p)
               )}
             </li>
           ))}
@@ -1638,9 +1839,9 @@ export default function AnalysisPage() {
                 onChange={(e) => setTargetSetFilter(e.target.value)}
               >
                 <option value="All">All</option>
-                {targetBlocks.map((b) => (
-                  <option key={b.id} value={b.label.trim() || b.id}>
-                    {b.label.trim() || "Unnamed"}
+                {multiTargetLabels.map((label) => (
+                  <option key={label} value={label}>
+                    {label}
                   </option>
                 ))}
               </select>
@@ -1656,9 +1857,19 @@ export default function AnalysisPage() {
             tooManyToDisplay={matchTooManyToDisplay}
             displayLimit={MAX_DISPLAYED_ROWS}
             onDownloadFullCsv={downloadFullCsv}
+            fullCsvDownloadNote={
+              multiMatchMode
+                ? "Multi-target CSV export is all-or-nothing: if any target set fails, the whole download aborts (unlike the stream, which can return partial rows)."
+                : undefined
+            }
             highlightDuplicates={highlightDuplicates}
             dedupAvailable={!!dedupColumn}
             dedupEnabled={dedupEnabled}
+            dedupDisabledReason={
+              dedupBlockedByJoin
+                ? "Dedup is not available with RIGHT or FULL joins — unmatched rows share NULL partition keys and would collapse to one row."
+                : undefined
+            }
             columnLabels={buildColumnLabels()}
             onDedupToggle={(enabled) => {
               setDedupEnabled(enabled);
