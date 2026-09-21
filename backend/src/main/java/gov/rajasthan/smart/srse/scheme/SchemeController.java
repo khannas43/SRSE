@@ -68,9 +68,14 @@ public class SchemeController {
     public record SchemeTemplateResponse(Ast.PredicateSpec ruleset) {
     }
 
-    public record SchemeResponse(Long id, String code, String name, String description) {
+    public record SchemeResponse(Long id, String code, String name, String description, Long templateScenarioId) {
         static SchemeResponse from(Scheme scheme) {
-            return new SchemeResponse(scheme.getId(), scheme.getCode(), scheme.getName(), scheme.getDescription());
+            return new SchemeResponse(
+                    scheme.getId(),
+                    scheme.getCode(),
+                    scheme.getName(),
+                    scheme.getDescription(),
+                    scheme.getTemplateScenarioId());
         }
     }
 }

@@ -137,6 +137,7 @@ export type Scheme = {
   code: string;
   name: string;
   description: string | null;
+  templateScenarioId: number | null;
 };
 
 export type PreviewRequest = {
@@ -251,10 +252,14 @@ export async function saveScenario(req: SaveScenarioRequest): Promise<SaveScenar
   return res.json();
 }
 
-export async function listScenarios(schemeId: number): Promise<ScenarioSummary[]> {
+export async function listScenarios(
+  schemeId: number,
+  scope: AuthScope = "officer",
+): Promise<ScenarioSummary[]> {
   const res = await authorizedFetch(
     `${API_BASE}/api/decision/scenarios?schemeId=${encodeURIComponent(String(schemeId))}`,
     { credentials: "include" },
+    scope,
   );
   if (!res.ok) {
     throw new Error(`Decision service error ${res.status}: ${await res.text()}`);
@@ -283,8 +288,8 @@ export async function compare(a: number, b: number): Promise<CompareResponse> {
   return res.json();
 }
 
-export async function listSchemes(): Promise<Scheme[]> {
-  const res = await authorizedFetch(`${API_BASE}/api/schemes`, { credentials: "include" });
+export async function listSchemes(scope: AuthScope = "officer"): Promise<Scheme[]> {
+  const res = await authorizedFetch(`${API_BASE}/api/schemes`, { credentials: "include" }, scope);
   if (!res.ok) {
     throw new Error(`Scheme service error ${res.status}: ${await res.text()}`);
   }

@@ -16,6 +16,9 @@ import {
   listMappings,
   listLakehouseLayers,
   listRegistrations,
+  listScenarios,
+  listSchemes,
+  setSchemeTemplate,
   registerTable,
   unregisterTable,
   updateAnalyticalConnection,
@@ -33,6 +36,8 @@ import {
   type FieldTier,
   type LakehouseColumnInfo,
   type MappingRow,
+  type ScenarioSummary,
+  type Scheme,
   type TableRegistration,
 } from "@/lib/decisionApi";
 import {
@@ -1948,6 +1953,158 @@ function LakehouseRegistryPanel({
   );
 }
 
+function SchemeOfficialCriteriaPanel() {
+  const [schemes, setSchemes] = useState<Scheme[]>([]);
+  const [scenariosByScheme, setScenariosByScheme] = useState<Map<number, ScenarioSummary[]>>(new Map());
+  const [selectedScenario, setSelectedScenario] = useState<Map<number, string>>(new Map());
+  const [armedSchemeId, setArmedSchemeId] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [savingId, setSavingId] = useState<number | null>(null);
+  const [panelError, setPanelError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    setLoading(true);
+    setPanelError(null);
+    listSchemes("admin")
+      .then(async (list) => {
+        setSchemes(list);
+        const entries = await Promise.all(
+          list.map(async (s) => [s.id, await listScenarios(s.id, "admin")] as const),
+        );
+        setScenariosByScheme(new Map(entries));
+        setSelectedScenario((prev) => {
+          const next = new Map(prev);
+          for (const s of list) {
+            if (s.templateScenarioId != null) {
+              next.set(s.id, String(s.templateScenarioId));
+            }
+          }
+          return next;
+        });
+      })
+      .catch((err: unknown) => setPanelError(errorMessage(err)))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  async function applyTemplate(scheme: Scheme) {
+    const raw = selectedScenario.get(scheme.id);
+    const scenarioId = raw ? Number(raw) : NaN;
+    if (!Number.isFinite(scenarioId)) {
+      setPanelError("Choose a saved scenario for this scheme first.");
+      return;
+    }
+    setSavingId(scheme.id);
+    setPanelError(null);
+    setMessage(null);
+    try {
+      await setSchemeTemplate(scheme.id, scenarioId);
+      setMessage(`Official criteria for “${scheme.name}” updated. Officers loading this scheme will start from that scenario; their own saved scenarios are unchanged.`);
+      setArmedSchemeId(null);
+      refresh();
+    } catch (err: unknown) {
+      setPanelError(errorMessage(err));
+      setArmedSchemeId(null);
+    } finally {
+      setSavingId(null);
+    }
+  }
+
+  return (
+    <section className="srse-card" style={{ marginBottom: "1.25rem" }}>
+      <h2 className="srse-section-title">Scheme official criteria</h2>
+      <p className="srse-text-muted" style={{ marginBottom: "0.85rem", maxWidth: "52rem" }}>
+        Nominate one saved scenario per scheme as the official eligibility template. This replaces what
+        every officer sees when they open that scheme — it does not change scenarios officers have
+        already saved (those remain their own forks).
+      </p>
+      {loading && <p className="srse-text-muted">Loading schemes…</p>}
+      {panelError && <p className="srse-text-danger">{panelError}</p>}
+      {message && <p className="srse-text-success">{message}</p>}
+      {!loading && schemes.length === 0 && (
+        <p className="srse-text-muted">No active schemes in the catalogue.</p>
+      )}
+      {!loading && schemes.length > 0 && (
+        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+          {schemes.map((scheme) => {
+            const scenarios = scenariosByScheme.get(scheme.id) ?? [];
+            const current = scenarios.find((sc) => sc.id === scheme.templateScenarioId);
+            const pick = selectedScenario.get(scheme.id) ?? "";
+            return (
+              <li
+                key={scheme.id}
+                style={{
+                  borderBottom: "1px solid var(--srse-border)",
+                  padding: "0.75rem 0",
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.75rem",
+                  alignItems: "flex-end",
+                }}
+              >
+                <div style={{ flex: "1 1 200px" }}>
+                  <strong>{scheme.name}</strong>
+                  <div className="srse-text-muted" style={{ fontSize: "0.78rem" }}>
+                    {scheme.code}
+                    {current ? ` · Official: ${current.name}` : " · No official template"}
+                  </div>
+                </div>
+                <div style={{ flex: "1 1 240px" }}>
+                  <label htmlFor={`scheme-template-${scheme.id}`} className="srse-text-muted" style={{ fontSize: "0.78rem" }}>
+                    Saved scenario (this scheme only)
+                  </label>
+                  <select
+                    id={`scheme-template-${scheme.id}`}
+                    className="srse-select"
+                    style={{ width: "100%" }}
+                    value={pick}
+                    disabled={scenarios.length === 0}
+                    onChange={(e) =>
+                      setSelectedScenario((prev) => new Map(prev).set(scheme.id, e.target.value))
+                    }
+                  >
+                    <option value="">— select scenario —</option>
+                    {scenarios.map((sc) => (
+                      <option key={sc.id} value={String(sc.id)}>
+                        {sc.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  {armedSchemeId !== scheme.id ? (
+                    <button
+                      type="button"
+                      className="srse-btn srse-btn-secondary srse-btn-sm"
+                      disabled={!pick || savingId === scheme.id}
+                      onClick={() => setArmedSchemeId(scheme.id)}
+                    >
+                      Set as official criteria
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="srse-btn srse-btn-primary srse-btn-sm"
+                      disabled={savingId === scheme.id}
+                      onClick={() => applyTemplate(scheme)}
+                    >
+                      {savingId === scheme.id ? "Saving…" : "Confirm — replace official template"}
+                    </button>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 function ConfigBackupPanel({ onImported }: Readonly<{ onImported: () => void }>) {
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -2092,6 +2249,7 @@ export default function AdminPage() {
       </p>
 
       <ConfigBackupPanel onImported={refresh} />
+      <SchemeOfficialCriteriaPanel />
       <ConnectionsPanel />
       <LakehouseRegistryPanel
         registrations={registrations}
