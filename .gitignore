@@ -9,6 +9,10 @@ backend/target/
 
 # Node / Next.js
 frontend/node_modules/
+docs/scripts/node_modules/
+docs/node_modules/
+docs/.xlsx-venv/
+docs/.gen-venv/
 frontend/.next/
 frontend/out/
 npm-debug.log*
