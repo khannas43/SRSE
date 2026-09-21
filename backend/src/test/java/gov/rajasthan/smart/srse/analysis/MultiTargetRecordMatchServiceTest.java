@@ -47,7 +47,7 @@ class MultiTargetRecordMatchServiceTest {
     private JdbcTemplate jdbc;
 
     private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30, 50);
-    private final AnalysisProperties analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10);
+    private final AnalysisProperties analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L);
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private MultiTargetRecordMatchService service;
@@ -73,6 +73,10 @@ class MultiTargetRecordMatchServiceTest {
 
     private static TargetMatchSpec target(String label, String table, List<MatchCriterion> join) {
         return new TargetMatchSpec(label, CATALOG, SCHEMA, table, join, List.of());
+    }
+
+    private static TargetMatchSpec target(String label, String table, List<MatchCriterion> join, JoinType joinType) {
+        return new TargetMatchSpec(label, CATALOG, SCHEMA, table, join, List.of(), List.of(), joinType);
     }
 
     private MultiTargetRecordMatchRequest twoTargetRequest(HubSide hubSide) {
@@ -366,7 +370,7 @@ class MultiTargetRecordMatchServiceTest {
     @Test
     void budgetExhaustedSkipsRemainingTargets() throws Exception {
         service = new MultiTargetRecordMatchService(
-                recordMatchService, jdbc, guardrails, new AnalysisProperties(5, 0, 4, 2, 10), objectMapper);
+                recordMatchService, jdbc, guardrails, new AnalysisProperties(5, 0, 4, 2, 10, 3, 50_000_000L), objectMapper);
         stubHubValidation();
 
         String out = streamOutput(twoTargetRequest(HubSide.SOURCE));
@@ -374,5 +378,62 @@ class MultiTargetRecordMatchServiceTest {
         assertTrue(out.contains("\"phase\":\"skipped\""), out);
         assertTrue(out.contains("time budget"), out);
         verify(recordMatchService, times(0)).planMatch(any());
+    }
+
+    @Test
+    void perTargetLeftJoinTypePassedToRecordMatchService() throws Exception {
+        stubHubValidation();
+        MultiTargetRecordMatchRequest req = new MultiTargetRecordMatchRequest(
+                List.of(hub("golden", "jan_aadhaar")),
+                List.of(),
+                HubSide.SOURCE,
+                List.of(target("Bank", "bank_txn", List.of(tgt("bank_txn", "ja_id")), JoinType.LEFT)),
+                false, null, null);
+        when(recordMatchService.planMatch(any())).thenReturn(queryWithSql("LEFT JOIN"));
+        stubJdbcRow(Map.of("source_jan_aadhaar", "x", "target_ja_id", "y"));
+        streamOutput(req);
+        ArgumentCaptor<RecordMatchRequest> cap = ArgumentCaptor.forClass(RecordMatchRequest.class);
+        verify(recordMatchService).planMatch(cap.capture());
+        assertEquals(JoinType.LEFT, cap.getValue().joinType());
+    }
+
+    @Test
+    void omittedJoinTypeUsesInnerSubMatch() throws Exception {
+        stubHubValidation();
+        when(recordMatchService.planMatch(any())).thenReturn(queryWithSql("JOIN"));
+        stubJdbcRow(Map.of("source_jan_aadhaar", "x", "target_ja_id", "y"));
+        streamOutput(twoTargetRequest(HubSide.SOURCE));
+        ArgumentCaptor<RecordMatchRequest> cap = ArgumentCaptor.forClass(RecordMatchRequest.class);
+        verify(recordMatchService, times(2)).planMatch(cap.capture());
+        assertTrue(cap.getAllValues().stream().allMatch(r -> r.joinType() == null));
+    }
+
+    @Test
+    void dedupWithRightJoinTargetRejectedBeforeStream() {
+        stubHubValidation();
+        DedupSpec dedup = new DedupSpec(CATALOG, SCHEMA, "golden", "updated_at");
+        MultiTargetRecordMatchRequest req = new MultiTargetRecordMatchRequest(
+                List.of(hub("golden", "jan_aadhaar")),
+                List.of(),
+                HubSide.SOURCE,
+                List.of(target("Bank", "bank_txn", List.of(tgt("bank_txn", "ja_id")), JoinType.RIGHT)),
+                false, dedup, null);
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> service.matchMulti(req));
+        assertTrue(ex.getMessage().contains("Dedup"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("Bank"), ex.getMessage());
+    }
+
+    @Test
+    void ageFilterWithFullJoinTargetRejectedBeforeStream() {
+        stubHubValidation();
+        MultiTargetRecordMatchRequest req = new MultiTargetRecordMatchRequest(
+                List.of(hub("golden", "jan_aadhaar")),
+                List.of(),
+                HubSide.SOURCE,
+                List.of(target("Bank", "bank_txn", List.of(tgt("bank_txn", "ja_id")), JoinType.FULL)),
+                false, null, new AgeFilterSpec(18, 60, "YEARS"));
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> service.matchMulti(req));
+        assertTrue(ex.getMessage().contains("Age filter"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("FULL"), ex.getMessage());
     }
 }

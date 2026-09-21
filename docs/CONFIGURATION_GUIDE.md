@@ -294,6 +294,8 @@ Copy `.env.example` to `.env` and set values per environment.
 | `SRSE_ANALYSIS_MULTI_MATCH_BUDGET_SECONDS` | `120` | Wall-clock budget for the whole `match-multi` stream |
 | `SRSE_ANALYSIS_MAX_GROUP_COLUMNS` | `4` | Columns one side of a match group may fold (a `full_name` against `first_name` + `last_name`) |
 | `SRSE_ANALYSIS_MAX_ANYOF_GROUPS` | `2` | "Any one of" groups per side. Each becomes its own `UNNEST`, and two on one side multiply that side's rows before the join runs — raise with care |
+| `SRSE_ANALYSIS_BLOCKING_PREFIX_LEN` | `3` | Case-insensitive prefix length for fuzzy blocking keys. Longer blocks harder (fewer candidates, more missed early-character typos); shorter is more forgiving but can explode fan-out — at 3 characters an 86k × 20k name match can reach ~145M candidate rows |
+| `SRSE_ANALYSIS_MAX_ESTIMATED_ROWS` | `50000000` | Product of `approx_distinct` estimates across join keys; above this the match is refused with the estimate in the error message instead of running until query timeout |
 
 Each sub-match still uses `min(SRSE_QUERY_TIMEOUT_SECONDS, remaining budget)` as its JDBC timeout — five targets does **not** mean five full query timeouts of wall clock.
 

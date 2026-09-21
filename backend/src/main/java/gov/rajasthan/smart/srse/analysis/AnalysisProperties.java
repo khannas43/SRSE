@@ -16,6 +16,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * {@link GroupMode#ANY_OF} groups on a side: each one becomes its own
  * {@code UNNEST}, and two on the same side cross-multiply that side's rows
  * before the join runs.
+ *
+ * <p>{@code blockingPrefixLen} is the fuzzy blocking-key prefix length in
+ * {@link RecordMatchService}. {@code maxEstimatedRows} is the ceiling on the
+ * product of per-key {@code approx_distinct} estimates before a match runs.
  */
 @ConfigurationProperties(prefix = "srse.analysis")
 public record AnalysisProperties(
@@ -23,5 +27,18 @@ public record AnalysisProperties(
         int multiMatchBudgetSeconds,
         int maxGroupColumns,
         int maxAnyOfGroupsPerSide,
-        int maxProbedPairs) {
+        int maxProbedPairs,
+        int blockingPrefixLen,
+        long maxEstimatedRows) {
+
+    public AnalysisLimitsResponse toLimitsResponse() {
+        return new AnalysisLimitsResponse(
+                maxTargetSets,
+                multiMatchBudgetSeconds,
+                maxGroupColumns,
+                maxAnyOfGroupsPerSide,
+                maxProbedPairs,
+                blockingPrefixLen,
+                maxEstimatedRows);
+    }
 }

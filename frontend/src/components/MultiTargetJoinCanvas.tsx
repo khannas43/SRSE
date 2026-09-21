@@ -11,6 +11,7 @@ import {
   fetchMatchSql,
   listAnalysisColumns,
   type HubSide,
+  type JoinType,
   type MultiTargetRecordMatchRequest,
   type RegisteredColumn,
   type TableRef,
@@ -42,6 +43,13 @@ import {
 import { phaseLabel, type TargetRunStatus } from "@/lib/multiTargetProgress";
 
 const fieldLabelStyle = { display: "block", marginBottom: "0.3rem", fontSize: "0.82rem" } as const;
+
+const TARGET_JOIN_OPTIONS: { value: JoinType; label: string }[] = [
+  { value: "INNER", label: "Only matching records" },
+  { value: "LEFT", label: "All hub records" },
+  { value: "RIGHT", label: "All target records" },
+  { value: "FULL", label: "All records from both" },
+];
 
 type Props = Readonly<{
   fetchers: CascadeFetchers;
@@ -362,7 +370,10 @@ export function MultiTargetJoinCanvas({
           }));
     onCanvasChange({
       ...canvas,
-      nodes: [...canvas.nodes, { id, kind: "target", label, tableRef: EMPTY_CASCADE, displayRows: [] }],
+      nodes: [
+        ...canvas.nodes,
+        { id, kind: "target", label, tableRef: EMPTY_CASCADE, displayRows: [], joinType: "INNER" as JoinType },
+      ],
       slots: nextSlots,
     });
   }
@@ -434,9 +445,9 @@ export function MultiTargetJoinCanvas({
   return (
     <div style={{ width: "100%" }}>
       <p className="srse-text-muted" style={{ fontSize: "0.82rem", lineHeight: 1.5 }}>
-        Join canvas — hub in the centre, targets around it, one edge per join criterion. Multi-target runs{" "}
-        <strong>INNER</strong> joins only (N independent hub↔target matches). Package 4 join types apply to
-        two-table match, not here.
+        Join canvas — hub in the centre, targets around it, one edge per join criterion. Each target is an
+        independent hub↔target match (never an N-way join); pick a join type per target (LEFT keeps unmatched hub
+        rows with empty target columns).
       </p>
 
       <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1rem", alignItems: "center" }}>
@@ -529,6 +540,29 @@ export function MultiTargetJoinCanvas({
                     </button>
                   )}
                 </div>
+                <label htmlFor={`canvas-target-join-${node.id}`} className="srse-text-muted" style={fieldLabelStyle}>
+                  Join type
+                </label>
+                <select
+                  id={`canvas-target-join-${node.id}`}
+                  className="srse-select"
+                  style={{ width: "100%", marginBottom: "0.5rem" }}
+                  value={node.joinType ?? "INNER"}
+                  onChange={(e) =>
+                    onCanvasChange({
+                      ...canvas,
+                      nodes: canvas.nodes.map((n) =>
+                        n.id === node.id ? { ...n, joinType: e.target.value as JoinType } : n,
+                      ),
+                    })
+                  }
+                >
+                  {TARGET_JOIN_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
                 <LakehouseCascade
                   value={node.tableRef}
                   onChange={(ref) => updateTargetTable(node.id, ref)}

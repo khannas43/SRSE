@@ -42,12 +42,11 @@ import java.util.StringJoiner;
  * <p>{@code match_score_pct} values are per target and not comparable across
  * targets.
  *
- * <p><b>Join types ({@link JoinType}) are not supported here.</b> Each sub-match
- * is built as an INNER join via {@link RecordMatchService}; LEFT/RIGHT/FULL and
- * the outer-join predicate routing live only on the two-table
- * {@code POST /api/analysis/match} path. Adding join types here would duplicate
- * every outer-join trap (WHERE-vs-ON, age filter side, dedup partition, UNNEST
- * preservation) on a separate emitter — out of scope until N-way join design exists.
+ * <p>Each sub-match carries its own {@link TargetMatchSpec#joinType()} (null →
+ * INNER) into {@link RecordMatchService} — outer-join predicate routing is not
+ * duplicated here. Hub is always {@code src}: LEFT preserves hub rows; RIGHT
+ * preserves that target's rows. Dedup (hub-only) is rejected per target when
+ * that target uses RIGHT or FULL.
  */
 @Service
 public class MultiTargetRecordMatchService {
@@ -72,6 +71,10 @@ public class MultiTargetRecordMatchService {
 
     public int maxTargetSets() {
         return analysisProperties.maxTargetSets();
+    }
+
+    public AnalysisLimitsResponse analysisLimits() {
+        return analysisProperties.toLimitsResponse();
     }
 
     public StreamingResponseBody matchMulti(MultiTargetRecordMatchRequest req) {
@@ -234,6 +237,21 @@ public class MultiTargetRecordMatchService {
         if (req.ageFilter() != null) {
             RecordMatchService.validateAgeFilter(req.ageFilter());
         }
+        for (int i = 0; i < req.targets().size(); i++) {
+            TargetMatchSpec target = req.targets().get(i);
+            JoinType joinType = JoinType.effective(target.joinType());
+            if (req.dedup() != null && (joinType == JoinType.RIGHT || joinType == JoinType.FULL)) {
+                throw new IllegalArgumentException(
+                        "Dedup cannot be used with target \"" + target.label() + "\" on a " + joinType
+                                + " join: unmatched rows have NULL hub-side partition keys and would "
+                                + "collapse into one row. Use INNER or LEFT for that target, or turn dedup off.");
+            }
+            if (req.ageFilter() != null && joinType == JoinType.FULL) {
+                throw new IllegalArgumentException(
+                        "Age filter cannot be used with a FULL join on target \"" + target.label()
+                                + "\". Use INNER, LEFT, or RIGHT for that target, or turn the age filter off.");
+            }
+        }
         return hubTable;
     }
 
@@ -293,7 +311,8 @@ public class MultiTargetRecordMatchService {
                 target.joinGroups(),
                 req.highlightDuplicates(),
                 req.dedup(),
-                req.ageFilter());
+                req.ageFilter(),
+                target.joinType());
     }
 
     private void writeLine(java.io.OutputStream out, Map<String, Object> payload) throws IOException {

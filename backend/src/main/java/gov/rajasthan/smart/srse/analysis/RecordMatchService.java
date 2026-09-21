@@ -73,12 +73,12 @@ import java.util.stream.Stream;
  *    matches nearly impossible to find (an arbitrary ~0.0005% slice per
  *    side), silently. Instead, every criterion pair becomes part of the
  *    JOIN's ON clause: exact pairs join on equality directly; fuzzy pairs
- *    join on a {@link #BLOCKING_PREFIX_LEN}-character case-insensitive
- *    prefix ("blocking key" — standard record-linkage technique), with the
- *    real Levenshtein-similarity check applied afterward as a WHERE filter
- *    only within already-blocked candidate pairs. This trades a small,
- *    documented amount of recall (a typo in the first {@link #BLOCKING_PREFIX_LEN}
- *    characters of a fuzzy column can be missed) for the join being a real
+ *    join on a configurable case-insensitive prefix ("blocking key" — standard
+ *    record-linkage technique; {@link AnalysisProperties#blockingPrefixLen()}),
+ *    with the real Levenshtein-similarity check applied afterward as a WHERE
+ *    filter only within already-blocked candidate pairs. This trades a small,
+ *    documented amount of recall (a typo in the first N characters of a fuzzy
+ *    column can be missed) for the join being a real
  *    hash join Presto can execute at scale, instead of a nested-loop cross
  *    product over a token sample.
  *  - There is no output row cap either (removed {@code SRSE_ANALYSIS_ROW_CAP}
@@ -101,14 +101,6 @@ import java.util.stream.Stream;
 @Service
 public class RecordMatchService {
 
-    /**
-     * Prefix length (case-insensitive, characters) used as the equi-join
-     * blocking key for fuzzy criterion pairs. Chosen as a pragmatic default,
-     * not derived from data — a longer prefix narrows candidate pairs
-     * further (cheaper) but misses more early-character typos; a shorter one
-     * is more forgiving but blocks fewer candidates out.
-     */
-    private static final int BLOCKING_PREFIX_LEN = 3;
     private static final int MAX_CRITERIA_PER_SIDE = 8;
     private static final Set<String> AGE_UNITS = Set.of("DAYS", "MONTHS", "YEARS");
 
@@ -371,6 +363,7 @@ public class RecordMatchService {
         List<UnnestSide> targetUnnests = new ArrayList<>();
         List<GroupPlan> groups = planGroups(join, sides, sourceUnnests, targetUnnests,
                 joinType.preservesSourceSide(), joinType.preservesTargetSide());
+        enforceEstimatedRowCeiling(sides, groups);
 
         appendCriteriaSelects(select, outerColumns, join, req);
         appendMatchedOnSelects(select, outerColumns, "src", "source_", sourceUnnests);
@@ -622,8 +615,8 @@ public class RecordMatchService {
      * for INNER only — for outer joins it moves to ON so unmatched preserved-side
      * rows are not filtered away (see class javadoc / CLAUDE.md Analysis section).
      */
-    private static void appendFuzzyJoin(StringBuilder onClause, StringBuilder where, List<Object> params,
-                                        int index, GroupPlan group, JoinType joinType) {
+    private void appendFuzzyJoin(StringBuilder onClause, StringBuilder where, List<Object> params,
+                                 int index, GroupPlan group, JoinType joinType) {
         if (group.group().fuzzyThresholdPercent() == null) {
             throw new IllegalArgumentException(
                     "sourceCriteria[" + index + "].fuzzyThresholdPercent is required for a name column");
@@ -860,8 +853,68 @@ public class RecordMatchService {
         out.flush();
     }
 
-    private static String blockingKeyExpr(String columnRef) {
-        return "substr(lower(" + columnRef + "), 1, " + BLOCKING_PREFIX_LEN + ")";
+    private String blockingKeyExpr(String columnRef) {
+        return "substr(lower(" + columnRef + "), 1, " + analysisProperties.blockingPrefixLen() + ")";
+    }
+
+    /**
+     * Upper-bound fan-out from {@code approx_distinct} on each join key (product
+     * across groups). Refuses before JDBC execution when above
+     * {@link AnalysisProperties#maxEstimatedRows()}.
+     */
+    private void enforceEstimatedRowCeiling(Sides sides, List<GroupPlan> groups) {
+        long ceiling = analysisProperties.maxEstimatedRows();
+        if (ceiling <= 0 || groups.isEmpty()) {
+            return;
+        }
+        long estimate = 1;
+        for (GroupPlan group : groups) {
+            long sourceDistinct = sideDistinctEstimate(sides.sourceTable(), group.group().source(), group.fuzzy());
+            long targetDistinct = sideDistinctEstimate(sides.targetTable(), group.group().target(), group.fuzzy());
+            estimate = multiplyCap(estimate, multiplyCap(sourceDistinct, targetDistinct, ceiling), ceiling);
+            if (estimate > ceiling) {
+                throw new IllegalArgumentException(
+                        "Estimated match fan-out is about " + formatEstimate(estimate)
+                                + " rows (limit " + formatEstimate(ceiling) + "). "
+                                + "Try a longer blocking prefix (SRSE_ANALYSIS_BLOCKING_PREFIX_LEN), "
+                                + "a more selective join key, or fewer folded groups.");
+            }
+        }
+    }
+
+    private long sideDistinctEstimate(QualifiedTable table, List<MatchCriterion> columns, boolean fuzzy) {
+        if (columns.isEmpty()) {
+            return 1;
+        }
+        long product = 1;
+        long ceiling = analysisProperties.maxEstimatedRows();
+        for (MatchCriterion c : columns) {
+            String ref = table.qualifiedName() + "." + c.column();
+            String expr = fuzzy ? blockingKeyExpr(ref) : ref;
+            product = multiplyCap(product, queryApproxDistinct(table, expr), ceiling);
+        }
+        return product;
+    }
+
+    private long queryApproxDistinct(QualifiedTable table, String valueExpression) {
+        String sql = "SELECT CAST(approx_distinct(" + valueExpression + ") AS BIGINT) FROM "
+                + table.qualifiedName();
+        Long count = jdbc.queryForObject(sql, Long.class);
+        return count == null ? 0 : Math.max(0, count);
+    }
+
+    private static long multiplyCap(long a, long b, long ceiling) {
+        if (a <= 0 || b <= 0) {
+            return 0;
+        }
+        if (a > ceiling / b) {
+            return ceiling + 1;
+        }
+        return a * b;
+    }
+
+    private static String formatEstimate(long value) {
+        return String.format("%,d", value);
     }
 
     private static String buildMatchScoreExpr(List<GroupPlan> groups) {

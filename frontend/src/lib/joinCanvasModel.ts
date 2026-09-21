@@ -1,4 +1,4 @@
-import type { DisplayColumn, HubSide, TableRef } from "@/lib/analysisApi";
+import type { DisplayColumn, HubSide, JoinType, TableRef } from "@/lib/analysisApi";
 import { isCascadeComplete, type CascadeValue } from "@/components/LakehouseCascade";
 import type { CriterionRowModel, DisplayRowModel } from "@/lib/analysisCriterionModel";
 import {
@@ -14,6 +14,8 @@ export type JoinCanvasNode = {
   label: string;
   tableRef: CascadeValue;
   displayRows: DisplayRowModel[];
+  /** Per-target join shape (targets only). Omitted → INNER. */
+  joinType?: JoinType;
 };
 
 /**
@@ -127,7 +129,13 @@ export function joinCanvasFromForm(
   hubSide: HubSide,
   hubRows: CriterionRowModel[],
   hubDisplayRows: DisplayRowModel[],
-  targetBlocks: Array<{ id: string; label: string; joinRows: CriterionRowModel[]; displayRows: DisplayRowModel[] }>,
+  targetBlocks: Array<{
+    id: string;
+    label: string;
+    joinRows: CriterionRowModel[];
+    displayRows: DisplayRowModel[];
+    joinType?: JoinType;
+  }>,
   hubTable: CascadeValue,
 ): JoinCanvasState {
   const hubId = crypto.randomUUID();
@@ -151,6 +159,7 @@ export function joinCanvasFromForm(
       label: block.label,
       tableRef: { ...ref },
       displayRows: block.displayRows.map((r) => ({ ...r })),
+      joinType: block.joinType,
     });
   }
   const n = Math.max(hubRows.length, ...targetBlocks.map((b) => b.joinRows.length), 1);
@@ -201,6 +210,7 @@ export function joinCanvasToFormModels(state: JoinCanvasState): {
       ref: { ...node.tableRef },
     })),
     displayRows: node.displayRows.map((r) => ({ ...r })),
+    joinType: node.joinType,
   }));
   return {
     hubRows,

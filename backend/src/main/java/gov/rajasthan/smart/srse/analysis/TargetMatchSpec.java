@@ -20,7 +20,8 @@ public record TargetMatchSpec(
         String table,
         List<MatchCriterion> joinCriteria,
         List<DisplayColumn> displayColumns,
-        List<MatchGroup> joinGroups) {
+        List<MatchGroup> joinGroups,
+        JoinType joinType) {
 
     public TargetMatchSpec {
         joinCriteria = joinCriteria == null ? List.of() : List.copyOf(joinCriteria);
@@ -54,7 +55,13 @@ public record TargetMatchSpec(
     /** The pre-groups shape: join criteria paired positionally with the hub's. */
     public TargetMatchSpec(String label, String catalog, String schema, String table,
                            List<MatchCriterion> joinCriteria, List<DisplayColumn> displayColumns) {
-        this(label, catalog, schema, table, joinCriteria, displayColumns, List.of());
+        this(label, catalog, schema, table, joinCriteria, displayColumns, List.of(), null);
+    }
+
+    public TargetMatchSpec(String label, String catalog, String schema, String table,
+                           List<MatchCriterion> joinCriteria, List<DisplayColumn> displayColumns,
+                           List<MatchGroup> joinGroups) {
+        this(label, catalog, schema, table, joinCriteria, displayColumns, joinGroups, null);
     }
 
     public QualifiedTable qualifiedTable() {

@@ -131,6 +131,7 @@ type TargetBlock = {
   label: string;
   joinRows: CriterionRow[];
   displayRows: DisplayRow[];
+  joinType: JoinType;
 };
 
 function createTargetBlock(defaultLabel: string): TargetBlock {
@@ -139,6 +140,7 @@ function createTargetBlock(defaultLabel: string): TargetBlock {
     label: defaultLabel,
     joinRows: [createEmptyRow()],
     displayRows: [],
+    joinType: "INNER",
   };
 }
 
@@ -636,8 +638,10 @@ export default function AnalysisPage() {
   const [sqlPreviewLoading, setSqlPreviewLoading] = useState(false);
 
   const [dedupEnabled, setDedupEnabled] = useState(false);
+  const multiDedupBlockedByJoin =
+    multiMatchMode && targetBlocks.some((b) => b.joinType === "RIGHT" || b.joinType === "FULL");
   const dedupBlockedByJoin =
-    !multiMatchMode && (joinType === "RIGHT" || joinType === "FULL");
+    multiDedupBlockedByJoin || (!multiMatchMode && (joinType === "RIGHT" || joinType === "FULL"));
 
   useEffect(() => {
     if (dedupBlockedByJoin) {
@@ -931,6 +935,7 @@ export default function AnalysisPage() {
         label: b.label,
         joinRows: b.joinRows,
         displayRows: b.displayRows,
+        joinType: b.joinType,
       })),
       ...multiBuildExtras(withDedup),
     });
@@ -1465,6 +1470,41 @@ export default function AnalysisPage() {
                   </button>
                 )}
               </div>
+              <div style={{ marginBottom: "0.65rem" }}>
+                <label htmlFor={`target-join-${block.id}`} className="srse-text-muted" style={fieldLabelStyle}>
+                  Join type (hub is always the source side in SQL)
+                </label>
+                <select
+                  id={`target-join-${block.id}`}
+                  className="srse-select"
+                  style={{ maxWidth: 320 }}
+                  value={block.joinType}
+                  onChange={(e) =>
+                    setTargetBlocks((blocks) =>
+                      blocks.map((b) =>
+                        b.id === block.id ? { ...b, joinType: e.target.value as JoinType } : b,
+                      ),
+                    )
+                  }
+                >
+                  {JOIN_TYPE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value} title={opt.hint}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                {block.joinType === "LEFT" && (
+                  <p className="srse-text-muted" style={{ fontSize: "0.75rem", margin: "0.35rem 0 0" }}>
+                    LEFT keeps every hub row — target columns are empty when this target has no match (useful for
+                    &quot;which hub rows miss in {block.label.trim() || "this target"}?&quot;).
+                  </p>
+                )}
+                {block.joinType === "FULL" && ageFilterEnabled && (
+                  <p className="srse-text-danger" style={{ fontSize: "0.75rem", margin: "0.35rem 0 0" }}>
+                    Age filter cannot run with FULL on this target — pick another join type or turn the age filter off.
+                  </p>
+                )}
+              </div>
               <CriterionBox
                 title={`Target ${blockIndex + 1} — match on (paired with hub rows)`}
                 boxId={`target-block-${block.id}`}
@@ -1867,7 +1907,9 @@ export default function AnalysisPage() {
             dedupEnabled={dedupEnabled}
             dedupDisabledReason={
               dedupBlockedByJoin
-                ? "Dedup is not available with RIGHT or FULL joins — unmatched rows share NULL partition keys and would collapse to one row."
+                ? multiMatchMode
+                  ? "Dedup is not available when any target uses RIGHT or FULL — hub partition keys are NULL on unmatched rows."
+                  : "Dedup is not available with RIGHT or FULL joins — unmatched rows share NULL partition keys and would collapse to one row."
                 : undefined
             }
             columnLabels={buildColumnLabels()}

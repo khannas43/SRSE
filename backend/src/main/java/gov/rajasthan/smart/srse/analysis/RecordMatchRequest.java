@@ -57,7 +57,7 @@ public record RecordMatchRequest(
                 List.of(), highlightDuplicates, dedup, ageFilter, null);
     }
 
-    /** Multi-target sub-matches — always INNER ({@code joinType} null). */
+    /** Pre–per-target join types: multi-target sub-matches omitted {@code joinType} (INNER). */
     public RecordMatchRequest(List<MatchCriterion> sourceCriteria,
                               List<MatchCriterion> targetCriteria,
                               List<DisplayColumn> sourceDisplayColumns,

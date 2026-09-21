@@ -52,6 +52,8 @@ srse:
     max-group-columns: ${SRSE_ANALYSIS_MAX_GROUP_COLUMNS:4}
     max-any-of-groups-per-side: ${SRSE_ANALYSIS_MAX_ANYOF_GROUPS:2}
     max-probed-pairs: ${SRSE_ANALYSIS_MAX_PROBED_PAIRS:10}
+    blocking-prefix-len: ${SRSE_ANALYSIS_BLOCKING_PREFIX_LEN:3}
+    max-estimated-rows: ${SRSE_ANALYSIS_MAX_ESTIMATED_ROWS:50000000}
   breakdown:
     # age_band has no field-catalogue entry (never officer-selectable as a
     # rule filter, only a fixed breakdown dimension per ExecutionService's

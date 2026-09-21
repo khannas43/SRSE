@@ -42,8 +42,10 @@ import {
 } from "@/lib/decisionApi";
 import {
   deleteColumnMetadata,
+  fetchAnalysisLimits,
   listColumnMetadata,
   upsertColumnMetadata,
+  type AnalysisLimits,
   type ColumnMetadata,
   type CompareAs,
 } from "@/lib/analysisApi";
@@ -330,6 +332,55 @@ function ConnectionCard({
         </p>
       )}
     </div>
+  );
+}
+
+function AnalysisGuardrailsPanel() {
+  const [limits, setLimits] = useState<AnalysisLimits | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchAnalysisLimits()
+      .then(setLimits)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  return (
+    <section className="srse-card" style={{ marginBottom: "1.25rem" }}>
+      <h2 className="srse-section-title">Analysis guardrails (read-only)</h2>
+      <p className="srse-text-muted" style={{ marginBottom: "0.75rem", maxWidth: "52rem" }}>
+        Limits enforced on match and multi-match runs — set via deployment config (
+        <code>SRSE_ANALYSIS_*</code>), not editable in this UI.
+      </p>
+      {error && <p className="srse-text-danger">{error}</p>}
+      {!limits && !error && <p className="srse-text-muted">Loading…</p>}
+      {limits && (
+        <dl
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(220px, 1fr) auto",
+            gap: "0.35rem 1.5rem",
+            margin: 0,
+            fontSize: "0.88rem",
+          }}
+        >
+          <dt className="srse-text-muted">Max target sets (multi-match)</dt>
+          <dd style={{ margin: 0 }}>{limits.maxTargetSets}</dd>
+          <dt className="srse-text-muted">Multi-match time budget (seconds)</dt>
+          <dd style={{ margin: 0 }}>{limits.multiMatchBudgetSeconds}</dd>
+          <dt className="srse-text-muted">Max columns per side per group</dt>
+          <dd style={{ margin: 0 }}>{limits.maxGroupColumns}</dd>
+          <dt className="srse-text-muted">Max ANY_OF groups per side</dt>
+          <dd style={{ margin: 0 }}>{limits.maxAnyOfGroupsPerSide}</dd>
+          <dt className="srse-text-muted">Max join-key overlap pairs probed</dt>
+          <dd style={{ margin: 0 }}>{limits.maxProbedPairs}</dd>
+          <dt className="srse-text-muted">Fuzzy blocking prefix length (characters)</dt>
+          <dd style={{ margin: 0 }}>{limits.blockingPrefixLen}</dd>
+          <dt className="srse-text-muted">Max estimated match fan-out (rows)</dt>
+          <dd style={{ margin: 0 }}>{limits.maxEstimatedRows.toLocaleString()}</dd>
+        </dl>
+      )}
+    </section>
   );
 }
 
@@ -2250,6 +2301,7 @@ export default function AdminPage() {
 
       <ConfigBackupPanel onImported={refresh} />
       <SchemeOfficialCriteriaPanel />
+      <AnalysisGuardrailsPanel />
       <ConnectionsPanel />
       <LakehouseRegistryPanel
         registrations={registrations}

@@ -3,6 +3,7 @@ import type {
   DedupSpec,
   DisplayColumn,
   HubSide,
+  JoinType,
   MatchCriterion,
   MultiTargetRecordMatchRequest,
   RecordMatchRequest,
@@ -28,6 +29,7 @@ export type TargetBlockModel = {
   label: string;
   joinRows: CriterionRowModel[];
   displayRows: DisplayRowModel[];
+  joinType?: JoinType;
 };
 
 export type BuildMultiTargetParams = {
@@ -72,7 +74,7 @@ export function buildMultiTargetRecordMatchRequest(
     const filledDisplay = block.displayRows.filter(isDisplayRowFilled);
     const pairs = filledJoin.slice(0, n).map((r, i) => ({ source: filledHub[i], target: r }));
     const usesGroups = pairs.some(({ source, target }) => rowFolds(source) || rowFolds(target));
-    targets.push({
+    const targetSpec: MultiTargetRecordMatchRequest["targets"][number] = {
       label,
       ...tableRef,
       joinCriteria: pairs.map(({ source, target }) => ({
@@ -91,7 +93,11 @@ export function buildMultiTargetRecordMatchRequest(
             buildMatchGroup(source, target, pairIsFuzzy(source, target, params.registeredFuzzyFor)),
           )
         : undefined,
-    });
+    };
+    if (block.joinType && block.joinType !== "INNER") {
+      targetSpec.joinType = block.joinType;
+    }
+    targets.push(targetSpec);
   }
   if (targets.length === 0) return null;
   if (targets.length > maxSets) return null;
@@ -138,6 +144,9 @@ export function singleTargetMatchRequestFromMulti(
   }
   if (target.joinGroups && target.joinGroups.length > 0) {
     out.joinGroups = target.joinGroups;
+  }
+  if (target.joinType && target.joinType !== "INNER") {
+    out.joinType = target.joinType;
   }
   return out;
 }

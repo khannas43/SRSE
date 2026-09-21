@@ -11,8 +11,6 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import java.nio.charset.StandardCharsets;
-import java.util.List;
-import java.util.Map;
 
 @RestController
 @RequestMapping("/api/analysis")
@@ -31,8 +29,8 @@ public class RecordMatchController {
     }
 
     @GetMapping("/limits")
-    public Map<String, Integer> limits() {
-        return Map.of("maxTargetSets", multiMatchService.maxTargetSets());
+    public AnalysisLimitsResponse limits() {
+        return multiMatchService.analysisLimits();
     }
 
     /**

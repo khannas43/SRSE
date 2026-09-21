@@ -229,19 +229,28 @@ This is enforced by construction today, not only by UI copy:
   rows, after which the on-screen count is a lower bound (`200000+`) but the CSV
   remains complete.
 - **Multi-target Analysis** (`POST /api/analysis/match-multi`) is **N × two-table
-  INNER JOIN**, never an N-way join — one hub table, one target table per sub-match.
-  **LEFT/RIGHT/FULL are supported only on the single two-table match**
-  (`POST /api/analysis/match`). Multi-target deliberately does not expose join
-  types: it reuses `RecordMatchService` with INNER only, and duplicating outer-join
-  predicate routing on `MultiTargetRecordMatchService`'s separate emitter would
-  double every trap below without a designed N-way join model. Arbitrary N-way and
-  graphical join building remain out of scope — a separate design, separate package.
-  Partial failure is **per target** in the NDJSON stream; **`match-multi.csv` is
-  all-or-nothing** (one failed target aborts the download). **Dedup** in multi
-  mode must reference the **hub table only**. Each target's SQL rides its own
-  `started` progress event, never the `meta` line — `meta` is serialised and
-  flushed before any target has been planned, so anything it promised about
-  them could only be null.
+  JOIN**, never an N-way join — one hub table, one target table per sub-match.
+  Each `TargetMatchSpec` carries its own `joinType` (null → INNER); sub-matches
+  delegate to `RecordMatchService` so outer-join predicate routing
+  is not duplicated. Hub is always {@code src}: **LEFT** preserves hub rows (target
+  columns NULL when that target has no match); **RIGHT** preserves that target's
+  rows. **Dedup** (hub-only) is rejected per target on RIGHT/FULL for the same
+  reason as two-table mode. **Target↔target and arbitrary N-way joins remain out
+  of scope** — the hub model is what gives per-target failure, per-target budget,
+  and hash joins at crore scale; a 3-character fuzzy blocking key already produced
+  ~145M candidate rows on an 86k × 20k name match locally. Reopen N-way only with
+  table statistics Presto can use, the cardinality pre-check below, and
+  officer-pinned join order. Partial failure is **per target** in the NDJSON stream;
+  **`match-multi.csv` is all-or-nothing** (one failed target aborts the download).
+  Each target's SQL rides its own `started` progress event, never the `meta` line.
+- **Match fan-out guard:** before executing, `RecordMatchService` estimates
+  candidate row count as the product of {@code approx_distinct} on each join key
+  (blocking-key expression for fuzzy pairs). Above
+  `SRSE_ANALYSIS_MAX_ESTIMATED_ROWS` (default 50,000,000) the request is refused
+  with the estimate in the message — not a silent query timeout.
+  `SRSE_ANALYSIS_BLOCKING_PREFIX_LEN` (default 3) controls fuzzy blocking;
+  longer prefixes block harder and cost recall on typos in the first N characters;
+  shorter ones explode the candidate set.
 
 - **Two-table join types** (`joinType` on `RecordMatchRequest`, default INNER).
   Officers pick INNER / LEFT / RIGHT / FULL on the Analysis tab; omitted/null
@@ -322,8 +331,13 @@ This is enforced by construction today, not only by UI copy:
     source preserved). Same plan with similarity in **WHERE** → **0 rows** (silent
     INNER). RIGHT → 100 rows (unmatched target preserved). FULL → 200 rows (100 with
     NULL source). LEFT + ANY_OF on preserved side with **`CROSS JOIN UNNEST`** → 200
-    unmatched preserved rows. All-null ANY_OF candidate through `CROSS JOIN UNNEST`
+    unmatched preserved rows.     All-null ANY_OF candidate through `CROSS JOIN UNNEST`
     → 2 null-keyed rows (survives).
+    **Multi-target per-target LEFT (2026-09, same container, hub
+    `iceberg.srse.beneficiary` ↔ `iceberg_silver.silver_txn.tbl_txn_bankdtl`,
+    target joinType LEFT, fuzzy name pair):** hub rows with no match in that target
+    appear in the merged grid with hub columns populated and that target's
+    prefixed columns empty (not dropped, not the string "null").
 
 ## Reference
 

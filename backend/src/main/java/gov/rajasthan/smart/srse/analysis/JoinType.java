@@ -2,10 +2,7 @@ package gov.rajasthan.smart.srse.analysis;
 
 import java.util.Set;
 
-/**
- * Two-table match join shape for {@link RecordMatchService}. Multi-target
- * matching stays {@link #INNER} only — see {@link MultiTargetRecordMatchService}.
- */
+/** Two-table match join shape for {@link RecordMatchService}. */
 public enum JoinType {
     INNER(Set.of()),
     LEFT(Set.of("tgt")),

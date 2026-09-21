@@ -71,7 +71,9 @@ class RecordMatchServiceTest {
 
     /** queryTimeoutSeconds=30. */
     private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30, 50);
-    private final AnalysisProperties analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10);
+    private static final AnalysisProperties DEFAULT_ANALYSIS = new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L);
+
+    private AnalysisProperties analysisProperties = DEFAULT_ANALYSIS;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -79,6 +81,7 @@ class RecordMatchServiceTest {
 
     @BeforeEach
     void setUp() {
+        analysisProperties = DEFAULT_ANALYSIS;
         // Default: no admin override registered — every existing test below
         // relies on falling back to the name-substring guess, unchanged.
         lenient().when(columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
@@ -88,6 +91,7 @@ class RecordMatchServiceTest {
         // That is what every age test below assumed before the filter learned
         // to check — the tests that care about a side WITHOUT it say so.
         lenient().when(registry.hasColumns(any(), any())).thenReturn(true);
+        lenient().when(jdbc.queryForObject(anyString(), eq(Long.class))).thenReturn(1L);
         service = new RecordMatchService(jdbc, registry, guardrails, fieldResolver, columnMetadata, analysisProperties, objectMapper);
     }
 
@@ -1428,6 +1432,29 @@ class RecordMatchServiceTest {
                 null, null, List.of(), false, null, new AgeFilterSpec(18, 60, "YEARS"), JoinType.LEFT);
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> service.planMatch(req));
         assertTrue(ex.getMessage().contains("LEFT"), ex.getMessage());
+    }
+
+    @Test
+    void blockingPrefixLenComesFromAnalysisProperties() {
+        analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10, 6, 50_000_000L);
+        service = new RecordMatchService(jdbc, registry, guardrails, fieldResolver, columnMetadata, analysisProperties, objectMapper);
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(fuzzy("beneficiary", "father_name", 75.0)),
+                List.of(exact("beneficiary", "father_name")),
+                null, null, List.of(), false, null, null, JoinType.INNER);
+        String sql = service.planMatch(req).sql();
+        assertTrue(sql.contains("substr(lower"), sql);
+        assertTrue(sql.contains(", 6)"), sql);
+    }
+
+    @Test
+    void estimatedFanOutAboveCeilingRefusesWithMessage() {
+        analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10, 3, 1_000L);
+        service = new RecordMatchService(jdbc, registry, guardrails, fieldResolver, columnMetadata, analysisProperties, objectMapper);
+        when(jdbc.queryForObject(anyString(), eq(Long.class))).thenReturn(50L);
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> service.planMatch(exactMatchRequest()));
+        assertTrue(ex.getMessage().contains("Estimated match fan-out"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("1,000"), ex.getMessage());
     }
 
     @Test

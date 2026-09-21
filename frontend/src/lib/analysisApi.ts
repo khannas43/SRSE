@@ -120,6 +120,17 @@ export type TargetMatchSpec = TableRef & {
   joinCriteria: MatchCriterion[];
   displayColumns?: DisplayColumn[];
   joinGroups?: MatchGroup[];
+  joinType?: JoinType;
+};
+
+export type AnalysisLimits = {
+  maxTargetSets: number;
+  multiMatchBudgetSeconds: number;
+  maxGroupColumns: number;
+  maxAnyOfGroupsPerSide: number;
+  maxProbedPairs: number;
+  blockingPrefixLen: number;
+  maxEstimatedRows: number;
 };
 
 export type MultiTargetRecordMatchRequest = {
@@ -152,8 +163,8 @@ export type MatchProgressEvent = {
   sql?: string;
 };
 
-export function fetchAnalysisLimits(): Promise<{ maxTargetSets: number }> {
-  return analysisGet<{ maxTargetSets: number }>("/api/analysis/limits");
+export function fetchAnalysisLimits(): Promise<AnalysisLimits> {
+  return analysisGet<AnalysisLimits>("/api/analysis/limits");
 }
 
 async function analysisGet<T>(path: string): Promise<T> {

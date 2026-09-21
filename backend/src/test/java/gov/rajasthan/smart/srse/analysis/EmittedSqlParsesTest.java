@@ -31,6 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 
 /**
@@ -97,10 +99,11 @@ class EmittedSqlParsesTest {
         };
         service = new RecordMatchService(
                 jdbc, registry, new GuardrailProperties(1000, 30, 50), fields, columnMetadata,
-                new AnalysisProperties(5, 120, 4, 2, 10), new ObjectMapper());
+                new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L), new ObjectMapper());
         lenient().when(columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
                 any(), any(), any(), any())).thenReturn(Optional.empty());
         lenient().when(registry.hasColumns(any(), any())).thenReturn(true);
+        lenient().when(jdbc.queryForObject(anyString(), eq(Long.class))).thenReturn(1L);
         lenient().when(registry.describeColumns(any(), any())).thenAnswer(inv -> {
             Map<String, RegisteredColumn> described = new LinkedHashMap<>();
             List<?> requested = inv.getArgument(1, List.class);
