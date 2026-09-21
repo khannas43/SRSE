@@ -19,24 +19,33 @@ function ref(t: TableRef) {
   return { ...t };
 }
 
-function hubRow(column: string, extra: string[] = []): CriterionRowModel {
+function hubRow(
+  column: string,
+  extra: string[] = [],
+  mode: CriterionRowModel["mode"] = "COMBINE",
+): CriterionRowModel {
   return {
     ref: ref(TABLE_A),
     column,
     extraColumns: extra,
     fuzzyThresholdPercent: 85,
-    mode: "COMBINE",
+    mode,
     separator: " ",
   };
 }
 
-function targetRow(t: TableRef, column: string): CriterionRowModel {
+function targetRow(
+  t: TableRef,
+  column: string,
+  extra: string[] = [],
+  mode: CriterionRowModel["mode"] = "COMBINE",
+): CriterionRowModel {
   return {
     ref: ref(t),
     column,
-    extraColumns: [],
+    extraColumns: extra,
     fuzzyThresholdPercent: 80,
-    mode: "COMBINE",
+    mode,
     separator: " ",
   };
 }
@@ -86,6 +95,43 @@ describe("multi-target request serialization", () => {
     expect(fromForm).not.toBeNull();
     expect(fromCanvas).not.toBeNull();
     expect(stableMultiTargetRequestJson(fromForm!)).toBe(stableMultiTargetRequestJson(fromCanvas!));
+  });
+
+  it("canvas and form match for COMBINE hub and ANY_OF target folding", () => {
+    const hubRows = [hubRow("first_name", ["last_name"], "COMBINE")];
+    const targetBlocks = [
+      {
+        id: "t1",
+        label: "Bank",
+        joinRows: [targetRow(TABLE_B, "cand_a", ["cand_b"], "ANY_OF")],
+        displayRows: [],
+      },
+    ];
+    const extras = {
+      highlightDuplicates: false,
+      dedup: null,
+      ageFilter: null,
+      registeredFuzzyFor: noopFuzzy,
+      isFuzzyMatchable: noopFuzzy,
+    };
+    const fromForm = buildMultiTargetRecordMatchRequest({
+      hubRows,
+      hubDisplayRows: [],
+      hubSide: "SOURCE",
+      targets: targetBlocks.map(({ label, joinRows, displayRows }) => ({ label, joinRows, displayRows })),
+      ...extras,
+    });
+    const canvas = joinCanvasFromForm("SOURCE", hubRows, [], targetBlocks, ref(TABLE_A));
+    const { hubRows: cHub, hubDisplayRows, targets } = joinCanvasToFormModels(canvas);
+    const fromCanvas = buildMultiTargetRecordMatchRequest({
+      hubRows: cHub,
+      hubDisplayRows,
+      hubSide: canvas.hubSide,
+      targets,
+      ...extras,
+    });
+    expect(stableMultiTargetRequestJson(fromForm!)).toBe(stableMultiTargetRequestJson(fromCanvas!));
+    expect(fromForm!.targets[0].joinGroups?.length).toBeGreaterThan(0);
   });
 
   it("reordering canvas slots reorders hubCriteria and every target joinCriteria together", () => {

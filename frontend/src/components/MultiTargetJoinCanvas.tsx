@@ -18,8 +18,11 @@ import {
 import {
   isCriterionRowFilled,
   pairIsFuzzy,
+  rowColumns,
+  rowFolds,
   type CriterionRowModel,
 } from "@/lib/analysisCriterionModel";
+import type { GroupMode } from "@/lib/analysisApi";
 import {
   buildMultiTargetRequestFromCanvas,
   canvasHubNode,
@@ -56,6 +59,141 @@ type Props = Readonly<{
   registeredFuzzyFor: (ref: TableRef, column: string) => boolean | null;
   businessNameFor: (ref: TableRef, column: string) => string | null;
 }>;
+
+function countAnyOfGroups(rows: CriterionRowModel[]): number {
+  return rows.filter(isCriterionRowFilled).filter((r) => r.mode === "ANY_OF" && rowFolds(r)).length;
+}
+
+function emptySideForTable(ref: CascadeValue): CriterionRowModel {
+  return {
+    ref,
+    column: "",
+    extraColumns: [],
+    fuzzyThresholdPercent: 80,
+    mode: "COMBINE",
+    separator: " ",
+    columns: [],
+  };
+}
+
+function JoinSlotSideEditor({
+  idPrefix,
+  side,
+  columns,
+  disabled,
+  modeEditable,
+  anyOfHubCount,
+  onChange,
+  onLoadColumns,
+}: Readonly<{
+  idPrefix: string;
+  side: CriterionRowModel;
+  columns: RegisteredColumn[];
+  disabled?: boolean;
+  modeEditable: boolean;
+  anyOfHubCount: number;
+  onChange: (patch: Partial<CriterionRowModel>) => void;
+  onLoadColumns?: () => void;
+}>) {
+  const atColumnCap = rowColumns(side).length >= ANALYSIS_MAX_GROUP_COLUMNS;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+      <ColumnSelect
+        id={`${idPrefix}-primary`}
+        columns={columns}
+        value={side.column}
+        disabled={disabled}
+        onChange={(column) => onChange({ column })}
+      />
+      {side.extraColumns.map((extra, extraIndex) => (
+        <div key={`${idPrefix}-extra-${extraIndex}`} style={{ display: "flex", gap: "0.35rem" }}>
+          <ColumnSelect
+            id={`${idPrefix}-extra-${extraIndex}`}
+            columns={columns}
+            value={extra}
+            disabled={disabled}
+            onChange={(column) =>
+              onChange({
+                extraColumns: side.extraColumns.map((c, k) => (k === extraIndex ? column : c)),
+              })
+            }
+          />
+          <button
+            type="button"
+            className="srse-btn srse-btn-ghost srse-btn-sm"
+            disabled={disabled}
+            onClick={() =>
+              onChange({ extraColumns: side.extraColumns.filter((_, k) => k !== extraIndex) })
+            }
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="srse-btn srse-btn-ghost srse-btn-sm"
+        disabled={disabled || atColumnCap}
+        onClick={() => onChange({ extraColumns: [...side.extraColumns, ""] })}
+      >
+        + Add column
+      </button>
+      {modeEditable && (
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div>
+            <label htmlFor={`${idPrefix}-mode`} className="srse-text-muted" style={fieldLabelStyle}>
+              Compare as
+            </label>
+            <select
+              id={`${idPrefix}-mode`}
+              className="srse-select"
+              value={side.mode}
+              disabled={
+                disabled
+                || (side.mode !== "ANY_OF"
+                  && anyOfHubCount >= ANALYSIS_MAX_ANYOF_GROUPS_PER_SIDE)
+              }
+              onChange={(e) => {
+                const mode = e.target.value as GroupMode;
+                if (mode === "ANY_OF" && anyOfHubCount >= ANALYSIS_MAX_ANYOF_GROUPS_PER_SIDE && side.mode !== "ANY_OF") {
+                  return;
+                }
+                onChange({ mode });
+              }}
+            >
+              <option value="COMBINE">Combine columns</option>
+              <option value="ANY_OF">Match any one of</option>
+            </select>
+          </div>
+          {side.mode === "COMBINE" && rowFolds(side) && (
+            <div>
+              <label htmlFor={`${idPrefix}-sep`} className="srse-text-muted" style={fieldLabelStyle}>
+                Separator
+              </label>
+              <input
+                id={`${idPrefix}-sep`}
+                className="srse-input"
+                style={{ width: 48 }}
+                value={side.separator}
+                onChange={(e) => onChange({ separator: e.target.value })}
+              />
+            </div>
+          )}
+        </div>
+      )}
+      {onLoadColumns && columns.length === 0 && (
+        <button type="button" className="srse-btn srse-btn-ghost srse-btn-sm" onClick={onLoadColumns}>
+          Load columns
+        </button>
+      )}
+      {rowFolds(side) && side.mode === "COMBINE" && (
+        <span className="srse-text-muted" style={{ fontSize: "0.68rem" }}>
+          Multi-column COMBINE compares as text (not numeric).
+        </span>
+      )}
+    </div>
+  );
+}
 
 function ColumnSelect({
   id,
@@ -290,6 +428,8 @@ export function MultiTargetJoinCanvas({
   }
 
   const validationMessage = validateBeforeRun();
+  const hubRowsForAnyOf = useMemo(() => canvas.slots.map((s) => s.hub), [canvas.slots]);
+  const anyOfHubCount = useMemo(() => countAnyOfGroups(hubRowsForAnyOf), [hubRowsForAnyOf]);
 
   return (
     <div style={{ width: "100%" }}>
@@ -454,7 +594,10 @@ export function MultiTargetJoinCanvas({
         groups per side.
       </p>
 
-      {canvas.slots.map((slot, slotIndex) => (
+      {canvas.slots.map((slot, slotIndex) => {
+        const slotShowsGroupMode =
+          rowFolds(slot.hub) || Object.values(slot.targetByNodeId).some((t) => rowFolds(t));
+        return (
         <section key={slot.id} className="srse-card" style={{ marginBottom: "0.75rem" }}>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginBottom: "0.5rem" }}>
             <strong>Edge {slotIndex + 1}</strong>
@@ -478,62 +621,61 @@ export function MultiTargetJoinCanvas({
             </button>
           </div>
           <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
-            <div style={{ flex: "1 1 200px" }}>
+            <div style={{ flex: "1 1 220px" }}>
               <span className="srse-text-muted" style={fieldLabelStyle}>
-                Hub column
+                Hub columns
               </span>
-              <ColumnSelect
-                id={`canvas-slot-${slot.id}-hub-col`}
+              <JoinSlotSideEditor
+                idPrefix={`canvas-slot-${slot.id}-hub`}
+                side={slot.hub}
                 columns={slot.hub.columns ?? []}
-                value={slot.hub.column}
                 disabled={!hub || !isCascadeComplete(hub.tableRef)}
-                onChange={(column) => updateSlotHub(slot.id, { column })}
+                modeEditable={slotShowsGroupMode}
+                anyOfHubCount={
+                  slot.hub.mode === "ANY_OF" && rowFolds(slot.hub) ? anyOfHubCount - 1 : anyOfHubCount
+                }
+                onChange={(patch) => updateSlotHub(slot.id, patch)}
+                onLoadColumns={
+                  hub && isCascadeComplete(hub.tableRef)
+                    ? () => loadColumns(hub.tableRef).then((cols) => updateSlotHub(slot.id, {}, cols))
+                    : undefined
+                }
               />
-              {hub && isCascadeComplete(hub.tableRef) && (slot.hub.columns?.length ?? 0) === 0 && (
-                <button
-                  type="button"
-                  className="srse-btn srse-btn-ghost srse-btn-sm"
-                  style={{ marginTop: "0.25rem" }}
-                  onClick={() => {
-                    loadColumns(hub.tableRef).then((cols) => updateSlotHub(slot.id, {}, cols));
-                  }}
-                >
-                  Load columns
-                </button>
-              )}
             </div>
             {targets.map((node) => {
-              const side = slot.targetByNodeId[node.id];
-              const paired = side && isCriterionRowFilled(slot.hub) && isCriterionRowFilled({ ...side, ref: node.tableRef });
-              const fuzzy =
-                paired && pairIsFuzzy(slot.hub, { ...side, ref: node.tableRef }, registeredFuzzyFor);
+              const side = slot.targetByNodeId[node.id] ?? emptySideForTable(node.tableRef);
+              const pairedSide = { ...side, ref: node.tableRef };
+              const paired =
+                isCriterionRowFilled(slot.hub)
+                && isCriterionRowFilled(pairedSide);
+              const fuzzy = paired && pairIsFuzzy(slot.hub, pairedSide, registeredFuzzyFor);
+              const targetRowsForAnyOf = canvas.slots.map((s) => s.targetByNodeId[node.id] ?? emptySideForTable(node.tableRef));
+              const anyOfTargetCount = countAnyOfGroups(targetRowsForAnyOf);
+              const targetShowsGroupMode = rowFolds(pairedSide) || rowFolds(slot.hub);
               return (
-                <div key={node.id} style={{ flex: "1 1 200px" }}>
+                <div key={node.id} style={{ flex: "1 1 220px" }}>
                   <span className="srse-text-muted" style={fieldLabelStyle}>
-                    {node.label.trim() || "Target"} column
+                    {node.label.trim() || "Target"} columns
                   </span>
-                  <ColumnSelect
-                    id={`canvas-slot-${slot.id}-tgt-${node.id}`}
-                    columns={side?.columns ?? []}
-                    value={side?.column ?? ""}
+                  <JoinSlotSideEditor
+                    idPrefix={`canvas-slot-${slot.id}-tgt-${node.id}`}
+                    side={pairedSide}
+                    columns={side.columns ?? []}
                     disabled={!isCascadeComplete(node.tableRef)}
-                    onChange={(column) => updateSlotTarget(slot.id, node.id, { column })}
+                    modeEditable={targetShowsGroupMode}
+                    anyOfHubCount={
+                      pairedSide.mode === "ANY_OF" && rowFolds(pairedSide) ? anyOfTargetCount - 1 : anyOfTargetCount
+                    }
+                    onChange={(patch) => updateSlotTarget(slot.id, node.id, patch)}
+                    onLoadColumns={
+                      isCascadeComplete(node.tableRef)
+                        ? () => loadColumns(node.tableRef).then((cols) => updateSlotTarget(slot.id, node.id, {}, cols))
+                        : undefined
+                    }
                   />
-                  {isCascadeComplete(node.tableRef) && (side?.columns?.length ?? 0) === 0 && (
-                    <button
-                      type="button"
-                      className="srse-btn srse-btn-ghost srse-btn-sm"
-                      style={{ marginTop: "0.25rem" }}
-                      onClick={() => {
-                        loadColumns(node.tableRef).then((cols) => updateSlotTarget(slot.id, node.id, {}, cols));
-                      }}
-                    >
-                      Load columns
-                    </button>
-                  )}
                   {fuzzy && (
                     <label className="srse-text-muted" style={{ display: "block", fontSize: "0.72rem", marginTop: "0.25rem" }}>
-                      Fuzzy %
+                      Fuzzy % (group)
                       <input
                         type="number"
                         className="srse-input"
@@ -550,7 +692,8 @@ export function MultiTargetJoinCanvas({
             })}
           </div>
         </section>
-      ))}
+      );
+      })}
 
       <button type="button" className="srse-btn srse-btn-ghost srse-btn-sm" onClick={addSlot}>
         + Add join edge
