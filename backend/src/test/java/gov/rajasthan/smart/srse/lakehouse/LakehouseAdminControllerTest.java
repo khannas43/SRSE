@@ -136,13 +136,38 @@ class LakehouseAdminControllerTest {
     @Test
     void registerRejectsATableThatIsNotInTheLiveLakehouse() throws Exception {
         doThrow(new IllegalArgumentException("Unknown table: " + CATALOG + "." + SCHEMA + ".tbl_typo"))
-                .when(registry).register(eq(CATALOG), eq(SCHEMA), eq("tbl_typo"), eq(null));
+                .when(registry).register(eq(CATALOG), eq(SCHEMA), eq("tbl_typo"), eq("GOLD"));
 
         mockMvc.perform(post("/api/admin/lakehouse/registrations")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"catalog\":\"" + CATALOG + "\",\"schema\":\"" + SCHEMA + "\","
-                                + "\"table\":\"tbl_typo\",\"layer\":null}"))
+                                + "\"table\":\"tbl_typo\",\"layer\":\"GOLD\"}"))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void registerRejectsBlankLayer() throws Exception {
+        doThrow(new IllegalArgumentException("Layer is required"))
+                .when(registry).register(eq(CATALOG), eq(SCHEMA), eq(TABLE), eq(""));
+
+        mockMvc.perform(post("/api/admin/lakehouse/registrations")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"catalog\":\"" + CATALOG + "\",\"schema\":\"" + SCHEMA + "\","
+                                + "\"table\":\"" + TABLE + "\",\"layer\":\"\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void layersEndpointMergesKnownTagsWithTagsInUse() throws Exception {
+        when(registry.listRegistrations()).thenReturn(List.of(
+                new RegisteredTable(1L, CATALOG, SCHEMA, TABLE, "PLATINUM")));
+
+        mockMvc.perform(get("/api/admin/lakehouse/layers"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0]").value("BRONZE"))
+                .andExpect(jsonPath("$[1]").value("SILVER"))
+                .andExpect(jsonPath("$[2]").value("GOLD"))
+                .andExpect(jsonPath("$[3]").value("PLATINUM"));
     }
 
     @Test
@@ -159,17 +184,15 @@ class LakehouseAdminControllerTest {
                 .andExpect(jsonPath("$.qualifiedName").value(CATALOG + "." + SCHEMA + "." + TABLE));
     }
 
-    /** Clearing the tag is an edit like any other, not a missing-field error. */
     @Test
-    void editCanClearTheLayerTag() throws Exception {
-        when(registry.updateLayer(5L, null))
-                .thenReturn(new RegisteredTable(5L, CATALOG, SCHEMA, TABLE, null));
+    void editRejectsBlankLayer() throws Exception {
+        doThrow(new IllegalArgumentException("Layer is required"))
+                .when(registry).updateLayer(5L, "");
 
         mockMvc.perform(put("/api/admin/lakehouse/registrations/{id}", 5)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"layer\":null}"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.layer").doesNotExist());
+                        .content("{\"layer\":\"\"}"))
+                .andExpect(status().isBadRequest());
     }
 
     @Test

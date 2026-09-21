@@ -34,17 +34,27 @@ public class Scheme {
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
+    /** Nominated official criteria scenario; nullable for ddl-auto and legacy rows. */
+    @Column(name = "template_scenario_id")
+    private Long templateScenarioId;
+
     protected Scheme() {
     }
 
     public Scheme(Long id, String code, String name, String description,
                  boolean active, Instant createdAt) {
+        this(id, code, name, description, active, createdAt, null);
+    }
+
+    public Scheme(Long id, String code, String name, String description,
+                 boolean active, Instant createdAt, Long templateScenarioId) {
         this.id = id;
         this.code = code;
         this.name = name;
         this.description = description;
         this.active = active;
         this.createdAt = createdAt;
+        this.templateScenarioId = templateScenarioId;
     }
 
     public Long getId() {
@@ -69,5 +79,13 @@ public class Scheme {
 
     public Instant getCreatedAt() {
         return createdAt;
+    }
+
+    public Long getTemplateScenarioId() {
+        return templateScenarioId;
+    }
+
+    public void setTemplateScenarioId(Long templateScenarioId) {
+        this.templateScenarioId = templateScenarioId;
     }
 }

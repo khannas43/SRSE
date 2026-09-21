@@ -19,6 +19,8 @@ For architectural context and locked design decisions, see [`CLAUDE.md`](../CLAU
 9. [Optional: SonarQube code quality scans](#9-optional-sonarqube-code-quality-scans)
 10. [Troubleshooting](#10-troubleshooting)
 11. [Configuration reference](#11-configuration-reference)
+12. [Adding a new eligibility criterion without code changes](#12-adding-a-new-eligibility-criterion-without-code-changes)
+13. [Scheme official criteria](#13-scheme-official-criteria)
 
 ---
 
@@ -187,7 +189,7 @@ Catalog/Schema/Table dropdowns are empty. This is expected, not a fault.
 
 1. Open http://localhost:3000/admin456
 2. In **Lakehouse registry**, pick Catalog `iceberg` → Schema `srse` → Table `beneficiary`
-3. Optionally tag the layer, then click **Register table**
+3. Choose the **layer** (`BRONZE` / `SILVER` / `GOLD`) — required — then click **Register table**
 
 Or via the API:
 
@@ -195,7 +197,7 @@ Or via the API:
 TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/mock-login | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 curl -s -X POST http://localhost:8080/api/admin/lakehouse/registrations \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"catalog":"iceberg","schema":"srse","table":"beneficiary","layer":null}'
+  -d '{"catalog":"iceberg","schema":"srse","table":"beneficiary","layer":"GOLD"}'
 ```
 
 The Rule Engine tab does **not** need this — in synthetic mode it resolves
@@ -241,10 +243,18 @@ Copy `.env.example` to `.env` and set values per environment.
 | Variable | Default (local) | Description |
 |----------|-----------------|-------------|
 | `DATA_MODE` | `synthetic` | `synthetic` = local lakehouse stand-in; `live` = on-prem Golden Layer |
+| `SRSE_ENV_LABEL` | *(empty)* | **Display label only** (e.g. `UAT`). Blank derives Development / Production (Live) from `DATA_MODE` |
 | `SRSE_AUTH_MODE` | `mock` | `mock` = local JWT issuer; `rajsewadwar` = SSO (client Dev) |
 | `NEXT_PUBLIC_API_BASE` | `http://localhost:8080` | Backend URL **as seen by the browser** |
 | `SRSE_FRONTEND_ORIGINS` | `http://localhost:3000` | CORS allow-list — must match the frontend URL |
 | `NEXT_PUBLIC_AUTH_MODE` | `mock` | Frontend auth mode (must align with backend) |
+
+> **Environment label vs binding set.** `DATA_MODE` selects which
+> `field_column_mapping` rows apply and is deployment config, never editable
+> in the Admin UI. `SRSE_ENV_LABEL` only changes what the UI calls the running
+> deployment — a UAT box runs `DATA_MODE=live` and should set the label so
+> testers are not told they are in Production. The Admin mapping editor's
+> radios pick a **binding set** (`SYNTHETIC` / `LIVE`), not an environment.
 
 ### 5.2 Operational plane (DB2)
 
@@ -271,7 +281,8 @@ Copy `.env.example` to `.env` and set values per environment.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SRSE_COHORT_CAP` | `1000` | Maximum rows returned by cohort drill-down |
+| `SRSE_COHORT_CAP` | `1000` | Maximum rows returned by cohort drill-down — the only hard ceiling |
+| `SRSE_PREVIEW_SAMPLE_SIZE` | `50` | **Default** sample size preselected on the Rules preview. Not a second cap; always clamped by `SRSE_COHORT_CAP` |
 | `SRSE_QUERY_TIMEOUT_SECONDS` | `30` | Presto query timeout |
 | `SRSE_AGE_BAND_COLUMN` | `age_band` | Physical column for breakdown age-band dimension |
 
@@ -285,6 +296,17 @@ Copy `.env.example` to `.env` and set values per environment.
 | `SRSE_ANALYSIS_MAX_ANYOF_GROUPS` | `2` | "Any one of" groups per side. Each becomes its own `UNNEST`, and two on one side multiply that side's rows before the join runs — raise with care |
 
 Each sub-match still uses `min(SRSE_QUERY_TIMEOUT_SECONDS, remaining budget)` as its JDBC timeout — five targets does **not** mean five full query timeouts of wall clock.
+
+### 5.4.2 Analysis join-key suggestions
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SRSE_ANALYSIS_MAX_PROBED_PAIRS` | `10` | Column pairs probed when an officer runs **Check overlap** |
+
+**Suggest keys** is metadata-only and queries Presto not at all. **Check overlap**
+samples the *source* side at 10% Bernoulli and scans the *target in full* for each
+probed pair — sampling both sides would under-report a real key by the sample rate.
+Bounded by the variable above and `SRSE_QUERY_TIMEOUT_SECONDS`.
 
 ### 5.5 Frontend build-time vs runtime
 
@@ -810,5 +832,53 @@ DB2:          localhost:50000  (db2inst1 / srse_local_pw)
 | CP4BA / ODM integration | Arvind / IBM |
 
 ---
+
+---
+
+## 12. Adding a new eligibility criterion without code changes
+
+Most new criteria need **no compiler work** — the field catalogue plus the Admin
+mapping editor are the whole workflow.
+
+1. **Add the field** — Admin → Field catalogue. Set the tier, data type and (for
+   `STRING` fields) the allowed values as a comma-separated list, e.g. `Y,N`.
+   Empty entries are rejected: `a,,b` and `a,b,` would otherwise become blank
+   options in the officer's dropdown.
+2. **Map the field** for each `DataMode` — the Development (`SYNTHETIC`) and
+   Production (`LIVE`) binding sets are edited separately, and a field unmapped
+   in a mode cannot resolve there.
+3. The field appears in the Rules builder palette immediately. Preview and save
+   use the existing AST → SQL path; nothing is rebuilt or redeployed.
+
+**Field tiers** — these are how a field resolves to SQL, not a priority ranking:
+
+| Tier | Meaning |
+|------|---------|
+| **Tier 1** | A direct column (`age` → `beneficiary.age_years`). UI-mappable. |
+| **Tier 2** | A same-table expression (`date_diff('year', dob, current_date)`). UI-mappable. |
+| **Tier 3** | Cross-table / relationship / temporal. **Pre-materialised upstream** into a flat Golden Layer column first, then exposed as an ordinary Tier-1 field. |
+
+SRSE never joins to compute a Tier-3 field. Choosing Tier 3 before the flat
+column exists upstream creates a field that cannot resolve. A genuinely new
+**operator** (beyond `EQ`, `IN`, `BETWEEN`, `FUZZY_MATCH` and the rest) is the
+only case that still needs a compiler change.
+
+---
+
+## 13. Scheme official criteria
+
+A scheme may point at one saved scenario as its official criteria
+(`scheme.template_scenario_id`). Selecting the scheme in the Rules builder loads
+that ruleset as a starting point.
+
+- **Officer edits always fork.** Saving creates a **new** scenario; the scheme's
+  official criteria are never overwritten. This is enforced by construction —
+  scenario rulesets are write-once and there is no update route.
+- **Promoting a scenario to official criteria is `SRSE_ADMIN` only**
+  (`PUT /api/schemes/{id}/template`).
+- Templates are seeded at boot from `metadata/scheme-templates-seed.yml`,
+  idempotently.
+- Requires migration `docs/migrations/003-add-scheme-template.sql` on any
+  environment that does not run `ddl-auto`.
 
 *Last updated: August 2026 — aligned with commit `7a9c99f` (SonarQube automation + zero open issues).*

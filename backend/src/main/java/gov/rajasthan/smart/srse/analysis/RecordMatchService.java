@@ -289,7 +289,57 @@ public class RecordMatchService {
         if (req.ageFilter() != null) {
             validateAgeFilter(req.ageFilter());
         }
+        validateOuterJoinRules(req, sides);
         return sides;
+    }
+
+    /**
+     * Outer-join-specific constraints (dedup, age filter) — kept out of
+     * {@link #validateRequest}'s generic checks so messages stay actionable.
+     */
+    private void validateOuterJoinRules(RecordMatchRequest req, Sides sides) {
+        JoinType joinType = JoinType.effective(req.joinType());
+        if (req.dedup() != null && (joinType == JoinType.RIGHT || joinType == JoinType.FULL)) {
+            throw new IllegalArgumentException(
+                    "Dedup cannot be used with a " + joinType + " join: unmatched rows have NULL "
+                            + "source-side partition keys and would collapse into one row. "
+                            + "Use INNER or LEFT, or turn dedup off.");
+        }
+        if (req.ageFilter() != null && joinType == JoinType.FULL) {
+            throw new IllegalArgumentException(
+                    "Age filter cannot be used with a FULL join — neither side is preserved. "
+                            + "Use INNER, LEFT, or RIGHT, or turn the age filter off.");
+        }
+        if (req.ageFilter() != null && joinType == JoinType.LEFT) {
+            validateAgeFilterOnPreservedSide(sides, "src", sides.sourceTable(),
+                    sides.targetTable(), "LEFT");
+        }
+        if (req.ageFilter() != null && joinType == JoinType.RIGHT) {
+            validateAgeFilterOnPreservedSide(sides, "tgt", sides.targetTable(),
+                    sides.sourceTable(), "RIGHT");
+        }
+    }
+
+    private void validateAgeFilterOnPreservedSide(Sides sides, String preservedAlias,
+                                                    QualifiedTable preservedTable,
+                                                    QualifiedTable nullableTable, String joinLabel) {
+        String ageExpression = fields.resolveColumn("age_years");
+        Set<String> ageColumns = AliasRebase.referencedColumns(ageExpression);
+        if (registry.hasColumns(preservedTable, ageColumns)) {
+            return;
+        }
+        if (registry.hasColumns(nullableTable, ageColumns)) {
+            throw new IllegalArgumentException(
+                    "Age filter cannot use the " + (preservedAlias.equals("src") ? "target" : "source")
+                            + " table's date-of-birth column with a " + joinLabel + " join — unmatched "
+                            + preservedAlias + " rows have no row on the other side to filter. "
+                            + "Use INNER, or match against a table that carries the age column on the "
+                            + "preserved side (" + preservedTable.qualifiedName() + ").");
+        }
+        throw new IllegalArgumentException(
+                "The age filter cannot be applied: neither " + sides.sourceTable().qualifiedName()
+                        + " nor " + sides.targetTable().qualifiedName() + " has "
+                        + String.join(", ", ageColumns));
     }
 
     /**
@@ -306,6 +356,7 @@ public class RecordMatchService {
     }
 
     private MatchQuery buildMatchQuery(RecordMatchRequest req, JoinPlan join, Sides sides) {
+        JoinType joinType = JoinType.effective(req.joinType());
         List<Object> params = new ArrayList<>();
         Set<String> outerColumns = new LinkedHashSet<>();
         StringBuilder select = new StringBuilder();
@@ -318,16 +369,17 @@ public class RecordMatchService {
         // computed over different expressions than the join matched on.
         List<UnnestSide> sourceUnnests = new ArrayList<>();
         List<UnnestSide> targetUnnests = new ArrayList<>();
-        List<GroupPlan> groups = planGroups(join, sides, sourceUnnests, targetUnnests);
+        List<GroupPlan> groups = planGroups(join, sides, sourceUnnests, targetUnnests,
+                joinType.preservesSourceSide(), joinType.preservesTargetSide());
 
         appendCriteriaSelects(select, outerColumns, join, req);
         appendMatchedOnSelects(select, outerColumns, "src", "source_", sourceUnnests);
         appendMatchedOnSelects(select, outerColumns, "tgt", "target_", targetUnnests);
-        appendJoinConditions(onClause, where, params, groups);
+        appendJoinConditions(onClause, where, params, groups, joinType);
 
         String dedupAlias = appendDedupSelect(select, outerColumns, req, join);
         appendMatchScoreSelect(select, outerColumns, req, groups);
-        appendAgeFilter(where, params, req, sides);
+        appendAgeFilter(where, params, req, sides, joinType);
 
         if (where.length() == 0) {
             where.append("TRUE");
@@ -338,8 +390,8 @@ public class RecordMatchService {
         // reconciliation), which Presto joins natively.
         String sourceFrom = fromSide(sides.sourceTable().qualifiedName(), "src", sourceUnnests);
         String targetFrom = fromSide(sides.targetTable().qualifiedName(), "tgt", targetUnnests);
-        String baseSql = "SELECT " + select + " FROM " + sourceFrom + " JOIN " + targetFrom
-                + " ON " + onClause + " WHERE " + where;
+        String baseSql = "SELECT " + select + " FROM " + sourceFrom + " " + joinType.joinKeyword() + " "
+                + targetFrom + " ON " + onClause + " WHERE " + where;
 
         String finalSql = wrapWithDedup(baseSql, req, join, dedupAlias);
         return new MatchQuery(finalSql, params, List.copyOf(outerColumns));
@@ -452,12 +504,15 @@ public class RecordMatchService {
      * it can be written.
      */
     private List<GroupPlan> planGroups(JoinPlan join, Sides sides,
-                                       List<UnnestSide> sourceUnnests, List<UnnestSide> targetUnnests) {
+                                       List<UnnestSide> sourceUnnests, List<UnnestSide> targetUnnests,
+                                       boolean preserveSourceSide, boolean preserveTargetSide) {
         List<GroupPlan> plans = new ArrayList<>();
         for (int i = 0; i < join.groups().size(); i++) {
             MatchGroup g = join.groups().get(i);
-            SideSql src = sideSql(g, g.source(), "src", sides.sourceColumns(), i, sourceUnnests);
-            SideSql tgt = sideSql(g, g.target(), "tgt", sides.targetColumns(), i, targetUnnests);
+            SideSql src = sideSql(g, g.source(), "src", sides.sourceColumns(), i, sourceUnnests,
+                    preserveSourceSide);
+            SideSql tgt = sideSql(g, g.target(), "tgt", sides.targetColumns(), i, targetUnnests,
+                    preserveTargetSide);
 
             if (isGroupFuzzy(g)) {
                 // CompareAs does not enter into a fuzzy group: Levenshtein
@@ -487,7 +542,7 @@ public class RecordMatchService {
      */
     private SideSql sideSql(MatchGroup group, List<MatchCriterion> columns, String alias,
                             Map<String, RegisteredColumn> described, int groupIndex,
-                            List<UnnestSide> unnests) {
+                            List<UnnestSide> unnests, boolean preserveSideRows) {
         if (columns.size() == 1) {
             String column = columns.get(0).column();
             return new SideSql(alias + "." + column, familyOf(described, column));
@@ -503,7 +558,7 @@ public class RecordMatchService {
             String keyAlias = "g" + groupIndex + "_key";
             String matchedAlias = "g" + groupIndex + "_matched_on";
             unnests.add(new UnnestSide(keyAlias, matchedAlias, ColumnGroupSql.unnestClause(
-                    "t", names, !uniform, "u" + groupIndex, keyAlias, matchedAlias)));
+                    "t", names, !uniform, "u" + groupIndex, keyAlias, matchedAlias, preserveSideRows)));
             return new SideSql(alias + "." + keyAlias, uniform ? first : SqlTypeFamily.TEXT);
         }
         List<String> refs = names.stream().map(n -> alias + "." + n).toList();
@@ -548,22 +603,27 @@ public class RecordMatchService {
      * {@link #sideSql} instead of being written as alternatives here.
      */
     private void appendJoinConditions(StringBuilder onClause, StringBuilder where, List<Object> params,
-                                      List<GroupPlan> groups) {
+                                      List<GroupPlan> groups, JoinType joinType) {
         for (int i = 0; i < groups.size(); i++) {
             GroupPlan group = groups.get(i);
             if (onClause.length() > 0) {
                 onClause.append(" AND ");
             }
             if (group.fuzzy()) {
-                appendFuzzyJoin(onClause, where, params, i, group);
+                appendFuzzyJoin(onClause, where, params, i, group, joinType);
             } else {
                 onClause.append(group.sourceRef()).append(" = ").append(group.targetRef());
             }
         }
     }
 
+    /**
+     * Fuzzy pairs: blocking key always ON. Levenshtein similarity stays in WHERE
+     * for INNER only — for outer joins it moves to ON so unmatched preserved-side
+     * rows are not filtered away (see class javadoc / CLAUDE.md Analysis section).
+     */
     private static void appendFuzzyJoin(StringBuilder onClause, StringBuilder where, List<Object> params,
-                                      int index, GroupPlan group) {
+                                        int index, GroupPlan group, JoinType joinType) {
         if (group.group().fuzzyThresholdPercent() == null) {
             throw new IllegalArgumentException(
                     "sourceCriteria[" + index + "].fuzzyThresholdPercent is required for a name column");
@@ -574,7 +634,12 @@ public class RecordMatchService {
         }
         onClause.append(blockingKeyExpr(group.sourceRef())).append(" = ")
                 .append(blockingKeyExpr(group.targetRef()));
-        appendWhereClause(where, FuzzyMatchSql.similarityExpr(group.sourceRef(), group.targetRef()) + " >= ?");
+        String similarity = FuzzyMatchSql.similarityExpr(group.sourceRef(), group.targetRef()) + " >= ?";
+        if (joinType == JoinType.INNER) {
+            appendWhereClause(where, similarity);
+        } else {
+            onClause.append(" AND ").append(similarity);
+        }
         params.add(threshold / 100.0);
     }
 
@@ -625,7 +690,7 @@ public class RecordMatchService {
      * for 75-100 would be the worst outcome available.
      */
     private void appendAgeFilter(StringBuilder where, List<Object> params, RecordMatchRequest req,
-                                 Sides sides) {
+                                 Sides sides, JoinType joinType) {
         if (req.ageFilter() == null) {
             return;
         }
@@ -639,25 +704,22 @@ public class RecordMatchService {
         double minYears = req.ageFilter().minAge() / divisor;
         double maxYears = req.ageFilter().maxAge() / divisor;
 
+        List<Map.Entry<String, QualifiedTable>> sidesToFilter = switch (joinType) {
+            case INNER -> List.of(
+                    Map.entry("src", sides.sourceTable()),
+                    Map.entry("tgt", sides.targetTable()));
+            case LEFT -> List.of(Map.entry("src", sides.sourceTable()));
+            case RIGHT -> List.of(Map.entry("tgt", sides.targetTable()));
+            case FULL -> List.of();
+        };
+
         boolean applied = false;
-        // List.of, not Map.of: the clause order is the emitted SQL's order, and
-        // Map.of does not define one — the echoed query would differ run to run.
-        for (Map.Entry<String, QualifiedTable> side : List.of(
-                Map.entry("src", sides.sourceTable()),
-                Map.entry("tgt", sides.targetTable()))) {
+        for (Map.Entry<String, QualifiedTable> side : sidesToFilter) {
             if (!registry.hasColumns(side.getValue(), ageColumns)) {
                 continue;
             }
-            // Must NOT hardcode a leading " AND ": when every criterion pair is
-            // exact, nothing has written to `where` yet and an unconditional AND
-            // emitted "WHERE  AND date_diff(...)" — invalid SQL. Same guarded
-            // append the fuzzy path already uses.
             appendWhereClause(where,
                     AliasRebase.ontoAlias(ageExpression, side.getKey()) + " BETWEEN ? AND ?");
-            // Bound HERE, beside the clause they belong to. Four params were
-            // previously added whatever was emitted, so the moment one side
-            // stopped being emitted the remaining clause would have silently
-            // read the wrong pair.
             params.add(minYears);
             params.add(maxYears);
             applied = true;

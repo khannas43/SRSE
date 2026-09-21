@@ -22,13 +22,11 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 /**
  * spring-boot-starter-security auto-locks every endpoint behind a login form
- * when no SecurityFilterChain is defined; this opens /api/health/**,
- * /api/auth/mock-login and springdoc, and gates /api/decision/**,
- * /api/schemes/**, /api/metadata/**, /api/admin/** and /api/analysis/**
- * behind STATE_OFFICER —
- * enforced by whichever of {@link MockJwtAuthenticationFilter}
- * / {@link RajSewadwarAuthenticationFilter} is active for {@code srse.auth-mode}.
- * Real RajSewadwar SSO payload parsing is still a stub — see that filter.
+ * when no SecurityFilterChain is defined. Officer vs admin is split at
+ * <strong>method level</strong> (narrow matchers first) — not a blanket
+ * {@code /api/metadata/**} → admin rule, which would break the Rules and
+ * Analysis read paths. Enforced by {@link MockJwtAuthenticationFilter} or
+ * {@link RajSewadwarAuthenticationFilter} for {@code srse.auth-mode}.
  */
 @Configuration
 @EnableWebSecurity
@@ -75,8 +73,21 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/health/**").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/auth/mock-login").permitAll()
-                .requestMatchers("/api/decision/**", "/api/schemes/**", "/api/metadata/**", "/api/admin/**",
-                        "/api/analysis/**")
+                // Narrow admin rules MUST stay before broad /api/analysis/** and GET /api/metadata/**.
+                .requestMatchers(HttpMethod.PUT, "/api/analysis/column-metadata").hasAuthority(Authorities.SRSE_ADMIN)
+                .requestMatchers(HttpMethod.DELETE, "/api/analysis/column-metadata")
+                    .hasAuthority(Authorities.SRSE_ADMIN)
+                .requestMatchers(HttpMethod.POST, "/api/metadata/fields/**").hasAuthority(Authorities.SRSE_ADMIN)
+                .requestMatchers(HttpMethod.PUT, "/api/metadata/fields/**").hasAuthority(Authorities.SRSE_ADMIN)
+                .requestMatchers(HttpMethod.DELETE, "/api/metadata/fields/**").hasAuthority(Authorities.SRSE_ADMIN)
+                .requestMatchers(HttpMethod.POST, "/api/metadata/mappings/**").hasAuthority(Authorities.SRSE_ADMIN)
+                .requestMatchers(HttpMethod.PUT, "/api/metadata/mappings/**").hasAuthority(Authorities.SRSE_ADMIN)
+                .requestMatchers(HttpMethod.DELETE, "/api/metadata/mappings/**").hasAuthority(Authorities.SRSE_ADMIN)
+                .requestMatchers(HttpMethod.GET, "/api/metadata/**").hasAuthority(Authorities.STATE_OFFICER)
+                .requestMatchers(HttpMethod.GET, "/api/analysis/column-metadata").hasAuthority(Authorities.STATE_OFFICER)
+                .requestMatchers("/api/admin/**").hasAuthority(Authorities.SRSE_ADMIN)
+                .requestMatchers(HttpMethod.PUT, "/api/schemes/*/template").hasAuthority(Authorities.SRSE_ADMIN)
+                .requestMatchers("/api/decision/**", "/api/schemes/**", "/api/analysis/**")
                     .hasAuthority(Authorities.STATE_OFFICER)
                 .requestMatchers("/swagger-ui/**", "/v3/api-docs/**").permitAll()
                 // Without this, Spring Boot's internal error-dispatch to /error gets blocked by security too, masking the real HTTP status/error body behind a generic 403.

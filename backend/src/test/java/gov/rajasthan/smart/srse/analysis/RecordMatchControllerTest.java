@@ -45,6 +45,9 @@ class RecordMatchControllerTest {
     private MultiTargetRecordMatchService multiMatchService;
 
     @MockBean
+    private JoinKeySuggestService joinKeySuggestService;
+
+    @MockBean
     private MockJwtService mockJwtService;
 
     private static final String REQUEST_BODY = """

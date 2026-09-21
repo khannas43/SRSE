@@ -1,0 +1,24 @@
+-- ============================================================================
+-- SRSE migration 003 — scheme.template_scenario_id (official criteria pointer)
+-- Target: DB2 (operational plane).  Run ONCE per environment that already has
+-- a scheme table.  Safe to skip on a brand-new database: Hibernate adds the
+-- nullable column via ddl-auto: update.
+-- ============================================================================
+--
+-- WHY THIS IS NOT AUTOMATIC
+--
+-- `ddl-auto: update` adds NULLABLE columns but DB2 rejects ADD COLUMN ... NOT
+-- NULL on an existing table and does not report the failure (see migration 001).
+-- This pointer is intentionally NULLABLE — legacy schemes have no template yet.
+--
+-- WHAT CHANGES
+--
+-- Each scheme may nominate one saved scenario as its official criteria.
+-- Officers fork edits into new scenarios; only SRSE_ADMIN may change the pointer.
+--
+-- WHO MUST RUN IT
+--
+-- DBA / Lovadeep for client Dev DB2 when ddl-auto is not update.
+-- ============================================================================
+
+ALTER TABLE scheme ADD COLUMN template_scenario_id BIGINT;

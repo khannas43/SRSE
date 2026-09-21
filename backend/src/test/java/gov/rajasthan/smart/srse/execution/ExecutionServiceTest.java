@@ -40,8 +40,8 @@ class ExecutionServiceTest {
 
     private final RuleCompiler compiler = new RuleCompiler(resolver);
 
-    /** cohortCap=1000, queryTimeoutSeconds=30 — constructed directly (no Spring). */
-    private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30);
+    /** cohortCap=1000, queryTimeoutSeconds=30, previewSampleSize=50 — no Spring. */
+    private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30, 50);
 
     @Mock
     private JdbcTemplate jdbc;
@@ -179,6 +179,20 @@ class ExecutionServiceTest {
         verify(jdbc).queryForObject(sqlCap.capture(), eq(Long.class), any(Object[].class));
         assertTrue(sqlCap.getValue().contains("FROM otherschema"), sqlCap.getValue());
         assertFalse(sqlCap.getValue().contains("beneficiary"), sqlCap.getValue());
+    }
+
+    @Test
+    void previewSampleDefaultClampsToCohortCapWhenConfiguredAboveCap() {
+        GuardrailProperties wideDefault = new GuardrailProperties(1000, 30, 5000);
+        ExecutionService wideService = new ExecutionService(
+                compiler, jdbc, wideDefault, resolver, "age_band");
+
+        assertEquals(1000, wideService.previewSampleDefault());
+    }
+
+    @Test
+    void previewSampleDefaultUsesConfiguredSizeWhenBelowCap() {
+        assertEquals(50, service.previewSampleDefault());
     }
 
     @Test

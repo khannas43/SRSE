@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -19,11 +20,14 @@ public class RecordMatchController {
 
     private final RecordMatchService matchService;
     private final MultiTargetRecordMatchService multiMatchService;
+    private final JoinKeySuggestService joinKeySuggestService;
 
     public RecordMatchController(RecordMatchService matchService,
-                                 MultiTargetRecordMatchService multiMatchService) {
+                                 MultiTargetRecordMatchService multiMatchService,
+                                 JoinKeySuggestService joinKeySuggestService) {
         this.matchService = matchService;
         this.multiMatchService = multiMatchService;
+        this.joinKeySuggestService = joinKeySuggestService;
     }
 
     @GetMapping("/limits")
@@ -57,6 +61,24 @@ public class RecordMatchController {
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"analysis-match.csv\"")
                 .contentType(new MediaType("text", "csv", StandardCharsets.UTF_8))
                 .body(matchService.matchCsv(req));
+    }
+
+    /**
+     * Plans the match and returns display SQL only — same query {@link #match}
+     * would execute, without running it against Presto.
+     */
+    @PostMapping(value = "/match.sql", produces = MediaType.TEXT_PLAIN_VALUE)
+    public String matchSql(@RequestBody RecordMatchRequest req) {
+        return matchService.renderQueryForDisplay(matchService.planMatch(req));
+    }
+
+    /**
+     * Join-key hints for two registered tables — metadata-only by default;
+     * optional bounded overlap probe when {@code probe: true}.
+     */
+    @PostMapping("/suggest-keys")
+    public List<JoinKeySuggestion> suggestKeys(@RequestBody SuggestJoinKeysRequest req) {
+        return joinKeySuggestService.suggest(req);
     }
 
     /**

@@ -34,6 +34,9 @@ srse:
       trust-store-path: ${SRSE_PRESTO_TRUSTSTORE_PATH:}
       trust-store-password: ${SRSE_PRESTO_TRUSTSTORE_PASSWORD:}
   data-mode: ${DATA_MODE:synthetic}
+  # Optional display name for the running deployment (UAT, Staging, etc.).
+  # Does not change DATA_MODE or field_column_mapping keys — UI only.
+  environment-label: ${SRSE_ENV_LABEL:}
   auth-mode: ${SRSE_AUTH_MODE:mock}
   # Comma-separated list of origins the browser loads the frontend from —
   # CORS rejects everything else. Must match the ACTUAL URL the browser uses,
@@ -42,11 +45,13 @@ srse:
   guardrails:
     cohort-cap: ${SRSE_COHORT_CAP:1000}
     query-timeout-seconds: ${SRSE_QUERY_TIMEOUT_SECONDS:30}
+    preview-sample-size: ${SRSE_PREVIEW_SAMPLE_SIZE:50}
   analysis:
     max-target-sets: ${SRSE_ANALYSIS_MAX_TARGET_SETS:5}
     multi-match-budget-seconds: ${SRSE_ANALYSIS_MULTI_MATCH_BUDGET_SECONDS:120}
     max-group-columns: ${SRSE_ANALYSIS_MAX_GROUP_COLUMNS:4}
     max-any-of-groups-per-side: ${SRSE_ANALYSIS_MAX_ANYOF_GROUPS:2}
+    max-probed-pairs: ${SRSE_ANALYSIS_MAX_PROBED_PAIRS:10}
   breakdown:
     # age_band has no field-catalogue entry (never officer-selectable as a
     # rule filter, only a fixed breakdown dimension per ExecutionService's

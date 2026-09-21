@@ -29,11 +29,15 @@ public class MockJwtService {
     private final SecretKey signingKey = Keys.secretKeyFor(SignatureAlgorithm.HS256);
 
     public String issue(String subject) {
+        return issue(subject, List.of(Authorities.STATE_OFFICER));
+    }
+
+    public String issue(String subject, List<String> authorities) {
         Instant now = Instant.now();
         Instant expires = now.plus(TOKEN_TTL);
         return Jwts.builder()
                 .setSubject(subject)
-                .claim("authorities", List.of(Authorities.STATE_OFFICER))
+                .claim("authorities", List.copyOf(authorities))
                 .setIssuedAt(toLegacyDate(now))
                 .setExpiration(toLegacyDate(expires))
                 .signWith(signingKey)

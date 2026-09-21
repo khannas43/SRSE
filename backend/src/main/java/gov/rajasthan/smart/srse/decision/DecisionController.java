@@ -37,6 +37,17 @@ public class DecisionController {
     }
 
     /**
+     * Guardrail limits for the Rules preview UI (default sample size and hard cap).
+     * Does not change {@code /preview} or {@code /cohort} contracts.
+     */
+    @GetMapping("/limits")
+    public DecisionLimitsResponse limits() {
+        return new DecisionLimitsResponse(
+                executionService.previewSampleDefault(),
+                executionService.cohortCap());
+    }
+
+    /**
      * Live preview — compile + count + (optionally) break down a ruleset with
      * NO persistence, so the rule builder can re-run on every parameter tweak.
      */

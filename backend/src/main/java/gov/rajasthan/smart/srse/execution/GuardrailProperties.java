@@ -8,6 +8,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * CONTRACT:
  *  - {@code cohortCap} hard-caps row-level drill-down; never exceeded regardless
  *    of the requested limit.
+ *  - {@code previewSampleSize} is the default sample size the Rules preview UI
+ *    preselects — not a second cap; {@code cohortCap} remains the only ceiling.
  *  - {@code queryTimeoutSeconds} is applied to every analytical query before
  *    execution — including the Analysis tab's record-match, whose result set
  *    is otherwise uncapped (see {@code analysis.RecordMatchService}); this is
@@ -18,4 +20,4 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * idiomatic form (no setters, no {@code @ConstructorBinding} needed).
  */
 @ConfigurationProperties(prefix = "srse.guardrails")
-public record GuardrailProperties(int cohortCap, int queryTimeoutSeconds) {}
+public record GuardrailProperties(int cohortCap, int queryTimeoutSeconds, int previewSampleSize) {}

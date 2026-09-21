@@ -25,6 +25,7 @@ public class ConnectionInfoController {
     private final JdbcTemplate presto;
 
     private final String dataMode;
+    private final String environmentLabelOverride;
     private final String analyticalUrl;
     private final String analyticalUsername;
     private final String analyticalDriverClassName;
@@ -33,12 +34,14 @@ public class ConnectionInfoController {
             DataSource operational,
             @Qualifier("prestoJdbcTemplate") JdbcTemplate presto,
             @Value("${srse.data-mode}") String dataMode,
+            @Value("${srse.environment-label:}") String environmentLabelOverride,
             @Value("${srse.datasource.analytical.jdbc-url}") String analyticalUrl,
             @Value("${srse.datasource.analytical.username}") String analyticalUsername,
             @Value("${srse.datasource.analytical.driver-class-name}") String analyticalDriverClassName) {
         this.operational = (HikariDataSource) operational;
         this.presto = presto;
         this.dataMode = dataMode;
+        this.environmentLabelOverride = environmentLabelOverride;
         this.analyticalUrl = analyticalUrl;
         this.analyticalUsername = analyticalUsername;
         this.analyticalDriverClassName = analyticalDriverClassName;
@@ -51,7 +54,9 @@ public class ConnectionInfoController {
                 operational.getDriverClassName(), checkOperational());
         PlaneInfo analyticalInfo = new PlaneInfo(
                 analyticalUrl, analyticalUsername, analyticalDriverClassName, checkAnalytical());
-        return new ConnectionsResponse(dataMode, operationalInfo, analyticalInfo);
+        String environmentLabel =
+                EnvironmentLabelResolver.resolve(environmentLabelOverride, dataMode);
+        return new ConnectionsResponse(dataMode, environmentLabel, operationalInfo, analyticalInfo);
     }
 
     private String checkOperational() {
@@ -74,6 +79,10 @@ public class ConnectionInfoController {
     public record PlaneInfo(String jdbcUrl, String username, String driverClassName, String status) {
     }
 
-    public record ConnectionsResponse(String dataMode, PlaneInfo operational, PlaneInfo analytical) {
+    public record ConnectionsResponse(
+            String dataMode,
+            String environmentLabel,
+            PlaneInfo operational,
+            PlaneInfo analytical) {
     }
 }

@@ -70,8 +70,8 @@ class RecordMatchServiceTest {
     };
 
     /** queryTimeoutSeconds=30. */
-    private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30);
-    private final AnalysisProperties analysisProperties = new AnalysisProperties(5, 120, 4, 2);
+    private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30, 50);
+    private final AnalysisProperties analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10);
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -1376,5 +1376,69 @@ class RecordMatchServiceTest {
             idx += needle.length();
         }
         return count;
+    }
+
+    @Test
+    void innerJoinSqlUnchangedWhenJoinTypeOmittedOrExplicit() {
+        String omitted = service.planMatch(exactMatchRequest()).sql();
+        RecordMatchRequest explicit = new RecordMatchRequest(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("beneficiary", "district")),
+                null, null, List.of(), false, null, null, JoinType.INNER);
+        assertEquals(omitted, service.planMatch(explicit).sql());
+        assertFalse(omitted.contains("INNER JOIN"), omitted);
+    }
+
+    @Test
+    void leftJoinFuzzySimilarityStaysInOnNotWhere() {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(fuzzy("beneficiary", "father_name", 75.0)),
+                List.of(exact("beneficiary", "father_name")),
+                null, null, List.of(), false, null, null, JoinType.LEFT);
+        String sql = service.planMatch(req).sql();
+        int onIdx = sql.indexOf(" ON ");
+        int whereIdx = sql.indexOf(" WHERE ");
+        assertTrue(onIdx >= 0 && whereIdx > onIdx, sql);
+        String onPart = sql.substring(onIdx, whereIdx);
+        String wherePart = sql.substring(whereIdx);
+        assertTrue(onPart.contains("levenshtein_distance"), onPart);
+        assertFalse(wherePart.contains("levenshtein_distance"), wherePart);
+    }
+
+    @Test
+    void dedupWithFullJoinIsRejected() {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("beneficiary", "district")),
+                null, null, List.of(), false,
+                new DedupSpec(CATALOG, SCHEMA, "beneficiary", "updated_at"),
+                null, JoinType.FULL);
+        assertThrows(IllegalArgumentException.class, () -> service.planMatch(req));
+    }
+
+    @Test
+    void ageFilterOnNullableSideOfLeftJoinIsRejectedEarly() {
+        when(registry.hasColumns(any(), any())).thenAnswer(inv -> {
+            QualifiedTable table = inv.getArgument(0);
+            return "beneficiary".equals(table.table());
+        });
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("mapping", "district")),
+                List.of(exact("beneficiary", "district")),
+                null, null, List.of(), false, null, new AgeFilterSpec(18, 60, "YEARS"), JoinType.LEFT);
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> service.planMatch(req));
+        assertTrue(ex.getMessage().contains("LEFT"), ex.getMessage());
+    }
+
+    @Test
+    void leftJoinAnyOfOnPreservedSourceUsesLeftJoinUnnest() {
+        MatchGroup anyOf = new MatchGroup(
+                List.of(exact("beneficiary", "a1"), exact("beneficiary", "a2")),
+                List.of(exact("beneficiary", "b")),
+                GroupMode.ANY_OF, null, null);
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(), List.of(), null, null, List.of(anyOf), false, null, null, JoinType.LEFT);
+        String sql = service.planMatch(req).sql();
+        assertTrue(sql.contains("LEFT JOIN UNNEST"), sql);
     }
 }

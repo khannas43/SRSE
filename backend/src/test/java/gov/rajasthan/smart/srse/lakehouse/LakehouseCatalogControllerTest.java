@@ -53,6 +53,18 @@ class LakehouseCatalogControllerTest {
     private MockJwtService mockJwtService;
 
     @Test
+    void layersComeFromTheRegistry() throws Exception {
+        when(registry.listLayers()).thenReturn(List.of("BRONZE", "SILVER", LakehouseLayers.UNTAGGED));
+
+        mockMvc.perform(get("/api/analysis/lakehouse/layers"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0]").value("BRONZE"))
+                .andExpect(jsonPath("$[2]").value(LakehouseLayers.UNTAGGED));
+
+        verifyNoInteractions(browse);
+    }
+
+    @Test
     void catalogsComeFromTheRegistryNotTheLiveCluster() throws Exception {
         when(registry.listCatalogs()).thenReturn(List.of(CATALOG));
 
@@ -60,7 +72,19 @@ class LakehouseCatalogControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0]").value(CATALOG));
 
+        verify(registry).listCatalogs();
         verifyNoInteractions(browse);
+    }
+
+    @Test
+    void catalogsWithLayerFilterUseLayerScopedLister() throws Exception {
+        when(registry.listCatalogs("BRONZE")).thenReturn(List.of("iceberg_bronze"));
+
+        mockMvc.perform(get("/api/analysis/lakehouse/catalogs").param("layer", "BRONZE"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0]").value("iceberg_bronze"));
+
+        verify(registry).listCatalogs("BRONZE");
     }
 
     @Test

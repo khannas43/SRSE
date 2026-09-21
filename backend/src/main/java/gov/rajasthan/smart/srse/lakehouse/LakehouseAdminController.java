@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.LinkedHashSet;
 import java.util.List;
 
 /**
@@ -57,6 +58,17 @@ public class LakehouseAdminController {
     }
 
     // ---- registrations ----
+
+    /** Known layer tags plus any distinct tags already in use (for register/edit pickers). */
+    @GetMapping("/layers")
+    public List<String> layers() {
+        LinkedHashSet<String> merged = new LinkedHashSet<>(LakehouseLayers.KNOWN);
+        registry.listRegistrations().stream()
+                .map(RegisteredTable::getLayer)
+                .filter(java.util.Objects::nonNull)
+                .forEach(merged::add);
+        return List.copyOf(merged);
+    }
 
     @GetMapping("/registrations")
     public List<RegistrationResponse> registrations() {

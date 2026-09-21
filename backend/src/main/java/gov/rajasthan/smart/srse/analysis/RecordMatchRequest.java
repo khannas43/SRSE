@@ -33,7 +33,8 @@ public record RecordMatchRequest(
         List<MatchGroup> joinGroups,
         boolean highlightDuplicates,
         DedupSpec dedup,
-        AgeFilterSpec ageFilter) {
+        AgeFilterSpec ageFilter,
+        JoinType joinType) {
 
     public RecordMatchRequest {
         sourceDisplayColumns = sourceDisplayColumns == null ? List.of() : sourceDisplayColumns;
@@ -53,6 +54,19 @@ public record RecordMatchRequest(
                               DedupSpec dedup,
                               AgeFilterSpec ageFilter) {
         this(sourceCriteria, targetCriteria, sourceDisplayColumns, targetDisplayColumns,
-                List.of(), highlightDuplicates, dedup, ageFilter);
+                List.of(), highlightDuplicates, dedup, ageFilter, null);
+    }
+
+    /** Multi-target sub-matches — always INNER ({@code joinType} null). */
+    public RecordMatchRequest(List<MatchCriterion> sourceCriteria,
+                              List<MatchCriterion> targetCriteria,
+                              List<DisplayColumn> sourceDisplayColumns,
+                              List<DisplayColumn> targetDisplayColumns,
+                              List<MatchGroup> joinGroups,
+                              boolean highlightDuplicates,
+                              DedupSpec dedup,
+                              AgeFilterSpec ageFilter) {
+        this(sourceCriteria, targetCriteria, sourceDisplayColumns, targetDisplayColumns,
+                joinGroups, highlightDuplicates, dedup, ageFilter, null);
     }
 }

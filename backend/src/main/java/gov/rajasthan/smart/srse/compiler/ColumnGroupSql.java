@@ -69,6 +69,17 @@ public final class ColumnGroupSql {
      */
     public static String unnestClause(String sourceAlias, List<String> columns, boolean castToText,
                                       String unnestAlias, String keyAlias, String matchedAlias) {
+        return unnestClause(sourceAlias, columns, castToText, unnestAlias, keyAlias, matchedAlias, false);
+    }
+
+    /**
+     * @param preserveSideRows when true, use {@code LEFT JOIN UNNEST ... ON TRUE}
+     *                         so rows with all-null ANY_OF candidates survive an
+     *                         outer join on the preserved side
+     */
+    public static String unnestClause(String sourceAlias, List<String> columns, boolean castToText,
+                                      String unnestAlias, String keyAlias, String matchedAlias,
+                                      boolean preserveSideRows) {
         String values = String.join(", ", columns.stream()
                 .map(c -> {
                     String ref = sourceAlias + "." + c;
@@ -78,8 +89,12 @@ public final class ColumnGroupSql {
         String names = String.join(", ", columns.stream()
                 .map(c -> "'" + escapeLiteral(c) + "'")
                 .toList());
-        return "CROSS JOIN UNNEST(ARRAY[" + values + "], ARRAY[" + names + "]) AS "
+        String unnest = "UNNEST(ARRAY[" + values + "], ARRAY[" + names + "]) AS "
                 + unnestAlias + " (" + keyAlias + ", " + matchedAlias + ")";
+        if (preserveSideRows) {
+            return "LEFT JOIN " + unnest + " ON TRUE";
+        }
+        return "CROSS JOIN " + unnest;
     }
 
     /**

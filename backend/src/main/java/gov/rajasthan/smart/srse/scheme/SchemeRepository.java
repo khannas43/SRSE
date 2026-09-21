@@ -10,4 +10,6 @@ public interface SchemeRepository extends JpaRepository<Scheme, Long> {
     Optional<Scheme> findByCode(String code);
 
     List<Scheme> findByActiveTrueOrderByName();
+
+    java.util.Optional<Scheme> findByTemplateScenarioId(Long templateScenarioId);
 }

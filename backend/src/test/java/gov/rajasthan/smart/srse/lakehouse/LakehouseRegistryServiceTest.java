@@ -69,6 +69,11 @@ class LakehouseRegistryServiceTest {
     }
 
     @Test
+    void normaliseRejectsUntaggedAsAStoredLayerName() {
+        assertThrows(IllegalArgumentException.class, () -> LakehouseLayers.normalise("untagged"));
+    }
+
+    @Test
     void registerNormalisesLayerToUpperCase() {
         when(registrations.findByCatalogNameAndSchemaNameAndTableName(CATALOG, SCHEMA, TABLE))
                 .thenReturn(Optional.empty());
@@ -80,12 +85,19 @@ class LakehouseRegistryServiceTest {
     }
 
     @Test
-    void registerBlankLayerStoresNull() {
+    void registerBlankLayerIsRejected() {
+        assertThrows(IllegalArgumentException.class,
+                () -> service.register(CATALOG, SCHEMA, TABLE, "  "));
+        verify(registrations, never()).save(any());
+    }
+
+    @Test
+    void importRegistrationStillAcceptsNullLayer() {
         when(registrations.findByCatalogNameAndSchemaNameAndTableName(CATALOG, SCHEMA, TABLE))
                 .thenReturn(Optional.empty());
         when(registrations.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        assertNull(service.register(CATALOG, SCHEMA, TABLE, "  ").getLayer());
+        assertNull(service.importRegistration(CATALOG, SCHEMA, TABLE, null).getLayer());
     }
 
     /** Re-registering is an update of the layer tag, not a duplicate row. */
@@ -115,14 +127,13 @@ class LakehouseRegistryServiceTest {
         assertEquals(TABLE, saved.getTableName());
     }
 
-    /** Clearing the tag is a legitimate edit, not a no-op. */
     @Test
-    void updateLayerCanClearTheTag() {
+    void updateLayerBlankLayerIsRejected() {
         when(registrations.findById(7L))
                 .thenReturn(Optional.of(new RegisteredTable(7L, CATALOG, SCHEMA, TABLE, "SILVER")));
-        when(registrations.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        assertNull(service.updateLayer(7L, "  ").getLayer());
+        assertThrows(IllegalArgumentException.class, () -> service.updateLayer(7L, "  "));
+        verify(registrations, never()).save(any());
     }
 
     @Test
@@ -239,5 +250,65 @@ class LakehouseRegistryServiceTest {
 
         assertEquals(List.of(CATALOG), service.listCatalogs());
         verify(browse, never()).listCatalogs();
+    }
+
+    @Test
+    void listLayersIncludesUntaggedOnlyWhenNullLayerRowsExist() {
+        when(registrations.findAllByOrderByCatalogNameAscSchemaNameAscTableNameAsc())
+                .thenReturn(List.of(
+                        new RegisteredTable(1L, CATALOG, SCHEMA, TABLE, "SILVER"),
+                        new RegisteredTable(2L, CATALOG, SCHEMA, "other", null)));
+
+        assertEquals(List.of("SILVER", LakehouseLayers.UNTAGGED), service.listLayers());
+    }
+
+    @Test
+    void listLayersOmitsUntaggedWhenEveryRowIsTagged() {
+        when(registrations.findAllByOrderByCatalogNameAscSchemaNameAscTableNameAsc())
+                .thenReturn(List.of(new RegisteredTable(1L, CATALOG, SCHEMA, TABLE, "GOLD")));
+
+        assertEquals(List.of("GOLD"), service.listLayers());
+    }
+
+    /** Stored tag UNTAGGED plus null-layer rows must not duplicate the sentinel in the list. */
+    @Test
+    void listLayersDedupesUntaggedSentinelWhenMisTaggedRowExists() {
+        when(registrations.findAllByOrderByCatalogNameAscSchemaNameAscTableNameAsc())
+                .thenReturn(List.of(
+                        new RegisteredTable(1L, CATALOG, SCHEMA, TABLE, LakehouseLayers.UNTAGGED),
+                        new RegisteredTable(2L, CATALOG, SCHEMA, "other", null)));
+
+        assertEquals(List.of(LakehouseLayers.UNTAGGED), service.listLayers());
+    }
+
+    @Test
+    void listCatalogsFilteredByLayer() {
+        when(registrations.findAllByOrderByCatalogNameAscSchemaNameAscTableNameAsc())
+                .thenReturn(List.of(
+                        new RegisteredTable(1L, "iceberg_bronze", SCHEMA, TABLE, "BRONZE"),
+                        new RegisteredTable(2L, CATALOG, SCHEMA, TABLE, "SILVER")));
+
+        assertEquals(List.of("iceberg_bronze"), service.listCatalogs("BRONZE"));
+    }
+
+    @Test
+    void listSchemasFilteredByUntaggedSentinel() {
+        when(registrations.findAllByOrderByCatalogNameAscSchemaNameAscTableNameAsc())
+                .thenReturn(List.of(
+                        new RegisteredTable(1L, CATALOG, "schema_a", TABLE, null),
+                        new RegisteredTable(2L, CATALOG, SCHEMA, TABLE, "SILVER")));
+
+        assertEquals(List.of("schema_a"), service.listSchemas(CATALOG, LakehouseLayers.UNTAGGED));
+    }
+
+    @Test
+    void listTablesFilteredByLayer() {
+        when(registrations.findAllByOrderByCatalogNameAscSchemaNameAscTableNameAsc())
+                .thenReturn(List.of(
+                        new RegisteredTable(1L, CATALOG, SCHEMA, TABLE, "GOLD"),
+                        new RegisteredTable(2L, CATALOG, SCHEMA, "other_table", "SILVER")));
+
+        assertEquals(List.of(TABLE), service.listTables(CATALOG, SCHEMA, "GOLD").stream()
+                .map(RegisteredTable::getTableName).toList());
     }
 }

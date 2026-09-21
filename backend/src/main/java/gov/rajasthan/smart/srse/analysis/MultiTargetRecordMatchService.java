@@ -41,6 +41,13 @@ import java.util.StringJoiner;
  *
  * <p>{@code match_score_pct} values are per target and not comparable across
  * targets.
+ *
+ * <p><b>Join types ({@link JoinType}) are not supported here.</b> Each sub-match
+ * is built as an INNER join via {@link RecordMatchService}; LEFT/RIGHT/FULL and
+ * the outer-join predicate routing live only on the two-table
+ * {@code POST /api/analysis/match} path. Adding join types here would duplicate
+ * every outer-join trap (WHERE-vs-ON, age filter side, dedup partition, UNNEST
+ * preservation) on a separate emitter — out of scope until N-way join design exists.
  */
 @Service
 public class MultiTargetRecordMatchService {

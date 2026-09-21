@@ -12,6 +12,8 @@ import gov.rajasthan.smart.srse.lakehouse.LakehouseRegistryService.RegisteredCol
 import gov.rajasthan.smart.srse.metadata.AnalysisColumnMetadataRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -25,7 +27,9 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
 
@@ -92,8 +96,8 @@ class EmittedSqlParsesTest {
             throw new FieldResolver.UnknownFieldException(fieldKey);
         };
         service = new RecordMatchService(
-                jdbc, registry, new GuardrailProperties(1000, 30), fields, columnMetadata,
-                new AnalysisProperties(5, 120, 4, 2), new ObjectMapper());
+                jdbc, registry, new GuardrailProperties(1000, 30, 50), fields, columnMetadata,
+                new AnalysisProperties(5, 120, 4, 2, 10), new ObjectMapper());
         lenient().when(columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
                 any(), any(), any(), any())).thenReturn(Optional.empty());
         lenient().when(registry.hasColumns(any(), any())).thenReturn(true);
@@ -118,8 +122,13 @@ class EmittedSqlParsesTest {
     }
 
     private String sqlFor(List<MatchGroup> groups, boolean highlight, DedupSpec dedup, AgeFilterSpec age) {
+        return sqlFor(groups, highlight, dedup, age, null);
+    }
+
+    private String sqlFor(List<MatchGroup> groups, boolean highlight, DedupSpec dedup, AgeFilterSpec age,
+                          JoinType joinType) {
         return service.planMatch(new RecordMatchRequest(
-                List.of(), List.of(), null, null, groups, highlight, dedup, age)).sql();
+                List.of(), List.of(), null, null, groups, highlight, dedup, age, joinType)).sql();
     }
 
     private void assertParses(String sql) {
@@ -226,5 +235,35 @@ class EmittedSqlParsesTest {
     void theParserRejectsSqlThatIsActuallyBroken() {
         assertThrows(ParsingException.class,
                 () -> parser.createStatement("SELECT FROM WHERE JOIN (", PARSING_OPTIONS));
+    }
+
+    /** Syntax-only coverage per join type — semantic correctness needs manual Presto runs. */
+    @ParameterizedTest
+    @EnumSource(JoinType.class)
+    void eachJoinTypeParsesWithFuzzyCombineAndAnyOf(JoinType joinType) {
+        DedupSpec dedup = joinType == JoinType.RIGHT || joinType == JoinType.FULL ? null
+                : new DedupSpec(CATALOG, SCHEMA, "golden", "updated_at");
+        AgeFilterSpec age = joinType == JoinType.FULL ? null : new AgeFilterSpec(18, 60, "YEARS");
+        assertParses(sqlFor(
+                List.of(
+                        group(List.of(col("txn", "full_name")),
+                                List.of(col("golden", "first_name"), col("golden", "last_name")),
+                                GroupMode.COMBINE, 85.0),
+                        group(List.of(col("txn", "account_no")),
+                                List.of(col("golden", "ja_id"), col("golden", "legacy_id")),
+                                GroupMode.ANY_OF, null),
+                        group(List.of(col("txn", "district")), List.of(col("golden", "district")),
+                                GroupMode.COMBINE, null)),
+                true, dedup, age, joinType));
+    }
+
+    @Test
+    void innerJoinSqlUsesBareJoinKeywordForRegression() {
+        String sql = sqlFor(List.of(
+                group(List.of(col("txn", "district")), List.of(col("golden", "district")),
+                        GroupMode.COMBINE, null)), false, null, null, JoinType.INNER);
+        assertTrue(sql.contains(CATALOG + "." + SCHEMA + ".txn src JOIN "
+                + CATALOG + "." + SCHEMA + ".golden tgt"), sql);
+        assertFalse(sql.contains("INNER JOIN"), sql);
     }
 }

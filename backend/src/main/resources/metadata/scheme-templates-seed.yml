@@ -1,0 +1,9 @@
+# Official scheme criteria — authored from consolidatedSerSchWiseCriteriaListForStage1And2.xlsx.
+# Re-run safe: skips schemes that already have template_scenario_id set.
+templates:
+  - schemeCode: EKAL_NAARI
+    scenarioName: "Official criteria (seed)"
+    rulesetJson: >
+      {"root":{"type":"GROUP","op":"AND","children":[
+        {"type":"PREDICATE","fieldKey":"age_years","operator":"GTE","value":18}
+      ]}}

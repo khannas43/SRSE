@@ -7,9 +7,11 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.function.Function;
 
 /**
@@ -69,11 +71,11 @@ public class LakehouseRegistryService {
                 .findByCatalogNameAndSchemaNameAndTableName(catalog, schema, table)
                 .orElse(null);
         if (existing != null) {
-            existing.setLayer(normaliseLayer(layer));
+            existing.setLayer(LakehouseLayers.normalise(layer));
             return registrations.save(existing);
         }
         return registrations.save(
-                new RegisteredTable(null, catalog, schema, table, normaliseLayer(layer)));
+                new RegisteredTable(null, catalog, schema, table, LakehouseLayers.normalise(layer)));
     }
 
     /**
@@ -89,7 +91,7 @@ public class LakehouseRegistryService {
     public RegisteredTable updateLayer(long id, String layer) {
         RegisteredTable existing = registrations.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("No such registration: " + id));
-        existing.setLayer(normaliseLayer(layer));
+        existing.setLayer(LakehouseLayers.normalise(layer));
         return registrations.save(existing);
     }
 
@@ -110,23 +112,51 @@ public class LakehouseRegistryService {
                 .findByCatalogNameAndSchemaNameAndTableName(catalog, schema, table)
                 .orElse(null);
         if (existing != null) {
-            existing.setLayer(normaliseLayer(layer));
+            existing.setLayer(LakehouseLayers.normaliseForImport(layer));
             return registrations.save(existing);
         }
-        return registrations.save(new RegisteredTable(null, catalog, schema, table, normaliseLayer(layer)));
+        return registrations.save(
+                new RegisteredTable(null, catalog, schema, table, LakehouseLayers.normaliseForImport(layer)));
     }
 
     public List<RegisteredTable> listRegistrations() {
+        return allOrdered();
+    }
+
+    private List<RegisteredTable> allOrdered() {
         return registrations.findAllByOrderByCatalogNameAscSchemaNameAscTableNameAsc();
     }
 
-    private static String normaliseLayer(String layer) {
-        if (layer == null || layer.isBlank()) {
-            return null;
+    private List<RegisteredTable> filteredByLayer(String layerFilter) {
+        List<RegisteredTable> all = allOrdered();
+        if (layerFilter == null) {
+            return all;
         }
-        // Uppercased so SILVER/Silver/silver group as one layer in the UI;
-        // still free text, so a third layer needs no code change.
-        return layer.trim().toUpperCase();
+        if (LakehouseLayers.UNTAGGED.equals(layerFilter)) {
+            return all.stream().filter(r -> r.getLayer() == null).toList();
+        }
+        return all.stream().filter(r -> layerFilter.equals(r.getLayer())).toList();
+    }
+
+    /**
+     * Distinct layer tags for the officer cascade, plus {@link LakehouseLayers#UNTAGGED}
+     * when any registration has {@code layer IS NULL}.
+     */
+    public List<String> listLayers() {
+        TreeSet<String> distinct = new TreeSet<>();
+        boolean hasUntagged = false;
+        for (RegisteredTable row : allOrdered()) {
+            if (row.getLayer() == null) {
+                hasUntagged = true;
+            } else {
+                distinct.add(row.getLayer());
+            }
+        }
+        LinkedHashSet<String> out = new LinkedHashSet<>(distinct);
+        if (hasUntagged) {
+            out.add(LakehouseLayers.UNTAGGED);
+        }
+        return List.copyOf(out);
     }
 
     // ---- officer-facing cascade: only registered entries ----
@@ -135,12 +165,36 @@ public class LakehouseRegistryService {
         return registrations.findDistinctCatalogNames();
     }
 
+    public List<String> listCatalogs(String layerFilter) {
+        return filteredByLayer(layerFilter).stream()
+                .map(RegisteredTable::getCatalogName)
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
     public List<String> listSchemas(String catalog) {
         return registrations.findDistinctSchemaNames(catalog);
     }
 
+    public List<String> listSchemas(String catalog, String layerFilter) {
+        return filteredByLayer(layerFilter).stream()
+                .filter(r -> catalog.equals(r.getCatalogName()))
+                .map(RegisteredTable::getSchemaName)
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
     public List<RegisteredTable> listTables(String catalog, String schema) {
         return registrations.findByCatalogNameAndSchemaNameOrderByTableName(catalog, schema);
+    }
+
+    public List<RegisteredTable> listTables(String catalog, String schema, String layerFilter) {
+        return filteredByLayer(layerFilter).stream()
+                .filter(r -> catalog.equals(r.getCatalogName()) && schema.equals(r.getSchemaName()))
+                .sorted(java.util.Comparator.comparing(RegisteredTable::getTableName))
+                .toList();
     }
 
     /**

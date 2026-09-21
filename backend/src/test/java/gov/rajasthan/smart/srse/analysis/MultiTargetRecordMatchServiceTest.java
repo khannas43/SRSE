@@ -46,8 +46,8 @@ class MultiTargetRecordMatchServiceTest {
     @Mock
     private JdbcTemplate jdbc;
 
-    private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30);
-    private final AnalysisProperties analysisProperties = new AnalysisProperties(5, 120, 4, 2);
+    private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30, 50);
+    private final AnalysisProperties analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10);
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private MultiTargetRecordMatchService service;
@@ -366,7 +366,7 @@ class MultiTargetRecordMatchServiceTest {
     @Test
     void budgetExhaustedSkipsRemainingTargets() throws Exception {
         service = new MultiTargetRecordMatchService(
-                recordMatchService, jdbc, guardrails, new AnalysisProperties(5, 0, 4, 2), objectMapper);
+                recordMatchService, jdbc, guardrails, new AnalysisProperties(5, 0, 4, 2, 10), objectMapper);
         stubHubValidation();
 
         String out = streamOutput(twoTargetRequest(HubSide.SOURCE));

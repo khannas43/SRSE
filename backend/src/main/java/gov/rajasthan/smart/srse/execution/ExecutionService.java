@@ -109,6 +109,19 @@ public class ExecutionService {
         return (requestedLimit == null || requestedLimit <= 0) ? cap : Math.min(requestedLimit, cap);
     }
 
+    /** Hard ceiling for row-level drill-down (for limits API and UI pickers). */
+    public int cohortCap() {
+        return guardrails.cohortCap();
+    }
+
+    /**
+     * Default Rules-preview sample size from config, clamped to {@link #cohortCap()}
+     * so a misconfigured env var cannot widen what the UI offers above the cap.
+     */
+    public int previewSampleDefault() {
+        return Math.min(guardrails.previewSampleSize(), guardrails.cohortCap());
+    }
+
     public List<Map<String, Object>> cohortSample(Ast.PredicateSpec spec, int requestedLimit) {
         int effectiveLimit = effectiveCohortLimit(requestedLimit);
         CompiledQuery q = compiler.compile(spec);

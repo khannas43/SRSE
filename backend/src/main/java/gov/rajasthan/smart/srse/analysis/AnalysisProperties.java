@@ -22,5 +22,6 @@ public record AnalysisProperties(
         int maxTargetSets,
         int multiMatchBudgetSeconds,
         int maxGroupColumns,
-        int maxAnyOfGroupsPerSide) {
+        int maxAnyOfGroupsPerSide,
+        int maxProbedPairs) {
 }

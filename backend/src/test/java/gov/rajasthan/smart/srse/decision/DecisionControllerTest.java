@@ -60,6 +60,17 @@ class DecisionControllerTest {
     private MockJwtService mockJwtService;
 
     @Test
+    void limitsExposePreviewDefaultAndCohortCap() throws Exception {
+        when(executionService.previewSampleDefault()).thenReturn(50);
+        when(executionService.cohortCap()).thenReturn(1000);
+
+        mockMvc.perform(get("/api/decision/limits"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.previewSampleSize").value(50))
+                .andExpect(jsonPath("$.cohortCap").value(1000));
+    }
+
+    @Test
     void previewWithBreakdownReturns200AndDoesNotPersist() throws Exception {
         List<BreakdownRow> breakdown = List.of(
                 new BreakdownRow("JAIPUR", "F", "18-59", 100L));

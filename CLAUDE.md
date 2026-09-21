@@ -70,8 +70,9 @@ name legitimately exists in more than one of them.
   LIVE mode, `analysis_column_metadata`'s key, and every identifier the
   Analysis tab's match SQL emits are `catalog.schema.table[.column]`.
 - **Two reaches, never conflated** (`gov.rajasthan.smart.srse.lakehouse`):
-  - `LakehouseBrowseService` — the LIVE cluster, everything the connection can
-    reach. **Admin-only**, for discovery.
+ - `LakehouseBrowseService` — the LIVE cluster, everything the connection can
+ reach. **Admin-only** (`SRSE_ADMIN`), for discovery — enforced in
+ `SecurityConfig`, not only in docs.
   - `LakehouseRegistryService` — the admin-registered subset, persisted in DB2
     (`registered_table`). **Everything officer-facing reads this.**
 - **Registration is per TABLE; columns are never copied into DB2.** Registering
@@ -80,9 +81,15 @@ name legitimately exists in more than one of them.
   instead of lingering as a reference that compiles into a broken query.
   Individual columns are hidden (and given business names / fuzzy flags) via
   `analysis_column_metadata`.
-- **`layer` (SILVER/GOLD) is a display TAG, not a hierarchy level.** A
-  Silver↔Gold reconciliation is an ordinary two-table match whose sides carry
-  different catalog/schema values; nothing in the query path special-cases it.
+- **`layer` (BRONZE/SILVER/GOLD/…) is a display TAG, not a hierarchy level.**
+  Registration requires a layer tag for new rows; config import may still
+  restore null-layer rows. Legacy null-layer registrations stay reachable in
+  the officer cascade under the wire sentinel `UNTAGGED` (filter only — never
+  a stored tag name). The Analysis cascade leads with Layer as a **registry
+  filter**; the submitted address stays `catalog.schema.table`. Layer never
+  enters a request payload, a validation gate, or emitted SQL. A Silver↔Gold
+  reconciliation is an ordinary two-table match whose sides carry different
+  catalog/schema values; nothing in the query path special-cases layer.
 
 ### Injection safety at this seam (extends the non-negotiables below)
 
@@ -150,6 +157,24 @@ so those comparisons did not return zero rows — they failed the whole query
 - Lombok available but records supersede it for simple value types.
 - Generate idiomatic Java 17 — **do NOT** emit Java 8 idioms.
 
+## Scheme official criteria vs officer scenarios (Package 7 — fork, never overwrite)
+
+Each scheme may nominate one saved **scenario** as its official template
+(`scheme.template_scenario_id`). **Officer workflow:** loading that template
+into the Rules builder is a starting point only — **Save always creates a new
+scenario**; it never overwrites the template or mutates an existing scenario's
+ruleset. **Admin workflow:** only **`SRSE_ADMIN`** may change which scenario is
+the template (`PUT /api/schemes/{id}/template`).
+
+This is enforced by construction today, not only by UI copy:
+
+- Scenario rulesets are **write-once** at create time.
+- **`DecisionController` exposes no PUT/PATCH/DELETE** under
+  `/api/decision/scenarios/**` — only GET (list/detail) and POST (create).
+- **`ScenarioService` has no ruleset mutator.** A future "edit scenario"
+  convenience route would re-open the overwrite path this decision forbids;
+  `DecisionScenarioRoutesGuardTest` exists to catch that.
+
 ## Injection safety (non-negotiable)
 
 - Compiler emits **only parameterised SQL** (`?` placeholders + ordered param list).
@@ -175,10 +200,24 @@ so those comparisons did not return zero rows — they failed the whole query
   beneficiary data; the cap is applied in `ExecutionService` and cannot be raised
   by a caller argument. The response states the limit it used and whether the
   sample was truncated, so 1000 rows of a 40-lakh cohort cannot be misread as the
-  cohort itself. No officer UI calls it yet.
+  cohort itself. The Rules tab preview calls `/cohort` alongside `/preview` for a
+  representative sample; `/preview` stays aggregates-only.
+- Rules preview sample uses **`SELECT *`** (full beneficiary row). Deliberate:
+  SRSE is shown to selected departmental users, so the whole row on screen is
+  acceptable; do not “fix” this by projecting a subset without an explicit product
+  decision.
+- `SRSE_PREVIEW_SAMPLE_SIZE` (default 50) is the **default sample size** the Rules
+  UI preselects — not a second cap. `SRSE_COHORT_CAP` remains the only hard ceiling.
 - Query **timeout** enforced.
 - Breakdown dimensions fixed: district, gender, age_band.
 - Count query returns **aggregates only** — never row-level data.
+- **Join-key suggestions** (`POST /api/analysis/suggest-keys`): metadata-only by
+  default; optional overlap probe samples the **source** only (`TABLESAMPLE
+  BERNOULLI`) and scans the **target in full** per pair (semi-join), capped by
+  `SRSE_ANALYSIS_MAX_PROBED_PAIRS` and query timeout. Source key-likeness uses
+  one full-table `approx_distinct/count` on the source (not sampled — sampling
+  inflates mid-cardinality ratios). That floors attributes (e.g. district)
+  below join keys (e.g. id).
 - The Analysis match is deliberately **uncapped server-side** (an earlier top-500
   pre-sample made matches unfindable at crore scale). Large results are handled
   where they actually hurt — the browser: past **10,000 rows** the grid, its
@@ -190,13 +229,36 @@ so those comparisons did not return zero rows — they failed the whole query
   rows, after which the on-screen count is a lower bound (`200000+`) but the CSV
   remains complete.
 - **Multi-target Analysis** (`POST /api/analysis/match-multi`) is **N × two-table
-  JOIN**, never an N-way join — one hub table, one target table per sub-match.
+  INNER JOIN**, never an N-way join — one hub table, one target table per sub-match.
+  **LEFT/RIGHT/FULL are supported only on the single two-table match**
+  (`POST /api/analysis/match`). Multi-target deliberately does not expose join
+  types: it reuses `RecordMatchService` with INNER only, and duplicating outer-join
+  predicate routing on `MultiTargetRecordMatchService`'s separate emitter would
+  double every trap below without a designed N-way join model. Arbitrary N-way and
+  graphical join building remain out of scope — a separate design, separate package.
   Partial failure is **per target** in the NDJSON stream; **`match-multi.csv` is
   all-or-nothing** (one failed target aborts the download). **Dedup** in multi
   mode must reference the **hub table only**. Each target's SQL rides its own
   `started` progress event, never the `meta` line — `meta` is serialised and
   flushed before any target has been planned, so anything it promised about
   them could only be null.
+
+- **Two-table join types** (`joinType` on `RecordMatchRequest`, default INNER).
+  Officers pick INNER / LEFT / RIGHT / FULL on the Analysis tab; omitted/null
+  deserialises as INNER so stored requests stay valid. **INNER SQL must stay
+  byte-identical** to pre–join-type behaviour (bare `JOIN`, fuzzy similarity in
+  WHERE). For outer joins, **any predicate that references a nullable side belongs
+  in ON, not WHERE** — especially fuzzy Levenshtein, which used to live in WHERE
+  and silently converted LEFT back to INNER by filtering away unmatched rows.
+  **Age filter:** INNER unchanged (both sides when the column exists); LEFT applies
+  only on the preserved source side, RIGHT only on the preserved target side; FULL
+  rejects the age filter. **Dedup** is rejected with RIGHT/FULL — partitioning on
+  `source_*` columns collapses unmatched rows (NULL keys) into one partition.
+  **ANY_OF** on a preserved outer side uses `LEFT JOIN UNNEST ... ON TRUE` instead
+  of `CROSS JOIN UNNEST` so all-null candidate columns do not drop the row before
+  the join. **Self-join:** pick the same registered table on source and target —
+  no separate feature. **`POST /api/analysis/match.sql`** plans and returns display
+  SQL without executing (same path as the streamed match).
 
 - **Analysis column groups.** A match criterion is a **group** of 1..N columns
   per side, so the two sides need not be the same size — one `full_name` against
@@ -243,6 +305,12 @@ so those comparisons did not return zero rows — they failed the whole query
     `matched_on` naming it, and a COMBINE fold matched `Geeta Kumari` against
     `Geetha` + `Kumari` at 92.3%. Not automated — it needs the container — so
     re-run it by hand when this seam changes.
+  - **Join types (Package 4, manual):** re-run all four join types on the local
+    Presto container when changing `RecordMatchService` join emission — including
+    (a) fuzzy pair, (b) ANY_OF with an all-NULL candidate row on the preserved
+    side under LEFT, (c) a source row with no target match visible under LEFT.
+    `EmittedSqlParsesTest` proves syntax only; outer joins that parse but mis-route
+    predicates pass it while returning wrong rows.
 
 ## Reference
 
@@ -257,7 +325,9 @@ so those comparisons did not return zero rows — they failed the whole query
 - Golden Layer physical table/column names — **Lovadeep / DBA**
 - SRSE operational-store DB2 placement (schema vs instance) — **Lovadeep**
 - Pre-materialised derived fields confirmation (REL-01, income 3-yr) — **Lovadeep**
-- STATE_OFFICER RBAC role + RajSewadwar SSO payload — **Arvind**
+- RajSewadwar SSO payload + role→authority mapping (binds onto **`SRSE_ADMIN`**
+  and **`STATE_OFFICER`** at `RajSewadwarAuthenticationFilter.grantedAuthoritiesFromSsoRoles`;
+  Aadhaar OTP / project dev team wires here — not `SecurityConfig`) — **Arvind**
 - CP4BA version + IBM enablement scheduling — **Arvind / IBM**
 
 ## Environment cheat-sheet
@@ -265,10 +335,17 @@ so those comparisons did not return zero rows — they failed the whole query
 | | Local (laptop) | Client Dev |
 |---|---|---|
 | DATA_MODE | synthetic | live |
+| Default UI label (display only) | Development | Production (Live) |
+| Optional override | `SRSE_ENV_LABEL` (e.g. UAT) — UI only; does not change `DATA_MODE` | same |
 | Presto | local container | on-prem PrestoDB 0.297 |
 | Operational DB2 | local container | on-prem DB2 (SRSE schema) |
-| Auth | mock JWT issuer | RajSewadwar SSO |
-| Field mapping | synthetic columns | real Golden Layer columns |
+| Auth | mock JWT issuer (`?role=admin` mints admin+officer; **seam only**, not ACL) | RajSewadwar SSO |
+| Field mapping rows | `field_column_mapping` keyed by `SYNTHETIC` | keyed by `LIVE` |
+
+`DATA_MODE` / `DataMode.SYNTHETIC | LIVE` are unchanged on the wire, in
+`application.yml`, and as the key of `field_column_mapping`. Admin UI labels
+(Development / Production (Live) / custom via `SRSE_ENV_LABEL`) are display
+only and must not be confused with the mapping editor's binding-set switch.
 
 Both modes resolve field bindings the same way, through `field_column_mapping`
 keyed by `DataMode` (`MetadataFieldResolver`). There is no longer a hardcoded

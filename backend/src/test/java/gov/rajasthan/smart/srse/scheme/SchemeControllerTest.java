@@ -34,6 +34,9 @@ class SchemeControllerTest {
     @MockBean
     private SchemeRepository repository;
 
+    @MockBean
+    private SchemeTemplateService templateService;
+
     // MockJwtAuthenticationFilter is auto-detected by @WebMvcTest and needs this
     // to construct; addFilters = false means it's never actually invoked here.
     @MockBean

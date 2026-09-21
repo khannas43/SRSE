@@ -3,6 +3,7 @@ package gov.rajasthan.smart.srse.lakehouse;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -26,19 +27,39 @@ public class LakehouseCatalogController {
         this.registry = registry;
     }
 
+    @GetMapping("/layers")
+    public List<String> layers() {
+        return registry.listLayers();
+    }
+
     @GetMapping("/catalogs")
-    public List<String> catalogs() {
-        return registry.listCatalogs();
+    public List<String> catalogs(@RequestParam(required = false) String layer) {
+        String filter = LakehouseLayers.parseFilterParam(layer);
+        if (filter == null) {
+            return registry.listCatalogs();
+        }
+        return registry.listCatalogs(filter);
     }
 
     @GetMapping("/catalogs/{catalog}/schemas")
-    public List<String> schemas(@PathVariable String catalog) {
-        return registry.listSchemas(catalog);
+    public List<String> schemas(@PathVariable String catalog,
+                                @RequestParam(required = false) String layer) {
+        String filter = LakehouseLayers.parseFilterParam(layer);
+        if (filter == null) {
+            return registry.listSchemas(catalog);
+        }
+        return registry.listSchemas(catalog, filter);
     }
 
     @GetMapping("/catalogs/{catalog}/schemas/{schema}/tables")
-    public List<TableResponse> tables(@PathVariable String catalog, @PathVariable String schema) {
-        return registry.listTables(catalog, schema).stream().map(TableResponse::from).toList();
+    public List<TableResponse> tables(@PathVariable String catalog,
+                                      @PathVariable String schema,
+                                      @RequestParam(required = false) String layer) {
+        String filter = LakehouseLayers.parseFilterParam(layer);
+        List<RegisteredTable> rows = filter == null
+                ? registry.listTables(catalog, schema)
+                : registry.listTables(catalog, schema, filter);
+        return rows.stream().map(TableResponse::from).toList();
     }
 
     @GetMapping("/catalogs/{catalog}/schemas/{schema}/tables/{table}/columns")

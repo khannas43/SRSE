@@ -1,7 +1,11 @@
 package gov.rajasthan.smart.srse.scheme;
 
+import gov.rajasthan.smart.srse.compiler.Ast;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -19,9 +23,11 @@ import java.util.List;
 public class SchemeController {
 
     private final SchemeRepository repository;
+    private final SchemeTemplateService templateService;
 
-    public SchemeController(SchemeRepository repository) {
+    public SchemeController(SchemeRepository repository, SchemeTemplateService templateService) {
         this.repository = repository;
+        this.templateService = templateService;
     }
 
     @GetMapping
@@ -37,7 +43,29 @@ public class SchemeController {
         return SchemeResponse.from(repository.save(scheme));
     }
 
+    /** Official criteria for a scheme — empty body when none nominated yet. */
+    @GetMapping("/{id}/template")
+    public ResponseEntity<SchemeTemplateResponse> getTemplate(@PathVariable Long id) {
+        Ast.PredicateSpec ruleset = templateService.loadTemplateRuleset(id);
+        if (ruleset == null) {
+            return ResponseEntity.noContent().build();
+        }
+        return ResponseEntity.ok(new SchemeTemplateResponse(ruleset));
+    }
+
+    /** Admin-only (see SecurityConfig): nominate a saved scenario as official criteria. */
+    @PutMapping("/{id}/template")
+    public void setTemplate(@PathVariable Long id, @RequestBody SetSchemeTemplateRequest req) {
+        templateService.setTemplate(id, req.scenarioId());
+    }
+
     public record CreateSchemeRequest(String code, String name, String description) {
+    }
+
+    public record SetSchemeTemplateRequest(Long scenarioId) {
+    }
+
+    public record SchemeTemplateResponse(Ast.PredicateSpec ruleset) {
     }
 
     public record SchemeResponse(Long id, String code, String name, String description) {
