@@ -20,9 +20,11 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Metadata-first join-key hints for the Analysis tab. Every column returned
@@ -37,9 +39,10 @@ import java.util.Map;
  * scan per probed pair (costly by design; officer-triggered only).
  *
  * <p>Key-likeness ({@code approx_distinct/count} on the source) uses one
- * <strong>full-table</strong> aggregate on the source — not sampled: a sample
- * inflates low-cardinality ratios by ~1/p and would mis-rank mid-cardinality
- * columns as keys.
+ * <strong>full-table</strong> aggregate per shortlisted source column — not
+ * sampled: a sample inflates low-cardinality ratios by ~1/p and would mis-rank
+ * mid-cardinality columns as keys. Only columns appearing in the top metadata
+ * pairs are measured, so wide tables stay within the query timeout.
  */
 @Service
 public class JoinKeySuggestService {
@@ -54,6 +57,9 @@ public class JoinKeySuggestService {
      * treated as attributes (e.g. district), not join keys (e.g. id).
      */
     static final double MIN_SOURCE_KEY_DISTINCTNESS = 0.5;
+
+    /** Top metadata pairs whose source columns are measured for key-likeness. */
+    private static final int DISTINCTNESS_PAIR_SHORTLIST = 50;
 
     private final LakehouseRegistryService registry;
     private final AnalysisColumnMetadataRepository columnMetadata;
@@ -82,21 +88,20 @@ public class JoinKeySuggestService {
         List<RegisteredColumn> targetCols = registry.listColumns(
                 target.catalog(), target.schema(), target.table());
 
-        Map<String, Double> sourceDistinctness = req.probeRequested()
-                ? loadSourceDistinctnessRatios(source, sourceCols)
-                : Map.of();
+        List<ScoredPair> ranked = rankMetadataPairs(source, target, sourceCols, targetCols, Map.of());
+        ranked.sort(metadataComparator());
 
-        List<ScoredPair> ranked = rankMetadataPairs(source, target, sourceCols, targetCols, sourceDistinctness);
-        ranked.sort(Comparator.comparingInt(ScoredPair::score).reversed()
-                .thenComparing(p -> p.source().name())
-                .thenComparing(p -> p.target().name()));
+        if (req.probeRequested() && !ranked.isEmpty()) {
+            List<String> distinctnessColumns = shortlistSourceColumnsForDistinctness(ranked);
+            Map<String, Double> sourceDistinctness = loadSourceDistinctnessRatios(source, distinctnessColumns);
+            reapplyDistinctnessScores(ranked, sourceDistinctness);
+            ranked.sort(metadataComparator());
+        }
 
         if (req.probeRequested() && !ranked.isEmpty()) {
             try {
-                applyProbeScores(source, target, ranked);
-                ranked.sort(Comparator.comparingInt(ScoredPair::score).reversed()
-                        .thenComparing(p -> p.source().name())
-                        .thenComparing(p -> p.target().name()));
+                applyProbeOverlaps(source, target, ranked);
+                ranked.sort(probeAwareComparator());
             } catch (RuntimeException ex) {
                 log.warn("Join-key overlap probe failed — returning metadata-only suggestions: {}", ex.getMessage());
             }
@@ -106,6 +111,21 @@ public class JoinKeySuggestService {
                 .limit(20)
                 .map(ScoredPair::toSuggestion)
                 .toList();
+    }
+
+    private static Comparator<ScoredPair> metadataComparator() {
+        return Comparator.comparingInt(ScoredPair::score).reversed()
+                .thenComparing(p -> p.source().name())
+                .thenComparing(p -> p.target().name());
+    }
+
+    /** When overlap was measured, sort by overlap first so 0% cannot beat a real key. */
+    private static Comparator<ScoredPair> probeAwareComparator() {
+        return Comparator
+                .comparingDouble((ScoredPair p) -> p.overlapRatio != null ? p.overlapRatio : -1.0).reversed()
+                .thenComparingInt(ScoredPair::score).reversed()
+                .thenComparing(p -> p.source().name())
+                .thenComparing(p -> p.target().name());
     }
 
     private List<ScoredPair> rankMetadataPairs(
@@ -129,15 +149,26 @@ public class JoinKeySuggestService {
                 if (score <= 0) {
                     continue;
                 }
-                pairs.add(new ScoredPair(s, t, sFamily, tFamily, score, reasonFor(s, t, sFamily, tFamily, score, null)));
+                pairs.add(new ScoredPair(s, t, sFamily, tFamily, score,
+                        reasonFor(s, t, sFamily, tFamily, score, null)));
             }
         }
         return pairs;
     }
 
+    /**
+     * Cross-family TEXT↔NUMBER is allowed (documented match path). Temporal and
+     * boolean are never coerced — exclude pairs where exactly one side is either.
+     */
     private static boolean typesCompatible(SqlTypeFamily left, SqlTypeFamily right) {
         if (left == SqlTypeFamily.UNKNOWN || right == SqlTypeFamily.UNKNOWN) {
             return false;
+        }
+        if (left == SqlTypeFamily.TEMPORAL || right == SqlTypeFamily.TEMPORAL) {
+            return left == right;
+        }
+        if (left == SqlTypeFamily.BOOLEAN || right == SqlTypeFamily.BOOLEAN) {
+            return left == right;
         }
         TypeCoercion.align("l", left, "r", right, CompareAs.AUTO);
         return true;
@@ -146,26 +177,59 @@ public class JoinKeySuggestService {
     static int scorePair(RegisteredColumn s, RegisteredColumn t,
                          SqlTypeFamily sFamily, SqlTypeFamily tFamily,
                          Map<String, Double> sourceDistinctness) {
-        int base;
-        if (s.name().equalsIgnoreCase(t.name()) && sFamily == tFamily) {
-            base = 400;
-        } else if (businessNamesMatch(s, t)) {
-            base = 300;
-        } else {
-            String ns = normalizeKeyName(s.name());
-            String nt = normalizeKeyName(t.name());
-            if (ns.equals(nt) && !ns.isEmpty()) {
-                base = 250;
-            } else if (ns.length() >= 4 && nt.length() >= 4 && (ns.contains(nt) || nt.contains(ns))) {
-                base = 200;
-            } else if (AnalysisColumnMatchHeuristics.nameSubstringGuess(s.name())
-                    && AnalysisColumnMatchHeuristics.nameSubstringGuess(t.name())) {
-                base = 100;
-            } else {
-                base = 50;
-            }
+        int base = metadataBaseScore(s, t, sFamily, tFamily);
+        if (sourceDistinctness.isEmpty()) {
+            return base;
         }
-        return applyDistinctnessToScore(base, sourceDistinctness.getOrDefault(s.name(), 1.0));
+        Double ratio = sourceDistinctness.get(s.name());
+        if (ratio == null) {
+            return base;
+        }
+        return applyDistinctnessToScore(base, ratio);
+    }
+
+    static int metadataBaseScore(RegisteredColumn s, RegisteredColumn t,
+                                 SqlTypeFamily sFamily, SqlTypeFamily tFamily) {
+        if (s.name().equalsIgnoreCase(t.name()) && sFamily == tFamily) {
+            return 400;
+        }
+        if (businessNamesMatch(s, t)) {
+            return 300;
+        }
+        if (idMatchesSuffixIdColumn(s.name(), t.name())) {
+            return 250;
+        }
+        String ns = normalizeKeyName(s.name());
+        String nt = normalizeKeyName(t.name());
+        if (ns.equals(nt) && !ns.isEmpty()) {
+            return 250;
+        }
+        if (ns.length() >= 4 && nt.length() >= 4 && (ns.contains(nt) || nt.contains(ns))) {
+            return 200;
+        }
+        if (AnalysisColumnMatchHeuristics.nameSubstringGuess(s.name())
+                && AnalysisColumnMatchHeuristics.nameSubstringGuess(t.name())) {
+            return 100;
+        }
+        return 50;
+    }
+
+    /**
+     * {@code id} on one side against any {@code *_id} on the other (e.g. beneficiary
+     * {@code id} ↔ txn {@code m_id}).
+     */
+    static boolean idMatchesSuffixIdColumn(String left, String right) {
+        return bareIdColumn(left) && endsWithIdSuffix(right) && !left.equalsIgnoreCase(right)
+                || bareIdColumn(right) && endsWithIdSuffix(left) && !left.equalsIgnoreCase(right);
+    }
+
+    private static boolean bareIdColumn(String name) {
+        return "id".equalsIgnoreCase(name.trim());
+    }
+
+    private static boolean endsWithIdSuffix(String name) {
+        String lower = name.toLowerCase(Locale.ROOT);
+        return lower.endsWith("_id") && !lower.equals("id");
     }
 
     /**
@@ -189,7 +253,7 @@ public class JoinKeySuggestService {
 
     static String normalizeKeyName(String name) {
         String s = name.toLowerCase(Locale.ROOT);
-        for (String suffix : List.of("_id", "_no", "_num")) {
+        for (String suffix : List.of("_id", "_no", "_num", "_code")) {
             if (s.endsWith(suffix)) {
                 s = s.substring(0, s.length() - suffix.length());
             }
@@ -212,32 +276,53 @@ public class JoinKeySuggestService {
             return "Business name match";
         }
         if (score >= 250) {
+            if (idMatchesSuffixIdColumn(s.name(), t.name())) {
+                return "Identifier column match (id ↔ " + (bareIdColumn(s.name()) ? t.name() : s.name()) + ")";
+            }
             return "Normalised name match (" + normalizeKeyName(s.name()) + ")";
         }
         return "Compatible types (" + sFamily.name() + " / " + tFamily.name() + ")";
     }
 
-    private Map<String, Double> loadSourceDistinctnessRatios(QualifiedTable source, List<RegisteredColumn> cols) {
-        if (cols.isEmpty()) {
+    private static List<String> shortlistSourceColumnsForDistinctness(List<ScoredPair> ranked) {
+        Set<String> names = new LinkedHashSet<>();
+        int limit = Math.min(DISTINCTNESS_PAIR_SHORTLIST, ranked.size());
+        for (int i = 0; i < limit; i++) {
+            names.add(ranked.get(i).source().name());
+        }
+        return List.copyOf(names);
+    }
+
+    private void reapplyDistinctnessScores(List<ScoredPair> ranked, Map<String, Double> sourceDistinctness) {
+        for (ScoredPair pair : ranked) {
+            int score = scorePair(pair.source(), pair.target(), pair.sourceFamily(), pair.targetFamily(),
+                    sourceDistinctness);
+            pair.score = score;
+            pair.reason = reasonFor(pair.source(), pair.target(), pair.sourceFamily(), pair.targetFamily(),
+                    score, pair.overlapRatio);
+        }
+    }
+
+    private Map<String, Double> loadSourceDistinctnessRatios(QualifiedTable source, List<String> columnNames) {
+        if (columnNames.isEmpty()) {
             return Map.of();
         }
-        List<String> names = cols.stream().map(RegisteredColumn::name).toList();
-        String sql = buildSourceDistinctnessSql(source, cols);
+        String sql = buildSourceDistinctnessSql(source, columnNames);
         jdbc.setQueryTimeout(guardrails.queryTimeoutSeconds());
-        List<Map<String, Double>> rows = jdbc.query(sql, (rs, rowNum) -> readDistinctnessRow(rs, names));
+        List<Map<String, Double>> rows = jdbc.query(sql, (rs, rowNum) -> readDistinctnessRow(rs, columnNames));
         return rows.isEmpty() ? Map.of() : rows.get(0);
     }
 
-    /** Full source-table scan — one aggregate row, all visible columns. */
-    static String buildSourceDistinctnessSql(QualifiedTable source, List<RegisteredColumn> cols) {
+    /** Full source-table scan — one aggregate row, named columns only. */
+    static String buildSourceDistinctnessSql(QualifiedTable source, List<String> columnNames) {
         StringBuilder exprs = new StringBuilder();
-        for (RegisteredColumn c : cols) {
+        for (String name : columnNames) {
             if (!exprs.isEmpty()) {
                 exprs.append(", ");
             }
-            exprs.append("LEAST(1.0, CAST(approx_distinct(").append(c.name())
+            exprs.append("LEAST(1.0, CAST(approx_distinct(").append(name)
                     .append(") AS DOUBLE) / NULLIF(CAST(count(*) AS DOUBLE), 0)) AS d_")
-                    .append(c.name().replace('.', '_'));
+                    .append(name.replace('.', '_'));
         }
         return "SELECT " + exprs + " FROM " + source.qualifiedName();
     }
@@ -254,15 +339,14 @@ public class JoinKeySuggestService {
         return out;
     }
 
-    private void applyProbeScores(QualifiedTable source, QualifiedTable target, List<ScoredPair> ranked) {
+    private void applyProbeOverlaps(QualifiedTable source, QualifiedTable target, List<ScoredPair> ranked) {
         int limit = Math.min(analysisProperties.maxProbedPairs(), ranked.size());
         jdbc.setQueryTimeout(guardrails.queryTimeoutSeconds());
         for (int i = 0; i < limit; i++) {
             ScoredPair pair = ranked.get(i);
             Double ratio = probeOverlap(source, target, pair);
+            pair.overlapRatio = ratio;
             if (ratio != null) {
-                int bonus = (int) Math.round(ratio * 150);
-                pair.score += bonus;
                 pair.reason = reasonFor(pair.source(), pair.target(), pair.sourceFamily(), pair.targetFamily(),
                         pair.score, ratio);
             }
@@ -328,6 +412,7 @@ public class JoinKeySuggestService {
         private final SqlTypeFamily targetFamily;
         private int score;
         private String reason;
+        private Double overlapRatio;
 
         private ScoredPair(RegisteredColumn source, RegisteredColumn target,
                            SqlTypeFamily sourceFamily, SqlTypeFamily targetFamily,

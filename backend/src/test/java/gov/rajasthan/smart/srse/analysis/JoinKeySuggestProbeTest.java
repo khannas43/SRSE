@@ -127,11 +127,39 @@ class JoinKeySuggestProbeTest {
     @Test
     void distinctnessSqlScansFullSourceTableNotSampled() {
         QualifiedTable source = new QualifiedTable(CATALOG, SCHEMA, SRC);
-        List<RegisteredColumn> cols = List.of(
-                new RegisteredColumn("age_years", "integer", null, false, true));
-        String sql = JoinKeySuggestService.buildSourceDistinctnessSql(source, cols);
+        String sql = JoinKeySuggestService.buildSourceDistinctnessSql(source, List.of("age_years", "id"));
         assertFalse(sql.contains("TABLESAMPLE"), "Distinctness must use full table, not Bernoulli sample");
         assertTrue(sql.contains("FROM " + source.qualifiedName()));
+        assertTrue(sql.contains("approx_distinct(age_years)"));
+        assertTrue(sql.contains("approx_distinct(id)"));
+        assertFalse(sql.contains("approx_distinct(district)"), "Only shortlisted columns are measured");
+    }
+
+    @Test
+    void zeroOverlapRanksBelowMeasuredOverlap() {
+        when(registry.listColumns(CATALOG, SCHEMA, SRC)).thenReturn(List.of(
+                new RegisteredColumn("district", "varchar", null, false, true),
+                new RegisteredColumn("id", "bigint", null, false, true)));
+        when(registry.listColumns(TGT_CATALOG, TGT_SCHEMA, TGT)).thenReturn(List.of(
+                new RegisteredColumn("district", "varchar", null, false, true),
+                new RegisteredColumn("m_id", "bigint", null, false, true)));
+
+        when(jdbc.query(anyString(), any(RowMapper.class))).thenReturn(List.of(Map.of(
+                "district", 0.00008,
+                "id", 1.03)));
+
+        when(jdbc.queryForObject(anyString(), eq(Double.class)))
+                .thenReturn(0.0)
+                .thenReturn(0.23);
+
+        List<JoinKeySuggestion> suggestions = service.suggest(new SuggestJoinKeysRequest(
+                CATALOG, SCHEMA, SRC, TGT_CATALOG, TGT_SCHEMA, TGT, true));
+
+        int idIndex = indexOfPair(suggestions, "id", "m_id");
+        int districtIndex = indexOfPair(suggestions, "district", "district");
+        assertTrue(idIndex >= 0 && districtIndex >= 0);
+        assertTrue(idIndex < districtIndex,
+                "id↔m_id with 23% overlap must rank above district↔district with 0% overlap");
     }
 
     private static int indexOfPair(List<JoinKeySuggestion> list, String src, String tgt) {

@@ -89,6 +89,51 @@ class JoinKeySuggestServiceTest {
     }
 
     @Test
+    void idToSuffixIdInTopThreeAmongAlphabeticalNoise() {
+        List<RegisteredColumn> source = new java.util.ArrayList<>();
+        source.add(new RegisteredColumn("id", "bigint", null, false, true));
+        source.add(new RegisteredColumn("district", "varchar", null, false, true));
+        source.add(new RegisteredColumn("father_name", "varchar", null, false, true));
+        for (char c = 'a'; c <= 'z'; c++) {
+            source.add(new RegisteredColumn("attr_" + c, "varchar", null, false, true));
+        }
+        List<RegisteredColumn> target = new java.util.ArrayList<>();
+        target.add(new RegisteredColumn("m_id", "bigint", null, false, true));
+        target.add(new RegisteredColumn("district", "varchar", null, false, true));
+        target.add(new RegisteredColumn("father_name", "varchar", null, false, true));
+        for (char c = 'a'; c <= 'z'; c++) {
+            target.add(new RegisteredColumn("other_" + c, "varchar", null, false, true));
+        }
+        when(registry.listColumns(CATALOG, SCHEMA, SRC)).thenReturn(source);
+        when(registry.listColumns(CATALOG, SCHEMA, TGT)).thenReturn(target);
+
+        List<JoinKeySuggestion> suggestions = service.suggest(request(false));
+        int idIndex = -1;
+        for (int i = 0; i < suggestions.size(); i++) {
+            if ("id".equals(suggestions.get(i).sourceColumn())
+                    && "m_id".equals(suggestions.get(i).targetColumn())) {
+                idIndex = i;
+                break;
+            }
+        }
+        assertTrue(idIndex >= 0 && idIndex < 3, "id↔m_id must appear in top 3, was index " + idIndex);
+    }
+
+    @Test
+    void temporalColumnNeverPairedWithNonTemporal() {
+        when(registry.listColumns(CATALOG, SCHEMA, SRC)).thenReturn(List.of(
+                new RegisteredColumn("age_band", "varchar", null, false, true),
+                new RegisteredColumn("age_years", "integer", null, false, true)));
+        when(registry.listColumns(CATALOG, SCHEMA, TGT)).thenReturn(List.of(
+                new RegisteredColumn("date_of_birth", "date", null, false, true),
+                new RegisteredColumn("account_no", "varchar", null, false, true)));
+
+        List<JoinKeySuggestion> suggestions = service.suggest(request(false));
+        assertTrue(suggestions.stream().noneMatch(s ->
+                s.targetColumn().equals("date_of_birth") || s.sourceColumn().equals("date_of_birth")));
+    }
+
+    @Test
     void exactNameSameFamilyRanksFirst() {
         when(registry.listColumns(CATALOG, SCHEMA, SRC)).thenReturn(List.of(
                 new RegisteredColumn("z_col", "varchar", null, false, true),
