@@ -10,12 +10,14 @@ import type {
   TableRef,
 } from "@/lib/analysisApi";
 import {
+  buildComparisonGroups,
   buildMatchGroup,
   isCriterionRowFilled,
   isDisplayRowFilled,
   pairIsFuzzy,
   rowColumns,
   rowFolds,
+  type ComparisonPairRow,
   type CriterionRowModel,
   type DisplayRowModel,
 } from "@/lib/analysisCriterionModel";
@@ -30,6 +32,15 @@ export type TargetBlockModel = {
   joinRows: CriterionRowModel[];
   displayRows: DisplayRowModel[];
   joinType?: JoinType;
+  /**
+   * Post-join column comparisons for THIS target. Each target owns its own,
+   * because each target's columns are its own — the hub is the only shared
+   * side. Already built by the caller so the canvas and the form hand the
+   * builder the same shape (see TargetMatchSpec.comparisonGroups). Held as UI
+   * rows, not groups: converting here is what keeps the form and the canvas
+   * emitting identical payloads.
+   */
+  comparisonPairs?: ComparisonPairRow[];
 };
 
 export type BuildMultiTargetParams = {
@@ -43,6 +54,8 @@ export type BuildMultiTargetParams = {
   registeredFuzzyFor: (ref: TableRef, column: string) => boolean | null;
   isFuzzyMatchable: (ref: TableRef, column: string) => boolean;
   maxTargetSets?: number;
+  /** Request-level, matching MultiTargetRecordMatchRequest — one filter for the whole run. */
+  mismatchOnly?: boolean;
 };
 
 /** Stable JSON for byte-identical comparison with {@link JSON.stringify} on the wire payload. */
@@ -97,6 +110,12 @@ export function buildMultiTargetRecordMatchRequest(
     if (block.joinType && block.joinType !== "INNER") {
       targetSpec.joinType = block.joinType;
     }
+    const comparisonGroups = block.comparisonPairs?.length
+      ? buildComparisonGroups(filledHub[0].ref, tableRef, block.comparisonPairs, params.registeredFuzzyFor)
+      : [];
+    if (comparisonGroups.length > 0) {
+      targetSpec.comparisonGroups = comparisonGroups;
+    }
     targets.push(targetSpec);
   }
   if (targets.length === 0) return null;
@@ -118,6 +137,11 @@ export function buildMultiTargetRecordMatchRequest(
   };
   if (filledHubDisplay.length > 0) {
     req.hubDisplayColumns = filledHubDisplay.map((r) => ({ ...r.ref, column: r.column }));
+  }
+  // Only meaningful when at least one target actually compares something —
+  // otherwise the backend would filter on an empty verdict set.
+  if (params.mismatchOnly && targets.some((t) => t.comparisonGroups && t.comparisonGroups.length > 0)) {
+    req.mismatchOnly = true;
   }
   return req;
 }

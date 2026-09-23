@@ -1,6 +1,6 @@
 import type { DisplayColumn, HubSide, JoinType, TableRef } from "@/lib/analysisApi";
 import { isCascadeComplete, type CascadeValue } from "@/components/LakehouseCascade";
-import type { CriterionRowModel, DisplayRowModel } from "@/lib/analysisCriterionModel";
+import type { ComparisonPairRow, CriterionRowModel, DisplayRowModel } from "@/lib/analysisCriterionModel";
 import {
   buildMultiTargetRecordMatchRequest,
   type BuildMultiTargetParams,
@@ -16,6 +16,12 @@ export type JoinCanvasNode = {
   displayRows: DisplayRowModel[];
   /** Per-target join shape (targets only). Omitted → INNER. */
   joinType?: JoinType;
+  /**
+   * Post-join comparisons for this target. Carried through the canvas even
+   * though the canvas does not author them yet: switching Form → canvas → Form
+   * must not silently drop what the form configured.
+   */
+  comparisonPairs?: ComparisonPairRow[];
 };
 
 /**
@@ -135,6 +141,7 @@ export function joinCanvasFromForm(
     joinRows: CriterionRowModel[];
     displayRows: DisplayRowModel[];
     joinType?: JoinType;
+    comparisonPairs?: ComparisonPairRow[];
   }>,
   hubTable: CascadeValue,
 ): JoinCanvasState {
@@ -160,6 +167,7 @@ export function joinCanvasFromForm(
       tableRef: { ...ref },
       displayRows: block.displayRows.map((r) => ({ ...r })),
       joinType: block.joinType,
+      comparisonPairs: block.comparisonPairs?.map((c) => ({ ...c })),
     });
   }
   const n = Math.max(hubRows.length, ...targetBlocks.map((b) => b.joinRows.length), 1);
@@ -211,6 +219,7 @@ export function joinCanvasToFormModels(state: JoinCanvasState): {
     })),
     displayRows: node.displayRows.map((r) => ({ ...r })),
     joinType: node.joinType,
+    comparisonPairs: node.comparisonPairs?.map((c) => ({ ...c })),
   }));
   return {
     hubRows,

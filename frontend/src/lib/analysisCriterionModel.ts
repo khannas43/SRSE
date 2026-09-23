@@ -1,4 +1,4 @@
-import type { GroupMode, MatchCriterion, MatchGroup, RegisteredColumn, TableRef } from "@/lib/analysisApi";
+import type { ComparisonGroup, GroupMode, MatchCriterion, MatchGroup, RegisteredColumn, TableRef } from "@/lib/analysisApi";
 import { isCascadeComplete, type CascadeValue } from "@/components/LakehouseCascade";
 
 /** Shared criterion-row shape for the Analysis form and join canvas. */
@@ -75,4 +75,58 @@ export function buildMatchGroup(
     fuzzyThresholdPercent: fuzzy ? source.fuzzyThresholdPercent : null,
     separator: source.mode === "COMBINE" ? source.separator : null,
   };
+}
+
+/** One post-join comparison row as the UI holds it, before it becomes a ComparisonGroup. */
+export type ComparisonPairRow = {
+  id: string;
+  sourceColumn: string;
+  targetColumn: string;
+  fuzzyThresholdPercent: number;
+};
+
+export function createComparisonPairRow(fuzzyThresholdPercent = 80): ComparisonPairRow {
+  return { id: crypto.randomUUID(), sourceColumn: "", targetColumn: "", fuzzyThresholdPercent };
+}
+
+/**
+ * Same precedence as the join side's pairIsFuzzy: an explicit Admin registration
+ * on either column wins, otherwise the *name* substring guess decides.
+ */
+export function comparisonPairIsFuzzy(
+  sourceRef: TableRef | undefined,
+  targetRef: TableRef | undefined,
+  pair: ComparisonPairRow,
+  registeredFuzzyFor: (ref: TableRef, column: string) => boolean | null,
+): boolean {
+  if (!pair.sourceColumn || !pair.targetColumn || !sourceRef || !targetRef) return false;
+  return (
+    isNameColumn(pair.sourceColumn) ||
+    isNameColumn(pair.targetColumn) ||
+    registeredFuzzyFor(sourceRef, pair.sourceColumn) === true ||
+    registeredFuzzyFor(targetRef, pair.targetColumn) === true
+  );
+}
+
+/**
+ * Pairs to wire groups. A multi-column COMBINE always compares as text, so these
+ * single-column groups keep mode COMBINE and carry a threshold only when fuzzy.
+ */
+export function buildComparisonGroups(
+  sourceRef: TableRef,
+  targetRef: TableRef,
+  pairs: ComparisonPairRow[],
+  registeredFuzzyFor: (ref: TableRef, column: string) => boolean | null,
+): ComparisonGroup[] {
+  return pairs
+    .filter((p) => p.sourceColumn && p.targetColumn)
+    .map((p) => ({
+      source: [{ ...sourceRef, column: p.sourceColumn, fuzzyThresholdPercent: null }],
+      target: [{ ...targetRef, column: p.targetColumn, fuzzyThresholdPercent: null }],
+      mode: "COMBINE" as const,
+      fuzzyThresholdPercent: comparisonPairIsFuzzy(sourceRef, targetRef, p, registeredFuzzyFor)
+        ? p.fuzzyThresholdPercent
+        : null,
+    separator: " ",
+    }));
 }

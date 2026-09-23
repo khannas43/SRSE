@@ -134,6 +134,131 @@ describe("multi-target request serialization", () => {
     expect(fromForm!.targets[0].joinGroups?.length).toBeGreaterThan(0);
   });
 
+  it("emits each target's own comparison groups against its own table", () => {
+    const hubRows = [hubRow("m_id")];
+    const targetBlocks = [
+      {
+        id: "t1",
+        label: "Bank",
+        joinRows: [targetRow(TABLE_B, "m_id")],
+        displayRows: [],
+        comparisonPairs: [
+          { id: "c1", sourceColumn: "district", targetColumn: "district", fuzzyThresholdPercent: 80 },
+        ],
+      },
+      {
+        id: "t2",
+        label: "Ration",
+        joinRows: [targetRow(TABLE_C, "m_id")],
+        displayRows: [],
+        comparisonPairs: [
+          { id: "c2", sourceColumn: "pan", targetColumn: "pan_no", fuzzyThresholdPercent: 80 },
+        ],
+      },
+    ];
+    const req = buildMultiTargetRecordMatchRequest({
+      hubRows,
+      hubDisplayRows: [],
+      hubSide: "SOURCE",
+      targets: targetBlocks.map(({ label, joinRows, displayRows, comparisonPairs }) => ({
+        label,
+        joinRows,
+        displayRows,
+        comparisonPairs,
+      })),
+      highlightDuplicates: false,
+      dedup: null,
+      ageFilter: null,
+      registeredFuzzyFor: noopFuzzy,
+      isFuzzyMatchable: noopFuzzy,
+    })!;
+    expect(req.targets[0].comparisonGroups?.[0].target[0].table).toBe(TABLE_B.table);
+    expect(req.targets[0].comparisonGroups?.[0].source[0].table).toBe(TABLE_A.table);
+    expect(req.targets[1].comparisonGroups?.[0].target[0].column).toBe("pan_no");
+    // the hub is the source side of every target's comparison
+    expect(req.targets[1].comparisonGroups?.[0].source[0].table).toBe(TABLE_A.table);
+  });
+
+  it("sets mismatchOnly only when a target actually compares something", () => {
+    const base = {
+      hubRows: [hubRow("m_id")],
+      hubDisplayRows: [],
+      hubSide: "SOURCE" as const,
+      highlightDuplicates: false,
+      dedup: null,
+      ageFilter: null,
+      registeredFuzzyFor: noopFuzzy,
+      isFuzzyMatchable: noopFuzzy,
+      mismatchOnly: true,
+    };
+    const noCompare = buildMultiTargetRecordMatchRequest({
+      ...base,
+      targets: [{ label: "Bank", joinRows: [targetRow(TABLE_B, "m_id")], displayRows: [] }],
+    })!;
+    expect(noCompare.mismatchOnly).toBeUndefined();
+
+    const withCompare = buildMultiTargetRecordMatchRequest({
+      ...base,
+      targets: [
+        {
+          label: "Bank",
+          joinRows: [targetRow(TABLE_B, "m_id")],
+          displayRows: [],
+          comparisonPairs: [
+            { id: "c1", sourceColumn: "district", targetColumn: "district", fuzzyThresholdPercent: 80 },
+          ],
+        },
+      ],
+    })!;
+    expect(withCompare.mismatchOnly).toBe(true);
+  });
+
+  it("canvas round-trip preserves per-target comparisons byte-identically", () => {
+    const hubRows = [hubRow("m_id")];
+    const targetBlocks = [
+      {
+        id: "t1",
+        label: "Bank",
+        joinRows: [targetRow(TABLE_B, "m_id")],
+        displayRows: [],
+        comparisonPairs: [
+          { id: "c1", sourceColumn: "full_name", targetColumn: "full_name", fuzzyThresholdPercent: 85 },
+        ],
+      },
+    ];
+    const extras = {
+      highlightDuplicates: false,
+      dedup: null,
+      ageFilter: null,
+      registeredFuzzyFor: noopFuzzy,
+      isFuzzyMatchable: noopFuzzy,
+    };
+    const fromForm = buildMultiTargetRecordMatchRequest({
+      hubRows,
+      hubDisplayRows: [],
+      hubSide: "SOURCE",
+      targets: targetBlocks.map(({ label, joinRows, displayRows, comparisonPairs }) => ({
+        label,
+        joinRows,
+        displayRows,
+        comparisonPairs,
+      })),
+      ...extras,
+    })!;
+    const canvas = joinCanvasFromForm("SOURCE", hubRows, [], targetBlocks, ref(TABLE_A));
+    const { hubRows: cHub, hubDisplayRows, targets } = joinCanvasToFormModels(canvas);
+    const fromCanvas = buildMultiTargetRecordMatchRequest({
+      hubRows: cHub,
+      hubDisplayRows,
+      hubSide: canvas.hubSide,
+      targets,
+      ...extras,
+    })!;
+    // a fuzzy name comparison must survive the trip with its threshold
+    expect(fromCanvas.targets[0].comparisonGroups?.[0].fuzzyThresholdPercent).toBe(85);
+    expect(stableMultiTargetRequestJson(fromForm)).toBe(stableMultiTargetRequestJson(fromCanvas));
+  });
+
   it("reordering canvas slots reorders hubCriteria and every target joinCriteria together", () => {
     const hubRows = [hubRow("c1"), hubRow("c2"), hubRow("c3")];
     const targetBlocks = [

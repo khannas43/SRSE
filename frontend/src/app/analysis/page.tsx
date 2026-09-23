@@ -23,7 +23,6 @@ import {
   type GroupMode,
   type MatchCriterion,
   type CompareAs,
-  type ComparisonGroup,
   type ComparisonSummaryResponse,
   type HubSide,
   type JoinType,
@@ -40,6 +39,10 @@ import {
   isCriterionRowFilled,
   isDisplayRowFilled,
   isNameColumn,
+  buildComparisonGroups,
+  comparisonPairIsFuzzy,
+  createComparisonPairRow,
+  type ComparisonPairRow,
   pairIsFuzzy,
   rowColumns,
   rowFolds,
@@ -135,6 +138,8 @@ type TargetBlock = {
   joinRows: CriterionRow[];
   displayRows: DisplayRow[];
   joinType: JoinType;
+  /** Post-join comparisons against THIS target's columns (hub is the other side). */
+  comparisonPairs: ComparisonPairRow[];
 };
 
 function createTargetBlock(defaultLabel: string): TargetBlock {
@@ -144,7 +149,146 @@ function createTargetBlock(defaultLabel: string): TargetBlock {
     joinRows: [createEmptyRow()],
     displayRows: [],
     joinType: "INNER",
+    comparisonPairs: [],
   };
+}
+
+/**
+ * The post-join comparison rows, shared by the two-table section and each
+ * multi-target block. One editor, two call sites — a second copy would drift
+ * from this one the first time the fuzzy rule or the caps changed.
+ */
+function ComparisonPairsEditor({
+  pairs,
+  onChange,
+  sourceRef,
+  targetRef,
+  sourceColumns,
+  targetColumns,
+  registeredFuzzyFor,
+  defaultThreshold,
+}: Readonly<{
+  pairs: ComparisonPairRow[];
+  onChange: (next: ComparisonPairRow[]) => void;
+  sourceRef: TableRef | undefined;
+  targetRef: TableRef | undefined;
+  sourceColumns: RegisteredColumn[];
+  targetColumns: RegisteredColumn[];
+  registeredFuzzyFor: (ref: TableRef, column: string) => boolean | null;
+  defaultThreshold: number;
+}>) {
+  return (
+    <>
+          <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {pairs.map((pair) => {
+              const showFuzzyCompare = comparisonPairIsFuzzy(sourceRef, targetRef, pair, registeredFuzzyFor);
+              return (
+                <li
+                  key={pair.id}
+                  style={{
+                    display: "flex",
+                    gap: "0.5rem",
+                    flexWrap: "wrap",
+                    alignItems: "flex-end",
+                    marginBottom: "0.5rem",
+                  }}
+                >
+                  <div style={{ flex: "1 1 160px" }}>
+                    <span className="srse-text-muted" style={fieldLabelStyle}>
+                      Source column
+                    </span>
+                    <select
+                      className="srse-select"
+                      style={{ width: "100%" }}
+                      value={pair.sourceColumn}
+                      onChange={(e) =>
+                        onChange(
+                          pairs.map((r) =>
+                            r.id === pair.id ? { ...r, sourceColumn: e.target.value } : r,
+                          ),
+                        )
+                      }
+                    >
+                      <option value="">—</option>
+                      {sourceColumns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div style={{ flex: "1 1 160px" }}>
+                    <span className="srse-text-muted" style={fieldLabelStyle}>
+                      Target column
+                    </span>
+                    <select
+                      className="srse-select"
+                      style={{ width: "100%" }}
+                      value={pair.targetColumn}
+                      onChange={(e) =>
+                        onChange(
+                          pairs.map((r) =>
+                            r.id === pair.id ? { ...r, targetColumn: e.target.value } : r,
+                          ),
+                        )
+                      }
+                    >
+                      <option value="">—</option>
+                      {targetColumns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {showFuzzyCompare && (
+                    <div style={{ flex: "0 1 100px" }}>
+                      <span className="srse-text-muted" style={fieldLabelStyle}>
+                        Fuzzy match %
+                      </span>
+                      <input
+                        type="number"
+                        className="srse-input"
+                        style={{ width: "100%" }}
+                        min={0}
+                        max={100}
+                        value={pair.fuzzyThresholdPercent}
+                        onChange={(e) =>
+                          onChange(
+                            pairs.map((r) =>
+                              r.id === pair.id
+                                ? { ...r, fuzzyThresholdPercent: Number(e.target.value) }
+                                : r,
+                            ),
+                          )
+                        }
+                        title="Similarity threshold for this comparison (not an exact equality check)"
+                      />
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className="srse-btn srse-btn-ghost srse-btn-sm"
+                    onClick={() => onChange(pairs.filter((r) => r.id !== pair.id))}
+                  >
+                    Remove
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <button
+            type="button"
+            className="srse-btn srse-btn-ghost srse-btn-sm"
+            disabled={pairs.length >= MAX_COMPARISON_GROUPS}
+            onClick={() =>
+              onChange([...pairs, createComparisonPairRow(defaultThreshold)])
+            }
+          >
+            + Add comparison ({pairs.length}/{MAX_COMPARISON_GROUPS})
+          </button>
+    </>
+  );
 }
 
 function metadataKey(ref: TableRef, column: string): string {
@@ -186,32 +330,6 @@ const MAX_DISPLAYED_ROWS = 10000;
 const MAX_ROWS_TO_PARSE = 200000;
 
 const MAX_COMPARISON_GROUPS = 8;
-
-type ComparisonPairRow = {
-  id: string;
-  sourceColumn: string;
-  targetColumn: string;
-  fuzzyThresholdPercent: number;
-};
-
-function createComparisonPairRow(fuzzyThresholdPercent = 80): ComparisonPairRow {
-  return { id: crypto.randomUUID(), sourceColumn: "", targetColumn: "", fuzzyThresholdPercent };
-}
-
-function comparisonPairIsFuzzy(
-  sourceRef: TableRef | undefined,
-  targetRef: TableRef | undefined,
-  pair: ComparisonPairRow,
-  registeredFuzzyFor: (ref: TableRef, column: string) => boolean | null,
-): boolean {
-  if (!pair.sourceColumn || !pair.targetColumn || !sourceRef || !targetRef) return false;
-  return (
-    isNameColumn(pair.sourceColumn) ||
-    isNameColumn(pair.targetColumn) ||
-    registeredFuzzyFor(sourceRef, pair.sourceColumn) === true ||
-    registeredFuzzyFor(targetRef, pair.targetColumn) === true
-  );
-}
 
 function updateRowById(rows: CriterionRow[], id: string, patch: Partial<CriterionRow>): CriterionRow[] {
   return rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
@@ -897,23 +1015,13 @@ export default function AnalysisPage() {
     }
   }
 
-  function buildComparisonGroups(
-    sourceRef: TableRef,
-    targetRef: TableRef,
-    pairs: ComparisonPairRow[],
-  ): ComparisonGroup[] {
-    return pairs
-      .filter((p) => p.sourceColumn && p.targetColumn)
-      .map((p) => {
-        const fuzzy = comparisonPairIsFuzzy(sourceRef, targetRef, p, registeredFuzzyFor);
-        return {
-          source: [{ ...sourceRef, column: p.sourceColumn, fuzzyThresholdPercent: null }],
-          target: [{ ...targetRef, column: p.targetColumn, fuzzyThresholdPercent: null }],
-          mode: "COMBINE" as const,
-          fuzzyThresholdPercent: fuzzy ? p.fuzzyThresholdPercent : null,
-          separator: " ",
-        };
-      });
+  function filledRefOrUndefined(rows: CriterionRow[]): TableRef | undefined {
+    const ref = rows.find(isRowFilled)?.ref;
+    return ref && isCascadeComplete(ref) ? ref : undefined;
+  }
+
+  function hubRefOrUndefined(): TableRef | undefined {
+    return filledRefOrUndefined(sourceRows);
   }
 
   function buildRequest(withDedup: boolean): RecordMatchRequest | null {
@@ -966,7 +1074,7 @@ export default function AnalysisPage() {
     const srcRef = filledSource[0].ref;
     const tgtRef = filledTarget[0].ref;
     if (isCascadeComplete(srcRef) && isCascadeComplete(tgtRef)) {
-      const groups = buildComparisonGroups(srcRef, tgtRef, comparisonPairs);
+      const groups = buildComparisonGroups(srcRef, tgtRef, comparisonPairs, registeredFuzzyFor);
       if (groups.length > 0) {
         req.comparisonGroups = groups;
       }
@@ -980,6 +1088,7 @@ export default function AnalysisPage() {
   function multiBuildExtras(withDedup: boolean) {
     const hubRef = sourceRows.find(isRowFilled)?.ref;
     return {
+      mismatchOnly,
       highlightDuplicates,
       dedup:
         withDedup && dedupColumn && hubRef && isCascadeComplete(hubRef)
@@ -1002,6 +1111,7 @@ export default function AnalysisPage() {
         joinRows: b.joinRows,
         displayRows: b.displayRows,
         joinType: b.joinType,
+        comparisonPairs: b.comparisonPairs,
       })),
       ...multiBuildExtras(withDedup),
     });
@@ -1559,6 +1669,23 @@ export default function AnalysisPage() {
 
       {multiMatchMode && multiUiMode === "form" && (
         <div style={{ width: "100%", marginTop: "1rem" }}>
+          <label
+            className="srse-checkbox-label"
+            htmlFor="multi-mismatch-only"
+            style={{ display: "inline-flex", marginBottom: "0.75rem" }}
+          >
+            <input
+              id="multi-mismatch-only"
+              type="checkbox"
+              checked={mismatchOnly}
+              disabled={targetBlocks.every((b) =>
+                b.comparisonPairs.every((c) => !c.sourceColumn || !c.targetColumn),
+              )}
+              onChange={(e) => setMismatchOnly(e.target.checked)}
+            />
+            {" "}
+            Show mismatches and unmatched records (applies to every target)
+          </label>
           {targetBlocks.map((block, blockIndex) => (
             <section key={block.id} className="srse-card" style={{ marginBottom: "1rem" }}>
               <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", marginBottom: "0.5rem" }}>
@@ -1766,6 +1893,31 @@ export default function AnalysisPage() {
                   />
                 }
               />
+              <div
+                style={{
+                  marginTop: "0.75rem",
+                  paddingTop: "0.75rem",
+                  borderTop: "1px solid var(--srse-border)",
+                }}
+              >
+                <div className="srse-text-muted" style={{ fontSize: "0.78rem", marginBottom: "0.4rem" }}>
+                  Compare columns (after join) — hub ↔ {block.label.trim() || `Target ${blockIndex + 1}`}
+                </div>
+                <ComparisonPairsEditor
+                  pairs={block.comparisonPairs}
+                  onChange={(next) =>
+                    setTargetBlocks((blocks) =>
+                      blocks.map((b) => (b.id === block.id ? { ...b, comparisonPairs: next } : b)),
+                    )
+                  }
+                  sourceRef={hubRefOrUndefined()}
+                  targetRef={filledRefOrUndefined(block.joinRows)}
+                  sourceColumns={sourceRows.find(isRowFilled)?.columns ?? []}
+                  targetColumns={block.joinRows.find(isRowFilled)?.columns ?? []}
+                  registeredFuzzyFor={registeredFuzzyFor}
+                  defaultThreshold={sourceRows.find(isRowFilled)?.fuzzyThresholdPercent ?? 80}
+                />
+              </div>
             </section>
           ))}
           <button
@@ -1813,123 +1965,16 @@ export default function AnalysisPage() {
             {" "}
             Show mismatches and unmatched records (server-side filter)
           </label>
-          <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {comparisonPairs.map((pair) => {
-              const src = sourceRows.find(isRowFilled);
-              const tgt = targetRows.find(isRowFilled);
-              const srcCols = src?.columns ?? [];
-              const tgtCols = tgt?.columns ?? [];
-              const srcRef = src && isCascadeComplete(src.ref) ? src.ref : undefined;
-              const tgtRef = tgt && isCascadeComplete(tgt.ref) ? tgt.ref : undefined;
-              const showFuzzyCompare = comparisonPairIsFuzzy(srcRef, tgtRef, pair, registeredFuzzyFor);
-              return (
-                <li
-                  key={pair.id}
-                  style={{
-                    display: "flex",
-                    gap: "0.5rem",
-                    flexWrap: "wrap",
-                    alignItems: "flex-end",
-                    marginBottom: "0.5rem",
-                  }}
-                >
-                  <div style={{ flex: "1 1 160px" }}>
-                    <span className="srse-text-muted" style={fieldLabelStyle}>
-                      Source column
-                    </span>
-                    <select
-                      className="srse-select"
-                      style={{ width: "100%" }}
-                      value={pair.sourceColumn}
-                      onChange={(e) =>
-                        setComparisonPairs((rows) =>
-                          rows.map((r) =>
-                            r.id === pair.id ? { ...r, sourceColumn: e.target.value } : r,
-                          ),
-                        )
-                      }
-                    >
-                      <option value="">—</option>
-                      {srcCols.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div style={{ flex: "1 1 160px" }}>
-                    <span className="srse-text-muted" style={fieldLabelStyle}>
-                      Target column
-                    </span>
-                    <select
-                      className="srse-select"
-                      style={{ width: "100%" }}
-                      value={pair.targetColumn}
-                      onChange={(e) =>
-                        setComparisonPairs((rows) =>
-                          rows.map((r) =>
-                            r.id === pair.id ? { ...r, targetColumn: e.target.value } : r,
-                          ),
-                        )
-                      }
-                    >
-                      <option value="">—</option>
-                      {tgtCols.map((c) => (
-                        <option key={c.name} value={c.name}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  {showFuzzyCompare && (
-                    <div style={{ flex: "0 1 100px" }}>
-                      <span className="srse-text-muted" style={fieldLabelStyle}>
-                        Fuzzy match %
-                      </span>
-                      <input
-                        type="number"
-                        className="srse-input"
-                        style={{ width: "100%" }}
-                        min={0}
-                        max={100}
-                        value={pair.fuzzyThresholdPercent}
-                        onChange={(e) =>
-                          setComparisonPairs((rows) =>
-                            rows.map((r) =>
-                              r.id === pair.id
-                                ? { ...r, fuzzyThresholdPercent: Number(e.target.value) }
-                                : r,
-                            ),
-                          )
-                        }
-                        title="Similarity threshold for this comparison (not an exact equality check)"
-                      />
-                    </div>
-                  )}
-                  <button
-                    type="button"
-                    className="srse-btn srse-btn-ghost srse-btn-sm"
-                    onClick={() => setComparisonPairs((rows) => rows.filter((r) => r.id !== pair.id))}
-                  >
-                    Remove
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-          <button
-            type="button"
-            className="srse-btn srse-btn-ghost srse-btn-sm"
-            disabled={comparisonPairs.length >= MAX_COMPARISON_GROUPS}
-            onClick={() =>
-              setComparisonPairs((rows) => [
-                ...rows,
-                createComparisonPairRow(sourceRows.find(isRowFilled)?.fuzzyThresholdPercent ?? 80),
-              ])
-            }
-          >
-            + Add comparison ({comparisonPairs.length}/{MAX_COMPARISON_GROUPS})
-          </button>
+          <ComparisonPairsEditor
+            pairs={comparisonPairs}
+            onChange={setComparisonPairs}
+            sourceRef={hubRefOrUndefined()}
+            targetRef={filledRefOrUndefined(targetRows)}
+            sourceColumns={sourceRows.find(isRowFilled)?.columns ?? []}
+            targetColumns={targetRows.find(isRowFilled)?.columns ?? []}
+            registeredFuzzyFor={registeredFuzzyFor}
+            defaultThreshold={sourceRows.find(isRowFilled)?.fuzzyThresholdPercent ?? 80}
+          />
         </section>
       )}
 
