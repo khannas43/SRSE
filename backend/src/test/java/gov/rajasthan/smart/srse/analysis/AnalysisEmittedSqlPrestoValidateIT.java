@@ -36,6 +36,15 @@ import static org.mockito.Mockito.when;
  *
  * <p>Not part of the default build. With the local stack up:
  * {@code SRSE_PRESTO_INTEGRATION=true mvn -pl backend test -Dtest=AnalysisEmittedSqlPrestoValidateIT}
+ *
+ * <p>Column types come from the live table ({@code information_schema.columns}), not
+ * stubs — otherwise {@code TypeCoercion}, ANY_OF {@code CAST(... AS VARCHAR)}, and
+ * comparison casts are validated against types that do not exist on the cluster.
+ *
+ * <p>Fixture note: with no {@link AnalysisColumnMetadata} registered, any join or
+ * comparison group touching a {@code *name*} column is treated as fuzzy and must
+ * carry an explicit {@code fuzzyThresholdPercent} on the group (same rule as the
+ * Analysis UI).
  */
 @EnabledIfEnvironmentVariable(named = "SRSE_PRESTO_INTEGRATION", matches = "true")
 class AnalysisEmittedSqlPrestoValidateIT {
@@ -57,6 +66,9 @@ class AnalysisEmittedSqlPrestoValidateIT {
         ds.setUrl(JDBC_URL);
         ds.setUsername("srse");
         presto = new JdbcTemplate(ds);
+        Map<String, String> liveTypes = loadLiveColumnTypes(presto);
+        assumeTrue(!liveTypes.isEmpty(),
+                () -> "No columns found for " + CATALOG + "." + SCHEMA + "." + TABLE + " — run seed first");
 
         LakehouseRegistryService registry = mock(LakehouseRegistryService.class);
         AnalysisColumnMetadataRepository columnMetadata = mock(AnalysisColumnMetadataRepository.class);
@@ -67,7 +79,11 @@ class AnalysisEmittedSqlPrestoValidateIT {
             Map<String, RegisteredColumn> described = new LinkedHashMap<>();
             for (Object column : inv.getArgument(1, List.class)) {
                 String name = String.valueOf(column);
-                described.put(name, new RegisteredColumn(name, "varchar(50)", null, false, true));
+                String dataType = liveTypes.get(name);
+                if (dataType == null) {
+                    throw new IllegalArgumentException("unknown column " + name + " on live " + TABLE);
+                }
+                described.put(name, new RegisteredColumn(name, dataType, null, false, true));
             }
             return described;
         });
@@ -81,6 +97,17 @@ class AnalysisEmittedSqlPrestoValidateIT {
         service = new RecordMatchService(
                 presto, registry, new GuardrailProperties(1000, 120, 50), fields, columnMetadata,
                 new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L), new ObjectMapper());
+    }
+
+    /** Live {@code data_type} strings as Presto reports them — drives coercion in {@link RecordMatchService}. */
+    private static Map<String, String> loadLiveColumnTypes(JdbcTemplate jdbc) {
+        String sql = "SELECT column_name, data_type FROM " + CATALOG + ".information_schema.columns "
+                + "WHERE table_schema = ? AND table_name = ?";
+        Map<String, String> types = new LinkedHashMap<>();
+        jdbc.query(sql, rs -> {
+            types.put(rs.getString("column_name"), rs.getString("data_type"));
+        }, SCHEMA, TABLE);
+        return types;
     }
 
     private static boolean prestoReachable() {
@@ -144,8 +171,9 @@ class AnalysisEmittedSqlPrestoValidateIT {
                 List.of(), List.of(), null, null,
                 List.of(group(List.of(col("father_name")),
                         List.of(col("mother_name"), col("father_name")),
-                        GroupMode.COMBINE, null)),
+                        GroupMode.COMBINE, 85.0)),
                 false, null, null, null));
+        // Cross-family ANY_OF: bigint id + varchar district → CAST(... AS VARCHAR) in the array.
         cases.add(new RecordMatchRequest(
                 List.of(), List.of(), null, null,
                 List.of(group(List.of(col("id")),
@@ -168,6 +196,13 @@ class AnalysisEmittedSqlPrestoValidateIT {
                 false, null, null, JoinType.LEFT,
                 List.of(fuzzyCompare),
                 true));
+        // Post-join comparison across type families (bigint id vs varchar district).
+        cases.add(new RecordMatchRequest(
+                List.of(), List.of(), null, null,
+                List.of(group(List.of(col("id")), List.of(col("id")), GroupMode.COMBINE, null)),
+                false, null, null, null,
+                List.of(ComparisonGroup.of(col("id"), col("district"))),
+                false));
         for (RecordMatchRequest req : cases) {
             explainValidate(req);
         }

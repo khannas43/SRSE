@@ -544,9 +544,17 @@ public class RecordMatchService {
         validateDisplayColumns(req.sourceDisplayColumns(), sourceTable, "sourceDisplayColumns");
         validateDisplayColumns(req.targetDisplayColumns(), targetTable, "targetDisplayColumns");
 
+        List<MatchCriterion> comparisonSourceColumns = req.comparisonGroups().stream()
+                .flatMap(g -> g.source().stream())
+                .toList();
+        List<MatchCriterion> comparisonTargetColumns = req.comparisonGroups().stream()
+                .flatMap(g -> g.target().stream())
+                .toList();
         Sides sides = new Sides(
-                sourceTable, describeSide(sourceTable, join.sourceColumns(), req.sourceDisplayColumns()),
-                targetTable, describeSide(targetTable, join.targetColumns(), req.targetDisplayColumns()));
+                sourceTable, describeSide(sourceTable, join.sourceColumns(), req.sourceDisplayColumns(),
+                        comparisonSourceColumns),
+                targetTable, describeSide(targetTable, join.targetColumns(), req.targetDisplayColumns(),
+                        comparisonTargetColumns));
         if (req.dedup() != null) {
             validateSideMembership(req.dedup().qualifiedTable(), sourceTable, targetTable, "dedup.table");
             registry.validateColumn(req.dedup().qualifiedColumn());
@@ -1355,10 +1363,13 @@ public class RecordMatchService {
      * criterion here shares one table by {@link #tableOf}'s check.
      */
     private Map<String, RegisteredColumn> describeSide(QualifiedTable table, List<MatchCriterion> criteria,
-                                                         List<DisplayColumn> display) {
-        List<String> columnNames = Stream.concat(
-                criteria.stream().map(MatchCriterion::column),
-                display.stream().map(DisplayColumn::column))
+                                                         List<DisplayColumn> display,
+                                                         List<MatchCriterion> alsoDescribe) {
+        List<String> columnNames = Stream.of(
+                        criteria.stream().map(MatchCriterion::column),
+                        display.stream().map(DisplayColumn::column),
+                        alsoDescribe.stream().map(MatchCriterion::column))
+                .flatMap(s -> s)
                 .distinct()
                 .toList();
         return registry.describeColumns(table, columnNames);
