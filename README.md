@@ -47,19 +47,17 @@ docker compose up             # brings up the full local stack
 
 ### Fragmented `beneficiary` table (local Iceberg)
 
-Older seed runs inserted **1,000 rows per Iceberg file**, which slows planning and
-can leave a partial table if the seed hit Presto’s optimizer timeout. The seed now
-writes **3,500 rows per batch** (override with `SEED_BATCH_SIZE`; Presto’s 1MB
-query limit prevents fewer, larger files without server-side `INSERT … SELECT`).
-Existing
-fragmentation is **not** compacted in place — drop and re-seed:
+Older seed runs used client-side `INSERT … VALUES` (many small Iceberg files).
+The seed now generates **200,000 rows in one server-side `INSERT … SELECT`**
+(see `docker/seed/seed.py`). Existing fragmentation is **not** compacted in place
+— drop and re-seed:
 
 ```bash
 docker compose run --rm seed   # drops and recreates iceberg.srse.beneficiary
 ```
 
-Or `docker compose up --build` after removing the `seed` container’s prior exit state
-so the seed job runs again from scratch.
+After a successful run, `SELECT count(*) FROM iceberg.srse."beneficiary$files"`
+should be a **single-digit** file count (typically one data file).
 
 ## Two data planes (do not conflate)
 
