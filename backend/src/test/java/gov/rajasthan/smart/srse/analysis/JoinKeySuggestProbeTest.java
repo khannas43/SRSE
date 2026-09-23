@@ -14,6 +14,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -136,6 +137,18 @@ class JoinKeySuggestProbeTest {
     }
 
     @Test
+    void probeAwareComparatorOrders23ThenZeroThenUnprobed() {
+        List<JoinKeySuggestService.ScoredPair> pairs = new ArrayList<>(List.of(
+                JoinKeySuggestService.testScoredPair("id", "bigint", "bank_branch_id", "varchar", 250, null),
+                JoinKeySuggestService.testScoredPair("id", "bigint", "bank_id", "varchar", 250, 0.0),
+                JoinKeySuggestService.testScoredPair("id", "bigint", "m_id", "bigint", 250, 0.23)));
+        JoinKeySuggestService.sortProbeAware(pairs);
+        assertEquals("m_id", pairs.get(0).target().name());
+        assertEquals("bank_id", pairs.get(1).target().name());
+        assertEquals("bank_branch_id", pairs.get(2).target().name());
+    }
+
+    @Test
     void zeroOverlapRanksBelowMeasuredOverlap() {
         when(registry.listColumns(CATALOG, SCHEMA, SRC)).thenReturn(List.of(
                 new RegisteredColumn("district", "varchar", null, false, true),
@@ -149,8 +162,8 @@ class JoinKeySuggestProbeTest {
                 "id", 1.03)));
 
         when(jdbc.queryForObject(anyString(), eq(Double.class)))
-                .thenReturn(0.0)
-                .thenReturn(0.23);
+                .thenReturn(0.23)
+                .thenReturn(0.0);
 
         List<JoinKeySuggestion> suggestions = service.suggest(new SuggestJoinKeysRequest(
                 CATALOG, SCHEMA, SRC, TGT_CATALOG, TGT_SCHEMA, TGT, true));

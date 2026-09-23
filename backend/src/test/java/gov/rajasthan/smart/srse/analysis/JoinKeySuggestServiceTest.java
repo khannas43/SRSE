@@ -120,6 +120,38 @@ class JoinKeySuggestServiceTest {
     }
 
     @Test
+    void sameFamilyIdentifierPairOutranksCrossFamilyIdentifierPair() {
+        when(registry.listColumns(CATALOG, SCHEMA, SRC)).thenReturn(List.of(
+                new RegisteredColumn("id", "bigint", null, false, true),
+                new RegisteredColumn("district", "varchar", null, false, true),
+                new RegisteredColumn("father_name", "varchar", null, false, true)));
+        when(registry.listColumns(CATALOG, SCHEMA, TGT)).thenReturn(List.of(
+                new RegisteredColumn("m_id", "bigint", null, false, true),
+                new RegisteredColumn("bank_id", "varchar", null, false, true),
+                new RegisteredColumn("bank_branch_id", "varchar", null, false, true),
+                new RegisteredColumn("district", "varchar", null, false, true),
+                new RegisteredColumn("father_name", "varchar", null, false, true)));
+
+        List<JoinKeySuggestion> suggestions = service.suggest(request(false));
+        int mId = indexOfPair(suggestions, "id", "m_id");
+        int bankBranch = indexOfPair(suggestions, "id", "bank_branch_id");
+        int bank = indexOfPair(suggestions, "id", "bank_id");
+        assertTrue(mId >= 0 && bankBranch >= 0 && bank >= 0);
+        assertTrue(mId < bankBranch && mId < bank,
+                "id↔m_id (bigint↔bigint) must rank above cross-family identifier pairs");
+    }
+
+    private static int indexOfPair(List<JoinKeySuggestion> list, String src, String tgt) {
+        for (int i = 0; i < list.size(); i++) {
+            JoinKeySuggestion s = list.get(i);
+            if (s.sourceColumn().equals(src) && s.targetColumn().equals(tgt)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    @Test
     void temporalColumnNeverPairedWithNonTemporal() {
         when(registry.listColumns(CATALOG, SCHEMA, SRC)).thenReturn(List.of(
                 new RegisteredColumn("age_band", "varchar", null, false, true),

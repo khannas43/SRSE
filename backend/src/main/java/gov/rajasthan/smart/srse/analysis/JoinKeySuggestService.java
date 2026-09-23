@@ -115,17 +115,45 @@ public class JoinKeySuggestService {
 
     private static Comparator<ScoredPair> metadataComparator() {
         return Comparator.comparingInt(ScoredPair::score).reversed()
+                .thenComparing(sameTypeFamilyFirst())
                 .thenComparing(p -> p.source().name())
                 .thenComparing(p -> p.target().name());
     }
 
-    /** When overlap was measured, sort by overlap first so 0% cannot beat a real key. */
+    /**
+     * When overlap was measured, sort by overlap first so 0% cannot beat a real key.
+     * One {@code reversed()} on the overlap+score chain (not per-key — a second
+     * {@code reversed()} on {@code thenComparingInt} inverts the whole comparator).
+     */
     private static Comparator<ScoredPair> probeAwareComparator() {
         return Comparator
-                .comparingDouble((ScoredPair p) -> p.overlapRatio != null ? p.overlapRatio : -1.0).reversed()
-                .thenComparingInt(ScoredPair::score).reversed()
+                .comparingDouble((ScoredPair p) -> p.overlapRatio != null ? p.overlapRatio : -1.0)
+                .thenComparingInt(ScoredPair::score)
+                .reversed()
+                .thenComparing(sameTypeFamilyFirst())
                 .thenComparing(p -> p.source().name())
                 .thenComparing(p -> p.target().name());
+    }
+
+    /** Within a score tier, prefer bigint↔bigint over bigint↔varchar identifier pairs. */
+    private static Comparator<ScoredPair> sameTypeFamilyFirst() {
+        return Comparator.comparing((ScoredPair p) -> p.sourceFamily() == p.targetFamily()).reversed();
+    }
+
+    /** Same-package tests: build a pair and run {@link #probeAwareComparator()}. */
+    static ScoredPair testScoredPair(String sourceName, String sourceType, String targetName, String targetType,
+                                     int score, Double overlapRatio) {
+        RegisteredColumn source = new RegisteredColumn(sourceName, sourceType, null, false, true);
+        RegisteredColumn target = new RegisteredColumn(targetName, targetType, null, false, true);
+        SqlTypeFamily sourceFamily = SqlTypeFamily.of(sourceType);
+        SqlTypeFamily targetFamily = SqlTypeFamily.of(targetType);
+        ScoredPair pair = new ScoredPair(source, target, sourceFamily, targetFamily, score, "");
+        pair.overlapRatio = overlapRatio;
+        return pair;
+    }
+
+    static void sortProbeAware(List<ScoredPair> ranked) {
+        ranked.sort(probeAwareComparator());
     }
 
     private List<ScoredPair> rankMetadataPairs(
