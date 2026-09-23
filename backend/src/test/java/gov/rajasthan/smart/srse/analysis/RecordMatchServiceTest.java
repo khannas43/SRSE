@@ -1525,4 +1525,190 @@ class RecordMatchServiceTest {
         String sql = service.planMatch(req).sql();
         assertTrue(sql.contains("LEFT JOIN UNNEST"), sql);
     }
+
+    // ---- post-join column comparison (Package 12) ----
+
+    @Test
+    void emptyComparisonGroupsLeaveMatchSqlUnchanged() {
+        String baseline = service.planMatch(exactMatchRequest()).sql();
+        RecordMatchRequest explicit = new RecordMatchRequest(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("beneficiary", "district")),
+                null, null, List.of(), false, null, null, null, List.of(), false);
+        assertEquals(baseline, service.planMatch(explicit).sql());
+    }
+
+    @Test
+    void comparisonPairsNeverAppearInOnClause() {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "m_id")),
+                List.of(exact("bank_txn", "m_id")),
+                null, null, List.of(), false, null, null, null,
+                List.of(ComparisonGroup.of(
+                        exact("beneficiary", "pan"),
+                        exact("bank_txn", "pan"))),
+                false);
+        String sql = service.planMatch(req).sql();
+        String on = onClauseOf(sql);
+        assertFalse(on.toLowerCase().contains("pan"), on);
+        assertTrue(sql.contains("IS DISTINCT FROM"), sql);
+        assertTrue(sql.contains("\"cmp_0_match\""), sql);
+        assertTrue(sql.contains("\"cmp_0_source\""), sql);
+        assertTrue(sql.contains("\"cmp_0_target\""), sql);
+    }
+
+    @Test
+    void comparisonAcrossTypeFamiliesUsesSameCoercionAsJoin() {
+        stubTypes("txn_bank", "account_no", "varchar(20)");
+        stubTypes("golden_bank", "account_no", "bigint");
+
+        RecordMatchRequest joinOnly = new RecordMatchRequest(
+                List.of(exact("txn_bank", "account_no")),
+                List.of(exact("golden_bank", "account_no")),
+                null, null, false, null, null);
+        String joinSql = service.planMatch(joinOnly).sql();
+
+        RecordMatchRequest withCompare = new RecordMatchRequest(
+                List.of(exact("txn_bank", "m_id")),
+                List.of(exact("golden_bank", "m_id")),
+                null, null, List.of(), false, null, null, null,
+                List.of(ComparisonGroup.of(
+                        exact("txn_bank", "account_no"),
+                        exact("golden_bank", "account_no"))),
+                false);
+        String sql = service.planMatch(withCompare).sql();
+        assertTrue(sql.contains("TRY_CAST(src.account_no AS DOUBLE)"), sql);
+        assertTrue(joinSql.contains("TRY_CAST(src.account_no AS DOUBLE) = tgt.account_no"), joinSql);
+    }
+
+    @Test
+    void mismatchOnlyWithFuzzyComparisonBindsOneThresholdPerPlaceholder() {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "m_id")),
+                List.of(exact("bank_txn", "m_id")),
+                null, null, List.of(), false, null, null, null,
+                List.of(new ComparisonGroup(
+                        List.of(fuzzy("beneficiary", "full_name", 85.0)),
+                        List.of(exact("bank_txn", "full_name")),
+                        GroupMode.COMBINE, 85.0, null)),
+                true);
+        RecordMatchService.MatchQuery query = service.planMatch(req);
+        int placeholders = 0;
+        for (int i = 0; i < query.sql().length(); i++) {
+            if (query.sql().charAt(i) == '?') {
+                placeholders++;
+            }
+        }
+        assertEquals(2, placeholders, query.sql());
+        assertEquals(2, query.params().size());
+        assertEquals(0.85, query.params().get(0));
+        assertEquals(0.85, query.params().get(1));
+    }
+
+    @Test
+    void mismatchOnlyFilterIsInWhereNotOn() {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "m_id")),
+                List.of(exact("bank_txn", "m_id")),
+                null, null, List.of(), false, null, null, JoinType.LEFT,
+                List.of(ComparisonGroup.of(
+                        exact("beneficiary", "pan"),
+                        exact("bank_txn", "pan"))),
+                true);
+        String sql = service.planMatch(req).sql();
+        int onIdx = sql.indexOf(" ON ");
+        int whereIdx = sql.indexOf(" WHERE ");
+        assertTrue(onIdx >= 0 && whereIdx > onIdx, sql);
+        String onPart = sql.substring(onIdx, whereIdx);
+        String wherePart = sql.substring(whereIdx);
+        assertFalse(onPart.contains("NOT ("), onPart);
+        assertTrue(wherePart.contains("NOT ("), wherePart);
+        assertTrue(wherePart.contains("IS DISTINCT FROM"), wherePart);
+        assertTrue(wherePart.contains("tgt.m_id IS NULL OR"), wherePart);
+        assertFalse(wherePart.contains("\"match_status\""), wherePart);
+        assertFalse(onPart.contains("IS DISTINCT FROM"), onPart);
+    }
+
+    @Test
+    void comparisonGroupsDoNotChangeFanOutEstimate() {
+        analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L);
+        service = new RecordMatchService(jdbc, registry, guardrails, fieldResolver, columnMetadata, analysisProperties, objectMapper);
+        stubReconciliationCardinalities(7L, 7L);
+
+        RecordMatchRequest base = districtCrossTableMatch();
+        assertThrows(IllegalArgumentException.class, () -> service.planMatch(base));
+
+        RecordMatchRequest withComparisons = new RecordMatchRequest(
+                List.of(exact("beneficiary", "district")),
+                List.of(exact("bank_txn", "district")),
+                null, null, List.of(), false, null, null, null,
+                List.of(
+                        ComparisonGroup.of(exact("beneficiary", "pan"), exact("bank_txn", "pan")),
+                        ComparisonGroup.of(exact("beneficiary", "name"), exact("bank_txn", "name"))),
+                false);
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> service.planMatch(withComparisons));
+        assertTrue(ex.getMessage().contains("Estimated match fan-out"), ex.getMessage());
+    }
+
+    private static RecordMatchRequest keyJoinWithPanComparison(JoinType joinType) {
+        return new RecordMatchRequest(
+                List.of(exact("beneficiary", "m_id")),
+                List.of(exact("bank_txn", "m_id")),
+                null, null, List.of(), false, null, null, joinType,
+                List.of(ComparisonGroup.of(
+                        exact("beneficiary", "pan"),
+                        exact("bank_txn", "pan"))),
+                false);
+    }
+
+    @Test
+    void innerJoinWithComparisonsDoesNotEmitMatchStatus() {
+        String sql = service.planMatch(keyJoinWithPanComparison(JoinType.INNER)).sql();
+        assertFalse(sql.contains("match_status"), sql);
+        assertTrue(sql.contains("IS DISTINCT FROM"), sql);
+        assertFalse(sql.contains("THEN NULL ELSE"), sql);
+    }
+
+    @Test
+    void leftJoinWithComparisonsEmitsMatchStatusAndNullVerdictsWithoutCounterpart() {
+        String sql = service.planMatch(keyJoinWithPanComparison(JoinType.LEFT)).sql();
+        assertTrue(sql.contains("\"match_status\""), sql);
+        assertTrue(sql.contains("NO_TARGET"), sql);
+        assertTrue(sql.contains("tgt.m_id IS NULL THEN NULL"), sql);
+    }
+
+    @Test
+    void mismatchOnlyOnLeftJoinRetainsNoCounterpartRowsInWhere() {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "m_id")),
+                List.of(exact("bank_txn", "m_id")),
+                null, null, List.of(), false, null, null, JoinType.LEFT,
+                List.of(ComparisonGroup.of(
+                        exact("beneficiary", "pan"),
+                        exact("bank_txn", "pan"))),
+                true);
+        String sql = service.planMatch(req).sql();
+        String wherePart = sql.substring(sql.indexOf(" WHERE "));
+        assertTrue(wherePart.contains("tgt.m_id IS NULL OR"), wherePart);
+        assertTrue(wherePart.contains(" OR NOT ("), wherePart);
+        assertFalse(wherePart.contains("\"match_status\""), wherePart);
+    }
+
+    @Test
+    void comparisonSummaryRatesUseMatchedRowsOnly() {
+        RecordMatchRequest req = keyJoinWithPanComparison(JoinType.LEFT);
+        ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+        when(jdbc.queryForMap(sqlCaptor.capture(), any(Object[].class))).thenReturn(Map.of(
+                "total_rows", 100L,
+                "matched_rows", 60L,
+                "no_counterpart_rows", 40L,
+                "cmp_0_matches", 54L));
+        ComparisonSummaryResponse summary = service.comparisonSummary(req);
+        assertEquals(100L, summary.totalRows());
+        assertEquals(60L, summary.matchedRows());
+        assertEquals(40L, summary.noCounterpartRows());
+        assertEquals(90.0, summary.columns().get(0).matchRatePercent());
+        assertTrue(sqlCaptor.getValue().contains("\"match_status\" = 'MATCHED'"), sqlCaptor.getValue());
+    }
 }

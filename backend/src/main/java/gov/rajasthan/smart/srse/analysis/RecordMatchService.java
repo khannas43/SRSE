@@ -174,6 +174,64 @@ public class RecordMatchService {
     }
 
     /**
+     * Full-result aggregate match rates for {@link RecordMatchRequest#comparisonGroups()} —
+     * not derivable from the NDJSON stream, which stops at 200k rows client-side.
+     */
+    public ComparisonSummaryResponse comparisonSummary(RecordMatchRequest req) {
+        MatchQuery query = planMatch(req);
+        if (req.comparisonGroups().isEmpty()) {
+            return new ComparisonSummaryResponse(0, 0, 0, List.of());
+        }
+        JoinType joinType = JoinType.effective(req.joinType());
+        boolean outerReconciliation = joinType != JoinType.INNER;
+        StringBuilder agg = new StringBuilder("SELECT COUNT(*) AS total_rows");
+        if (outerReconciliation) {
+            agg.append(", SUM(CASE WHEN \"match_status\" = 'MATCHED' THEN 1 ELSE 0 END) AS matched_rows");
+            agg.append(", SUM(CASE WHEN \"match_status\" <> 'MATCHED' THEN 1 ELSE 0 END) AS no_counterpart_rows");
+        }
+        for (int i = 0; i < req.comparisonGroups().size(); i++) {
+            String matchCol = "\"cmp_" + i + "_match\"";
+            if (outerReconciliation) {
+                agg.append(", SUM(CASE WHEN \"match_status\" = 'MATCHED' AND ").append(matchCol)
+                        .append(" THEN 1 ELSE 0 END) AS cmp_").append(i).append("_matches");
+            } else {
+                agg.append(", SUM(CASE WHEN ").append(matchCol).append(" THEN 1 ELSE 0 END) AS cmp_")
+                        .append(i).append("_matches");
+            }
+        }
+        agg.append(" FROM (").append(query.sql()).append(") comparison_summary_inner");
+        Map<String, Object> row = jdbc.queryForMap(agg.toString(), query.params().toArray());
+        long total = toLong(row.get("total_rows"));
+        long matched = outerReconciliation ? toLong(row.get("matched_rows")) : total;
+        long noCounterpart = outerReconciliation ? toLong(row.get("no_counterpart_rows")) : 0L;
+        List<ComparisonSummaryResponse.ComparisonColumnSummary> columns = new ArrayList<>();
+        for (int i = 0; i < req.comparisonGroups().size(); i++) {
+            ComparisonGroup g = req.comparisonGroups().get(i);
+            long matches = toLong(row.get("cmp_" + i + "_matches"));
+            double rate = matched == 0 ? 0.0 : Math.round(matches * 1000.0 / matched) / 10.0;
+            columns.add(new ComparisonSummaryResponse.ComparisonColumnSummary(
+                    i, comparisonLabel(g), matches, rate));
+        }
+        return new ComparisonSummaryResponse(total, matched, noCounterpart, List.copyOf(columns));
+    }
+
+    private static long toLong(Object value) {
+        if (value == null) {
+            return 0;
+        }
+        if (value instanceof Number n) {
+            return n.longValue();
+        }
+        return Long.parseLong(String.valueOf(value));
+    }
+
+    private static String comparisonLabel(ComparisonGroup group) {
+        String src = group.source().stream().map(MatchCriterion::column).reduce((a, b) -> a + "+" + b).orElse("?");
+        String tgt = group.target().stream().map(MatchCriterion::column).reduce((a, b) -> a + "+" + b).orElse("?");
+        return src + " ↔ " + tgt;
+    }
+
+    /**
      * Both sides' columns as the LIVE lakehouse describes them, gathered by
      * the same pass that gates them. The types travel because the SQL depends
      * on them — see {@link #planPairs}.
@@ -265,6 +323,221 @@ public class RecordMatchService {
         }
     }
 
+    private void validateComparisonGroups(List<ComparisonGroup> groups, Sides sides) {
+        if (groups.isEmpty()) {
+            return;
+        }
+        if (groups.size() > MAX_CRITERIA_PER_SIDE) {
+            throw new IllegalArgumentException(
+                    "comparisonGroups must have 1 to " + MAX_CRITERIA_PER_SIDE + " entries");
+        }
+        for (int i = 0; i < groups.size(); i++) {
+            ComparisonGroup g = groups.get(i);
+            if (g.mode() == GroupMode.ANY_OF) {
+                throw new IllegalArgumentException("comparisonGroups[" + i + "] does not support ANY_OF");
+            }
+            validateComparisonSide(g.source(), i, "source", sides.sourceTable());
+            validateComparisonSide(g.target(), i, "target", sides.targetTable());
+        }
+    }
+
+    private void validateComparisonSide(List<MatchCriterion> columns, int index, String side,
+                                        QualifiedTable expectedTable) {
+        if (columns.isEmpty()) {
+            throw new IllegalArgumentException("comparisonGroups[" + index + "]." + side
+                    + " must have at least one column");
+        }
+        if (columns.size() > analysisProperties.maxGroupColumns()) {
+            throw new IllegalArgumentException("comparisonGroups[" + index + "]." + side
+                    + " must have at most " + analysisProperties.maxGroupColumns() + " columns");
+        }
+        for (MatchCriterion c : columns) {
+            if (!c.qualifiedTable().equals(expectedTable)) {
+                throw new IllegalArgumentException("comparisonGroups[" + index + "]." + side
+                        + " must reference " + expectedTable.qualifiedName());
+            }
+            registry.validateColumn(c.qualifiedColumn());
+        }
+    }
+
+    private List<ComparisonPlan> planComparisons(RecordMatchRequest req, Sides sides, List<Object> params) {
+        if (req.comparisonGroups().isEmpty()) {
+            return List.of();
+        }
+        List<ComparisonPlan> plans = new ArrayList<>();
+        for (int i = 0; i < req.comparisonGroups().size(); i++) {
+            ComparisonGroup g = req.comparisonGroups().get(i);
+            SideSql src = comparisonSideSql(g.source(), "src", sides.sourceColumns(), g.separator());
+            SideSql tgt = comparisonSideSql(g.target(), "tgt", sides.targetColumns(), g.separator());
+            boolean fuzzy = isComparisonGroupFuzzy(g);
+            CompareAs mode = comparisonGroupCompareAs(g);
+            TypeCoercion.Aligned aligned = fuzzy
+                    ? new TypeCoercion.Aligned(
+                    TypeCoercion.asText(src.sql(), src.family()),
+                    TypeCoercion.asText(tgt.sql(), tgt.family()))
+                    : TypeCoercion.align(src.sql(), src.family(), tgt.sql(), tgt.family(), mode);
+            String matchExpr;
+            String scoreExpr = null;
+            if (fuzzy) {
+                if (g.fuzzyThresholdPercent() == null) {
+                    throw new IllegalArgumentException(
+                            "comparisonGroups[" + i + "].fuzzyThresholdPercent is required for a fuzzy comparison");
+                }
+                double threshold = g.fuzzyThresholdPercent();
+                if (threshold < 0 || threshold > 100) {
+                    throw new IllegalArgumentException("fuzzyThresholdPercent must be between 0 and 100");
+                }
+                scoreExpr = "ROUND((" + FuzzyMatchSql.similarityExpr(aligned.left(), aligned.right())
+                        + ") * 100, 1)";
+                matchExpr = "(" + FuzzyMatchSql.similarityExpr(aligned.left(), aligned.right()) + " >= ?)";
+                double thresholdParam = threshold / 100.0;
+                params.add(thresholdParam);
+                plans.add(new ComparisonPlan(
+                        i, aligned.left(), aligned.right(), matchExpr, scoreExpr, List.of(thresholdParam)));
+            } else {
+                // Both-null counts as a match; one-sided null is a mismatch — PrestoDB 0.297 IS DISTINCT FROM.
+                matchExpr = "(NOT (" + aligned.left() + " IS DISTINCT FROM " + aligned.right() + "))";
+                plans.add(new ComparisonPlan(
+                        i, aligned.left(), aligned.right(), matchExpr, scoreExpr, List.of()));
+            }
+        }
+        return List.copyOf(plans);
+    }
+
+    private SideSql comparisonSideSql(List<MatchCriterion> columns, String alias,
+                                      Map<String, RegisteredColumn> described, String separator) {
+        if (columns.size() == 1) {
+            String column = columns.get(0).column();
+            return new SideSql(alias + "." + column, familyOf(described, column));
+        }
+        List<String> refs = columns.stream().map(c -> alias + "." + c.column()).toList();
+        return new SideSql(ColumnGroupSql.combine(refs, separator), SqlTypeFamily.TEXT);
+    }
+
+    private void appendComparisonSelects(StringBuilder select, Set<String> outerColumns,
+                                         List<ComparisonPlan> plans, String noCounterpartWhen) {
+        for (ComparisonPlan plan : plans) {
+            appendExpressionSelect(select, outerColumns, plan.sourceValueExpr(), "cmp_" + plan.index() + "_source");
+            appendExpressionSelect(select, outerColumns, plan.targetValueExpr(), "cmp_" + plan.index() + "_target");
+            String verdict = plan.matchBooleanExpr();
+            if (noCounterpartWhen != null) {
+                verdict = nullVerdictWhenNoCounterpart(noCounterpartWhen, verdict);
+            }
+            appendExpressionSelect(select, outerColumns, verdict, "cmp_" + plan.index() + "_match");
+            if (plan.scorePercentExpr() != null) {
+                String score = plan.scorePercentExpr();
+                if (noCounterpartWhen != null) {
+                    score = "CASE WHEN " + noCounterpartWhen + " THEN NULL ELSE (" + score + ") END";
+                }
+                appendExpressionSelect(select, outerColumns, score, "cmp_" + plan.index() + "_score_pct");
+            }
+        }
+    }
+
+    private static String nullVerdictWhenNoCounterpart(String noCounterpartWhen, String verdictExpr) {
+        return "CASE WHEN " + noCounterpartWhen + " THEN NULL ELSE (" + verdictExpr + ") END";
+    }
+
+    /**
+     * First join-key columns on each side — used to detect rows with no counterpart
+     * under outer joins. A row that satisfied the equi-join cannot have NULL on
+     * either key: NULL never equals anything, so it could not have matched.
+     */
+    private record JoinKeyRefs(String sourceColumnSql, String targetColumnSql) {
+    }
+
+    private static JoinKeyRefs joinKeyRefs(JoinPlan join) {
+        if (join.sourceColumns().isEmpty() || join.targetColumns().isEmpty()) {
+            throw new IllegalArgumentException("join requires at least one source and one target column");
+        }
+        MatchCriterion source = join.sourceColumns().get(0);
+        MatchCriterion target = join.targetColumns().get(0);
+        return new JoinKeyRefs("src." + source.column(), "tgt." + target.column());
+    }
+
+    private static String noCounterpartPredicate(JoinType joinType, JoinKeyRefs keys) {
+        return switch (joinType) {
+            case INNER -> throw new IllegalStateException("INNER join has no unmatched rows");
+            case LEFT -> keys.targetColumnSql() + " IS NULL";
+            case RIGHT -> keys.sourceColumnSql() + " IS NULL";
+            case FULL -> "(" + keys.sourceColumnSql() + " IS NULL OR " + keys.targetColumnSql() + " IS NULL)";
+        };
+    }
+
+    private void appendMatchStatusSelect(StringBuilder select, Set<String> outerColumns,
+                                         JoinType joinType, JoinKeyRefs keys) {
+        appendExpressionSelect(select, outerColumns, matchStatusExpr(joinType, keys), "match_status");
+    }
+
+    private static String matchStatusExpr(JoinType joinType, JoinKeyRefs keys) {
+        // See joinKeyRefs — NULL on a join key means this row has no counterpart on that side.
+        return switch (joinType) {
+            case INNER -> throw new IllegalStateException("match_status is not emitted for INNER joins");
+            case LEFT -> "CASE WHEN " + keys.targetColumnSql() + " IS NULL THEN 'NO_TARGET' ELSE 'MATCHED' END";
+            case RIGHT -> "CASE WHEN " + keys.sourceColumnSql() + " IS NULL THEN 'NO_SOURCE' ELSE 'MATCHED' END";
+            case FULL -> "CASE WHEN " + keys.sourceColumnSql() + " IS NULL THEN 'NO_SOURCE' WHEN "
+                    + keys.targetColumnSql() + " IS NULL THEN 'NO_TARGET' ELSE 'MATCHED' END";
+        };
+    }
+
+    private void appendMismatchOnlyFilter(StringBuilder where, RecordMatchRequest req,
+                                          List<ComparisonPlan> plans, List<Object> params,
+                                          String noCounterpartWhen) {
+        if (!req.mismatchOnly() || plans.isEmpty()) {
+            return;
+        }
+        StringJoiner allMatch = new StringJoiner(" AND ");
+        for (ComparisonPlan plan : plans) {
+            allMatch.add("(" + plan.matchBooleanExpr() + ")");
+            // SELECT already bound these once; WHERE reuses the same expression text.
+            params.addAll(plan.matchBindValues());
+        }
+        String disagreement = "NOT (" + allMatch + ")";
+        if (noCounterpartWhen != null) {
+            // SELECT alias match_status is not visible in WHERE — use the same predicate as verdict wrapping.
+            appendWhereClause(where, "(" + noCounterpartWhen + " OR " + disagreement + ")");
+        } else {
+            appendWhereClause(where, disagreement);
+        }
+    }
+
+    private void appendExpressionSelect(StringBuilder select, Set<String> outerColumns, String expression,
+                                        String outAlias) {
+        if (select.length() > 0) {
+            select.append(", ");
+        }
+        select.append("(").append(expression).append(") AS \"").append(outAlias).append('"');
+        outerColumns.add(outAlias);
+    }
+
+    private CompareAs comparisonGroupCompareAs(ComparisonGroup group) {
+        if (group.source().size() + group.target().size() > 2
+                || group.source().size() > 1
+                || group.target().size() > 1) {
+            return CompareAs.TEXT;
+        }
+        return CompareAs.resolve(sideCompareAs(group.source()), sideCompareAs(group.target()));
+    }
+
+    private boolean isComparisonGroupFuzzy(ComparisonGroup group) {
+        List<MatchCriterion> columns = new ArrayList<>(group.source());
+        columns.addAll(group.target());
+        boolean anyRegistered = false;
+        for (MatchCriterion c : columns) {
+            Optional<AnalysisColumnMetadata> meta = findMetadata(c);
+            if (meta.isPresent()) {
+                anyRegistered = true;
+                if (meta.get().isFuzzyMatchable()) {
+                    return true;
+                }
+            }
+        }
+        if (anyRegistered) {
+            return false;
+        }
+        return columns.stream().anyMatch(c -> c.column().toLowerCase().contains("name"));
+    }
+
     private Sides validateRequest(RecordMatchRequest req, JoinPlan join) {
         QualifiedTable sourceTable = sameTable(join.sourceColumns(), "sourceCriteria");
         QualifiedTable targetTable = sameTable(join.targetColumns(), "targetCriteria");
@@ -282,6 +555,7 @@ public class RecordMatchService {
             validateAgeFilter(req.ageFilter());
         }
         validateOuterJoinRules(req, sides);
+        validateComparisonGroups(req.comparisonGroups(), sides);
         return sides;
     }
 
@@ -365,14 +639,26 @@ public class RecordMatchService {
                 joinType.preservesSourceSide(), joinType.preservesTargetSide());
         enforceEstimatedRowCeiling(sides, groups);
 
+        // Comparison placeholders live in SELECT, which precedes ON in the final SQL —
+        // bind comparison params before join params.
+        List<ComparisonPlan> comparisonPlans = planComparisons(req, sides, params);
+
         appendCriteriaSelects(select, outerColumns, join, req);
         appendMatchedOnSelects(select, outerColumns, "src", "source_", sourceUnnests);
         appendMatchedOnSelects(select, outerColumns, "tgt", "target_", targetUnnests);
-        appendJoinConditions(onClause, where, params, groups, joinType);
+        boolean outerComparison = !req.comparisonGroups().isEmpty() && joinType != JoinType.INNER;
+        JoinKeyRefs joinKeys = req.comparisonGroups().isEmpty() ? null : joinKeyRefs(join);
+        String noCounterpartWhen = outerComparison ? noCounterpartPredicate(joinType, joinKeys) : null;
+        if (outerComparison) {
+            appendMatchStatusSelect(select, outerColumns, joinType, joinKeys);
+        }
+        appendComparisonSelects(select, outerColumns, comparisonPlans, noCounterpartWhen);
 
         String dedupAlias = appendDedupSelect(select, outerColumns, req, join);
         appendMatchScoreSelect(select, outerColumns, req, groups);
+        appendJoinConditions(onClause, where, params, groups, joinType);
         appendAgeFilter(where, params, req, sides, joinType);
+        appendMismatchOnlyFilter(where, req, comparisonPlans, params, noCounterpartWhen);
 
         if (where.length() == 0) {
             where.append("TRUE");
@@ -476,6 +762,20 @@ public class RecordMatchService {
      * the query outright with {@code '=' cannot be applied to varchar, bigint}.
      */
     private record GroupPlan(MatchGroup group, boolean fuzzy, String sourceRef, String targetRef) {
+    }
+
+    /** Post-join comparison projection — never routed to {@link #appendJoinConditions}. */
+    private record ComparisonPlan(
+            int index,
+            String sourceValueExpr,
+            String targetValueExpr,
+            String matchBooleanExpr,
+            String scorePercentExpr,
+            List<Object> matchBindValues) {
+
+        ComparisonPlan {
+            matchBindValues = matchBindValues == null ? List.of() : List.copyOf(matchBindValues);
+        }
     }
 
     /** One ANY_OF side pivoted to rows, and the CROSS JOIN UNNEST that does it. */

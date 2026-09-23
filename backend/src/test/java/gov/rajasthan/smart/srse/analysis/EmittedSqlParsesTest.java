@@ -21,12 +21,14 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -55,6 +57,10 @@ import static org.mockito.Mockito.lenient;
  * comparison Presto rejects at analysis time still parses cleanly here. This
  * closes the "is that UNNEST subquery even valid Presto" question and nothing
  * beyond it.
+ *
+ * <p>For full analyzer coverage (name resolution, alias scope, function lookup),
+ * run {@link AnalysisEmittedSqlPrestoValidateIT} against a local Presto container
+ * with {@code SRSE_PRESTO_INTEGRATION=true}.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -134,8 +140,43 @@ class EmittedSqlParsesTest {
                 List.of(), List.of(), null, null, groups, highlight, dedup, age, joinType)).sql();
     }
 
+    private RecordMatchRequest requestWithComparisons(List<MatchGroup> groups, List<ComparisonGroup> comparisons,
+                                                      boolean mismatchOnly, JoinType joinType) {
+        return new RecordMatchRequest(
+                List.of(), List.of(), null, null, groups, false, null, null, joinType,
+                comparisons, mismatchOnly);
+    }
+
+    private String sqlWithComparisons(List<MatchGroup> groups, List<ComparisonGroup> comparisons,
+                                      boolean mismatchOnly, JoinType joinType) {
+        return service.planMatch(requestWithComparisons(groups, comparisons, mismatchOnly, joinType)).sql();
+    }
+
+    private static int countJdbcPlaceholders(String sql) {
+        int count = 0;
+        for (int i = 0; i < sql.length(); i++) {
+            if (sql.charAt(i) == '?') {
+                count++;
+            }
+        }
+        return count;
+    }
+
     private void assertParses(String sql) {
         assertDoesNotThrow(() -> parser.createStatement(sql, PARSING_OPTIONS), sql);
+    }
+
+    /** Parsing does not prove JDBC can bind the statement — placeholder count must match params. */
+    private void assertParsesWithBindableParams(RecordMatchRequest req) {
+        RecordMatchService.MatchQuery query = service.planMatch(req);
+        assertParses(query.sql());
+        assertEquals(countJdbcPlaceholders(query.sql()), query.params().size(), query.sql());
+    }
+
+    private RecordMatchRequest requestFor(List<MatchGroup> groups, boolean highlight, DedupSpec dedup,
+                                          AgeFilterSpec age, JoinType joinType) {
+        return new RecordMatchRequest(
+                List.of(), List.of(), null, null, groups, highlight, dedup, age, joinType);
     }
 
     /** The plain pair, unchanged since before groups existed. */
@@ -268,5 +309,169 @@ class EmittedSqlParsesTest {
         assertTrue(sql.contains(CATALOG + "." + SCHEMA + ".txn src JOIN "
                 + CATALOG + "." + SCHEMA + ".golden tgt"), sql);
         assertFalse(sql.contains("INNER JOIN"), sql);
+    }
+
+    @Test
+    void postJoinComparisonParses() {
+        assertParses(sqlWithComparisons(
+                List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                        GroupMode.COMBINE, null)),
+                List.of(ComparisonGroup.of(col("txn", "pan"), col("golden", "pan"))),
+                false, JoinType.INNER));
+    }
+
+    @Test
+    void postJoinComparisonCombineFoldParses() {
+        assertParses(sqlWithComparisons(
+                List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                        GroupMode.COMBINE, null)),
+                List.of(new ComparisonGroup(
+                        List.of(col("txn", "addr_full")),
+                        List.of(col("golden", "line1"), col("golden", "line2")),
+                        GroupMode.COMBINE, null, " ")),
+                false, JoinType.INNER));
+    }
+
+    @Test
+    void postJoinFuzzyComparisonParses() {
+        ComparisonGroup fuzzyName = new ComparisonGroup(
+                List.of(col("txn", "holder_name")),
+                List.of(col("golden", "holder_name")),
+                GroupMode.COMBINE, 85.0, null);
+        assertParses(sqlWithComparisons(
+                List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                        GroupMode.COMBINE, null)),
+                List.of(fuzzyName),
+                false, JoinType.INNER));
+    }
+
+    @ParameterizedTest
+    @EnumSource(JoinType.class)
+    void postJoinComparisonWithEachJoinTypeParses(JoinType joinType) {
+        assertParses(sqlWithComparisons(
+                List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                        GroupMode.COMBINE, null)),
+                List.of(ComparisonGroup.of(col("txn", "district"), col("golden", "district"))),
+                false, joinType));
+    }
+
+    @Test
+    void mismatchOnlyComparisonFilterParses() {
+        assertParses(sqlWithComparisons(
+                List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                        GroupMode.COMBINE, null)),
+                List.of(ComparisonGroup.of(col("txn", "pan"), col("golden", "pan"))),
+                true, JoinType.LEFT));
+    }
+
+    @Test
+    void mismatchOnlyWithFuzzyComparisonBindsThresholdTwice() {
+        ComparisonGroup fuzzyName = new ComparisonGroup(
+                List.of(col("txn", "full_name")),
+                List.of(col("golden", "full_name")),
+                GroupMode.COMBINE, 85.0, null);
+        RecordMatchRequest req = requestWithComparisons(
+                List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                        GroupMode.COMBINE, null)),
+                List.of(fuzzyName),
+                true, JoinType.INNER);
+        RecordMatchService.MatchQuery query = service.planMatch(req);
+        assertEquals(2, countJdbcPlaceholders(query.sql()), query.sql());
+        assertEquals(2, query.params().size());
+        assertEquals(query.params().get(0), query.params().get(1));
+        assertParses(query.sql());
+    }
+
+    /**
+     * Every shape this class documents must be bindable, not merely parseable —
+     * duplicate {@code ?} in SELECT and WHERE without a second bind broke
+     * {@code mismatchOnly} with fuzzy comparisons.
+     */
+    @Test
+    void placeholderCountMatchesParamListForAllDocumentedShapes() {
+        List<MatchGroup> districtPair = List.of(
+                group(List.of(col("txn", "district")), List.of(col("golden", "district")),
+                        GroupMode.COMBINE, null));
+        List<MatchGroup> mixedHeavy = List.of(
+                group(List.of(col("txn", "full_name")),
+                        List.of(col("golden", "first_name"), col("golden", "last_name")),
+                        GroupMode.COMBINE, 85.0),
+                group(List.of(col("txn", "account_no")),
+                        List.of(col("golden", "ja_id"), col("golden", "legacy_id")),
+                        GroupMode.ANY_OF, null),
+                group(List.of(col("txn", "district")), List.of(col("golden", "district")),
+                        GroupMode.COMBINE, null));
+        ComparisonGroup fuzzyCompare = new ComparisonGroup(
+                List.of(col("txn", "holder_name")),
+                List.of(col("golden", "holder_name")),
+                GroupMode.COMBINE, 85.0, null);
+        List<RecordMatchRequest> cases = new ArrayList<>();
+        cases.add(requestFor(districtPair, false, null, null, null));
+        cases.add(requestFor(List.of(group(List.of(col("txn", "addr_full")),
+                        List.of(col("golden", "line1"), col("golden", "line2")),
+                        GroupMode.COMBINE, null)), false, null, null, null));
+        cases.add(requestFor(List.of(group(List.of(col("txn", "account_no")),
+                        List.of(col("golden", "ja_id"), col("golden", "legacy_id")),
+                        GroupMode.ANY_OF, null)), false, null, null, null));
+        cases.add(requestFor(List.of(group(List.of(col("txn", "a1"), col("txn", "a2")),
+                        List.of(col("golden", "b1"), col("golden", "b2")),
+                        GroupMode.ANY_OF, null)), false, null, null, null));
+        cases.add(requestFor(List.of(group(List.of(col("txn", "full_name")),
+                        List.of(col("golden", "first_name"), col("golden", "last_name")),
+                        GroupMode.COMBINE, 85.0)), false, null, null, null));
+        cases.add(requestFor(List.of(group(List.of(col("txn", "full_name")),
+                        List.of(col("golden", "name_a"), col("golden", "name_b")),
+                        GroupMode.ANY_OF, 80.0)), false, null, null, null));
+        cases.add(requestFor(mixedHeavy, true,
+                new DedupSpec(CATALOG, SCHEMA, "golden", "updated_at"),
+                new AgeFilterSpec(18, 60, "YEARS"), null));
+        cases.add(requestFor(mixedHeavy, true, null, new AgeFilterSpec(18, 60, "YEARS"), JoinType.LEFT));
+        cases.add(requestWithComparisons(
+                List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                        GroupMode.COMBINE, null)),
+                List.of(ComparisonGroup.of(col("txn", "pan"), col("golden", "pan"))),
+                false, JoinType.INNER));
+        cases.add(requestWithComparisons(
+                List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                        GroupMode.COMBINE, null)),
+                List.of(new ComparisonGroup(
+                        List.of(col("txn", "addr_full")),
+                        List.of(col("golden", "line1"), col("golden", "line2")),
+                        GroupMode.COMBINE, null, " ")),
+                false, JoinType.INNER));
+        cases.add(requestWithComparisons(
+                List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                        GroupMode.COMBINE, null)),
+                List.of(fuzzyCompare),
+                false, JoinType.INNER));
+        cases.add(requestWithComparisons(
+                List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                        GroupMode.COMBINE, null)),
+                List.of(ComparisonGroup.of(col("txn", "pan"), col("golden", "pan"))),
+                true, JoinType.LEFT));
+        cases.add(requestWithComparisons(
+                List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                        GroupMode.COMBINE, null)),
+                List.of(fuzzyCompare),
+                true, JoinType.INNER));
+        cases.add(requestWithComparisons(
+                List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                        GroupMode.COMBINE, null)),
+                List.of(ComparisonGroup.of(col("txn", "pan"), col("golden", "pan"))),
+                true, JoinType.LEFT));
+        for (JoinType joinType : JoinType.values()) {
+            DedupSpec dedup = joinType == JoinType.RIGHT || joinType == JoinType.FULL ? null
+                    : new DedupSpec(CATALOG, SCHEMA, "golden", "updated_at");
+            AgeFilterSpec age = joinType == JoinType.FULL ? null : new AgeFilterSpec(18, 60, "YEARS");
+            cases.add(requestFor(mixedHeavy, true, dedup, age, joinType));
+            cases.add(requestWithComparisons(
+                    List.of(group(List.of(col("txn", "m_id")), List.of(col("golden", "m_id")),
+                            GroupMode.COMBINE, null)),
+                    List.of(ComparisonGroup.of(col("txn", "district"), col("golden", "district"))),
+                    false, joinType));
+        }
+        for (RecordMatchRequest req : cases) {
+            assertParsesWithBindableParams(req);
+        }
     }
 }

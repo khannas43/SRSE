@@ -148,6 +148,12 @@ export function singleTargetMatchRequestFromMulti(
   if (target.joinType && target.joinType !== "INNER") {
     out.joinType = target.joinType;
   }
+  if (target.comparisonGroups && target.comparisonGroups.length > 0) {
+    out.comparisonGroups = target.comparisonGroups;
+  }
+  if (req.mismatchOnly) {
+    out.mismatchOnly = true;
+  }
   return out;
 }
 

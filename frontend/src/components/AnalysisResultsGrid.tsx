@@ -20,6 +20,15 @@ type Row = Record<string, unknown>;
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 
 function prettify(columnId: string): string {
+  if (columnId === "match_status" || columnId.endsWith("_match_status")) return "Match status";
+  const cmpMatch = columnId.match(/^cmp_(\d+)_match$/);
+  if (cmpMatch) return `Compare ${Number(cmpMatch[1]) + 1}: Match?`;
+  const cmpScore = columnId.match(/^cmp_(\d+)_score_pct$/);
+  if (cmpScore) return `Compare ${Number(cmpScore[1]) + 1}: Score %`;
+  const cmpSrc = columnId.match(/^cmp_(\d+)_source$/);
+  if (cmpSrc) return `Compare ${Number(cmpSrc[1]) + 1}: Source value`;
+  const cmpTgt = columnId.match(/^cmp_(\d+)_target$/);
+  if (cmpTgt) return `Compare ${Number(cmpTgt[1]) + 1}: Target value`;
   return columnId
     .replace(/^source_/, "Source: ")
     .replace(/^target_/, "Target: ")
@@ -33,11 +42,28 @@ function csvEscape(value: unknown): string {
   return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
 }
 
-function displayCell(value: unknown): string {
-  if (value === null || value === undefined) return "";
+function isComparisonColumn(columnId: string): boolean {
+  return /^cmp_\d+_(match|score_pct|source|target)$/.test(columnId);
+}
+
+function isMatchStatusColumn(columnId: string): boolean {
+  return columnId === "match_status" || columnId.endsWith("_match_status");
+}
+
+function displayCell(columnId: string, value: unknown): string {
+  if (value === null || value === undefined) {
+    if (isComparisonColumn(columnId)) return "—";
+    return "";
+  }
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
 }
+
+const MATCH_STATUS_STYLES: Record<string, CSSProperties> = {
+  MATCHED: { background: "var(--srse-success-bg, #e8f5e9)", fontWeight: 600, padding: "0.1rem 0.35rem", borderRadius: 4 },
+  NO_TARGET: { background: "var(--srse-bg-muted, #f0f0f0)", fontWeight: 600, padding: "0.1rem 0.35rem", borderRadius: 4 },
+  NO_SOURCE: { background: "var(--srse-bg-muted, #f0f0f0)", fontWeight: 600, padding: "0.1rem 0.35rem", borderRadius: 4 },
+};
 
 function downloadCsv(rows: Row[], visibleIds: string[], labelFor: (id: string) => string) {
   const lines = [
@@ -260,17 +286,53 @@ export function AnalysisResultsGrid({
   );
 
   const columnHelper = useMemo(() => createColumnHelper<Row>(), []);
+  function comparisonCellStyle(columnId: string, row: Row): CSSProperties | undefined {
+    const match = columnId.match(/^cmp_(\d+)_match$/);
+    if (match) {
+      const v = row[columnId];
+      if (v === null || v === undefined) {
+        return { color: "var(--srse-text-muted)", fontStyle: "italic" };
+      }
+      if (v === false || v === 0 || v === "false") {
+        return { background: "var(--srse-danger-bg, #fde8e8)", fontWeight: 600 };
+      }
+      if (v === true || v === 1 || v === "true") {
+        return { background: "var(--srse-success-bg, #e8f5e9)" };
+      }
+      return undefined;
+    }
+    const valueCol = columnId.match(/^cmp_(\d+)_(source|target|score_pct)$/);
+    if (valueCol) {
+      const verdict = row[`cmp_${valueCol[1]}_match`];
+      if (verdict === null || verdict === undefined) {
+        return { color: "var(--srse-text-muted)", fontStyle: "italic" };
+      }
+      if (verdict === false || verdict === 0 || verdict === "false") {
+        return { background: "var(--srse-danger-bg, #fde8e8)" };
+      }
+    }
+    return undefined;
+  }
+
   const tableColumns = useMemo(
     () =>
       columns.map((id) =>
         columnHelper.accessor((row) => row[id], {
           id,
           header: labelFor(id),
-          cell: (info) => displayCell(info.getValue()),
+          cell: (info) => {
+            const style = comparisonCellStyle(id, info.row.original);
+            const text = displayCell(id, info.getValue());
+            if (isMatchStatusColumn(id)) {
+              const statusStyle = MATCH_STATUS_STYLES[String(info.getValue() ?? "")];
+              return statusStyle ? <span style={statusStyle}>{text}</span> : text;
+            }
+            return style ? <span style={style}>{text}</span> : text;
+          },
           filterFn: (row, columnId, filterValue) => {
             if (!filterValue) return true;
             const cell = row.getValue(columnId);
-            return displayCell(cell)
+            return displayCell(columnId, cell)
               .toLowerCase()
               .includes(String(filterValue).toLowerCase());
           },

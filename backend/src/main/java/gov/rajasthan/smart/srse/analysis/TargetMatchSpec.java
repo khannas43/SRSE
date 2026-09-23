@@ -21,12 +21,14 @@ public record TargetMatchSpec(
         List<MatchCriterion> joinCriteria,
         List<DisplayColumn> displayColumns,
         List<MatchGroup> joinGroups,
-        JoinType joinType) {
+        JoinType joinType,
+        List<ComparisonGroup> comparisonGroups) {
 
     public TargetMatchSpec {
         joinCriteria = joinCriteria == null ? List.of() : List.copyOf(joinCriteria);
         displayColumns = displayColumns == null ? List.of() : displayColumns;
         joinGroups = joinGroups == null ? List.of() : List.copyOf(joinGroups);
+        comparisonGroups = comparisonGroups == null ? List.of() : List.copyOf(comparisonGroups);
     }
 
     /**
@@ -55,13 +57,19 @@ public record TargetMatchSpec(
     /** The pre-groups shape: join criteria paired positionally with the hub's. */
     public TargetMatchSpec(String label, String catalog, String schema, String table,
                            List<MatchCriterion> joinCriteria, List<DisplayColumn> displayColumns) {
-        this(label, catalog, schema, table, joinCriteria, displayColumns, List.of(), null);
+        this(label, catalog, schema, table, joinCriteria, displayColumns, List.of(), null, List.of());
     }
 
     public TargetMatchSpec(String label, String catalog, String schema, String table,
                            List<MatchCriterion> joinCriteria, List<DisplayColumn> displayColumns,
                            List<MatchGroup> joinGroups) {
-        this(label, catalog, schema, table, joinCriteria, displayColumns, joinGroups, null);
+        this(label, catalog, schema, table, joinCriteria, displayColumns, joinGroups, null, List.of());
+    }
+
+    public TargetMatchSpec(String label, String catalog, String schema, String table,
+                           List<MatchCriterion> joinCriteria, List<DisplayColumn> displayColumns,
+                           List<MatchGroup> joinGroups, JoinType joinType) {
+        this(label, catalog, schema, table, joinCriteria, displayColumns, joinGroups, joinType, List.of());
     }
 
     public QualifiedTable qualifiedTable() {

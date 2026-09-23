@@ -23,6 +23,9 @@ import java.util.List;
  * is absent the criteria lists are zipped into single-column groups, which
  * emit exactly the SQL they emitted before groups existed.
  *
+ * <p>{@code comparisonGroups} are post-join value comparisons — projected in
+ * SELECT only, never in ON (see {@link ComparisonGroup}).
+ *
  * <p>{@code dedup} and {@code ageFilter} are optional.
  */
 public record RecordMatchRequest(
@@ -34,12 +37,15 @@ public record RecordMatchRequest(
         boolean highlightDuplicates,
         DedupSpec dedup,
         AgeFilterSpec ageFilter,
-        JoinType joinType) {
+        JoinType joinType,
+        List<ComparisonGroup> comparisonGroups,
+        boolean mismatchOnly) {
 
     public RecordMatchRequest {
         sourceDisplayColumns = sourceDisplayColumns == null ? List.of() : sourceDisplayColumns;
         targetDisplayColumns = targetDisplayColumns == null ? List.of() : targetDisplayColumns;
         joinGroups = joinGroups == null ? List.of() : List.copyOf(joinGroups);
+        comparisonGroups = comparisonGroups == null ? List.of() : List.copyOf(comparisonGroups);
     }
 
     /**
@@ -54,7 +60,7 @@ public record RecordMatchRequest(
                               DedupSpec dedup,
                               AgeFilterSpec ageFilter) {
         this(sourceCriteria, targetCriteria, sourceDisplayColumns, targetDisplayColumns,
-                List.of(), highlightDuplicates, dedup, ageFilter, null);
+                List.of(), highlightDuplicates, dedup, ageFilter, null, List.of(), false);
     }
 
     /** Pre–per-target join types: multi-target sub-matches omitted {@code joinType} (INNER). */
@@ -67,6 +73,19 @@ public record RecordMatchRequest(
                               DedupSpec dedup,
                               AgeFilterSpec ageFilter) {
         this(sourceCriteria, targetCriteria, sourceDisplayColumns, targetDisplayColumns,
-                joinGroups, highlightDuplicates, dedup, ageFilter, null);
+                joinGroups, highlightDuplicates, dedup, ageFilter, null, List.of(), false);
+    }
+
+    public RecordMatchRequest(List<MatchCriterion> sourceCriteria,
+                              List<MatchCriterion> targetCriteria,
+                              List<DisplayColumn> sourceDisplayColumns,
+                              List<DisplayColumn> targetDisplayColumns,
+                              List<MatchGroup> joinGroups,
+                              boolean highlightDuplicates,
+                              DedupSpec dedup,
+                              AgeFilterSpec ageFilter,
+                              JoinType joinType) {
+        this(sourceCriteria, targetCriteria, sourceDisplayColumns, targetDisplayColumns,
+                joinGroups, highlightDuplicates, dedup, ageFilter, joinType, List.of(), false);
     }
 }

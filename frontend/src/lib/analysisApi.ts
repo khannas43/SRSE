@@ -101,6 +101,31 @@ export type DisplayColumn = TableRef & {
 
 export type JoinType = "INNER" | "LEFT" | "RIGHT" | "FULL";
 
+/**
+ * Post-join value comparison — projected in SELECT only, never in ON
+ * (distinct from {@link MatchGroup} join criteria).
+ */
+export type ComparisonGroup = {
+  source: MatchCriterion[];
+  target: MatchCriterion[];
+  mode?: GroupMode;
+  fuzzyThresholdPercent?: number | null;
+  separator?: string | null;
+};
+
+export type ComparisonSummaryResponse = {
+  totalRows: number;
+  matchedRows: number;
+  noCounterpartRows: number;
+  columns: {
+    index: number;
+    label: string;
+    matchCount: number;
+    /** Rate over matched rows only (excludes no-counterpart rows). */
+    matchRatePercent: number;
+  }[];
+};
+
 export type RecordMatchRequest = {
   sourceCriteria: MatchCriterion[];
   targetCriteria: MatchCriterion[];
@@ -108,6 +133,8 @@ export type RecordMatchRequest = {
   targetDisplayColumns?: DisplayColumn[];
   joinGroups?: MatchGroup[];
   joinType?: JoinType;
+  comparisonGroups?: ComparisonGroup[];
+  mismatchOnly?: boolean;
   highlightDuplicates: boolean;
   dedup: DedupSpec | null;
   ageFilter: AgeFilterSpec | null;
@@ -121,6 +148,7 @@ export type TargetMatchSpec = TableRef & {
   displayColumns?: DisplayColumn[];
   joinGroups?: MatchGroup[];
   joinType?: JoinType;
+  comparisonGroups?: ComparisonGroup[];
 };
 
 export type AnalysisLimits = {
@@ -141,6 +169,7 @@ export type MultiTargetRecordMatchRequest = {
   highlightDuplicates: boolean;
   dedup: DedupSpec | null;
   ageFilter: AgeFilterSpec | null;
+  mismatchOnly?: boolean;
 };
 
 export type PerTargetSummary = {
@@ -238,6 +267,21 @@ export async function fetchMatchSql(req: RecordMatchRequest): Promise<string> {
     throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
   }
   return res.text();
+}
+
+export async function fetchComparisonSummary(
+  req: RecordMatchRequest,
+): Promise<ComparisonSummaryResponse> {
+  const res = await authorizedFetch(`${API_BASE}/api/analysis/match/comparison-summary`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    throw new Error(`Analysis service error ${res.status}: ${await res.text()}`);
+  }
+  return res.json() as Promise<ComparisonSummaryResponse>;
 }
 
 export async function downloadRecordMatchCsv(req: RecordMatchRequest): Promise<Blob> {

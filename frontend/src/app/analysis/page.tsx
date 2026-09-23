@@ -5,6 +5,7 @@ import {
   downloadMultiTargetMatchCsv,
   downloadRecordMatchCsv,
   fetchAnalysisLimits,
+  fetchComparisonSummary,
   fetchMatchSql,
   listAnalysisCatalogs,
   listAnalysisLayers,
@@ -22,6 +23,8 @@ import {
   type GroupMode,
   type MatchCriterion,
   type CompareAs,
+  type ComparisonGroup,
+  type ComparisonSummaryResponse,
   type HubSide,
   type JoinType,
   type MatchProgressEvent,
@@ -181,6 +184,34 @@ const MAX_DISPLAYED_ROWS = 10000;
  * download is still complete, since the backend re-runs the query uncapped.
  */
 const MAX_ROWS_TO_PARSE = 200000;
+
+const MAX_COMPARISON_GROUPS = 8;
+
+type ComparisonPairRow = {
+  id: string;
+  sourceColumn: string;
+  targetColumn: string;
+  fuzzyThresholdPercent: number;
+};
+
+function createComparisonPairRow(fuzzyThresholdPercent = 80): ComparisonPairRow {
+  return { id: crypto.randomUUID(), sourceColumn: "", targetColumn: "", fuzzyThresholdPercent };
+}
+
+function comparisonPairIsFuzzy(
+  sourceRef: TableRef | undefined,
+  targetRef: TableRef | undefined,
+  pair: ComparisonPairRow,
+  registeredFuzzyFor: (ref: TableRef, column: string) => boolean | null,
+): boolean {
+  if (!pair.sourceColumn || !pair.targetColumn || !sourceRef || !targetRef) return false;
+  return (
+    isNameColumn(pair.sourceColumn) ||
+    isNameColumn(pair.targetColumn) ||
+    registeredFuzzyFor(sourceRef, pair.sourceColumn) === true ||
+    registeredFuzzyFor(targetRef, pair.targetColumn) === true
+  );
+}
 
 function updateRowById(rows: CriterionRow[], id: string, patch: Partial<CriterionRow>): CriterionRow[] {
   return rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
@@ -618,6 +649,11 @@ export default function AnalysisPage() {
   const [targetRows, setTargetRows] = useState<CriterionRow[]>([createEmptyRow()]);
   const [sourceDisplayRows, setSourceDisplayRows] = useState<DisplayRow[]>([]);
   const [targetDisplayRows, setTargetDisplayRows] = useState<DisplayRow[]>([]);
+  const [comparisonPairs, setComparisonPairs] = useState<ComparisonPairRow[]>([]);
+  const [mismatchOnly, setMismatchOnly] = useState(false);
+  const [comparisonSummary, setComparisonSummary] = useState<ComparisonSummaryResponse | null>(null);
+  const [comparisonSummaryError, setComparisonSummaryError] = useState<string | null>(null);
+  const comparisonPrefilledKeysRef = useRef(new Set<string>());
 
   const [multiMatchMode, setMultiMatchMode] = useState(false);
   const [hubSide, setHubSide] = useState<HubSide>("SOURCE");
@@ -861,6 +897,25 @@ export default function AnalysisPage() {
     }
   }
 
+  function buildComparisonGroups(
+    sourceRef: TableRef,
+    targetRef: TableRef,
+    pairs: ComparisonPairRow[],
+  ): ComparisonGroup[] {
+    return pairs
+      .filter((p) => p.sourceColumn && p.targetColumn)
+      .map((p) => {
+        const fuzzy = comparisonPairIsFuzzy(sourceRef, targetRef, p, registeredFuzzyFor);
+        return {
+          source: [{ ...sourceRef, column: p.sourceColumn, fuzzyThresholdPercent: null }],
+          target: [{ ...targetRef, column: p.targetColumn, fuzzyThresholdPercent: null }],
+          mode: "COMBINE" as const,
+          fuzzyThresholdPercent: fuzzy ? p.fuzzyThresholdPercent : null,
+          separator: " ",
+        };
+      });
+  }
+
   function buildRequest(withDedup: boolean): RecordMatchRequest | null {
     const filledSource = sourceRows.filter(isRowFilled);
     const filledTarget = targetRows.filter(isRowFilled);
@@ -908,6 +963,17 @@ export default function AnalysisPage() {
     if (joinType !== "INNER") {
       req.joinType = joinType;
     }
+    const srcRef = filledSource[0].ref;
+    const tgtRef = filledTarget[0].ref;
+    if (isCascadeComplete(srcRef) && isCascadeComplete(tgtRef)) {
+      const groups = buildComparisonGroups(srcRef, tgtRef, comparisonPairs);
+      if (groups.length > 0) {
+        req.comparisonGroups = groups;
+      }
+    }
+    if (mismatchOnly && req.comparisonGroups && req.comparisonGroups.length > 0) {
+      req.mismatchOnly = true;
+    }
     return req;
   }
 
@@ -945,6 +1011,35 @@ export default function AnalysisPage() {
     return buildMultiTargetRequestFromCanvas(joinCanvas, multiBuildExtras(withDedup), maxTargetSets);
   }
 
+  useEffect(() => {
+    if (multiMatchMode) return;
+    const src = sourceRows.find(isRowFilled);
+    const tgt = targetRows.find(isRowFilled);
+    if (!src || !tgt || !isCascadeComplete(src.ref) || !isCascadeComplete(tgt.ref)) return;
+    if (!src.columns.length || !tgt.columns.length) return;
+    const key = `${qualifiedTableName(src.ref)}|${qualifiedTableName(tgt.ref)}`;
+    if (comparisonPrefilledKeysRef.current.has(key)) return;
+    if (comparisonPairs.length > 0) {
+      comparisonPrefilledKeysRef.current.add(key);
+      return;
+    }
+    const targetNames = new Set(tgt.columns.map((c) => c.name));
+    const intersection = src.columns
+      .map((c) => c.name)
+      .filter((n) => targetNames.has(n))
+      .sort((a, b) => a.localeCompare(b));
+    comparisonPrefilledKeysRef.current.add(key);
+    if (intersection.length === 0) return;
+    setComparisonPairs(
+      intersection.map((name) => ({
+        id: crypto.randomUUID(),
+        sourceColumn: name,
+        targetColumn: name,
+        fuzzyThresholdPercent: src.fuzzyThresholdPercent,
+      })),
+    );
+  }, [sourceRows, targetRows, multiMatchMode, comparisonPairs.length]);
+
   function buildColumnLabels(): Record<string, string> {
     const labels: Record<string, string> = {};
     const labelSide = (prefix: string, side: string, ref: TableRef, column: string) => {
@@ -963,6 +1058,15 @@ export default function AnalysisPage() {
     for (const r of targetDisplayRows) {
       if (isDisplayRowFilled(r)) labelSide("target", "Target", r.ref, r.column);
     }
+    comparisonPairs.forEach((p, i) => {
+      if (p.sourceColumn && p.targetColumn) {
+        labels[`cmp_${i}_source`] = `Compare: ${p.sourceColumn} (source)`;
+        labels[`cmp_${i}_target`] = `Compare: ${p.targetColumn} (target)`;
+        labels[`cmp_${i}_match`] = `Compare: ${p.sourceColumn} ↔ ${p.targetColumn} match?`;
+        labels[`cmp_${i}_score_pct`] = `Compare: ${p.sourceColumn} ↔ ${p.targetColumn} score %`;
+      }
+    });
+    labels.match_status = "Match status";
     return labels;
   }
 
@@ -985,6 +1089,8 @@ export default function AnalysisPage() {
     setMatchTotalRows(null);
     setMatchCountIsPartial(false);
     setMatchTooManyToDisplay(false);
+    setComparisonSummary(null);
+    setComparisonSummaryError(null);
     pendingRowsRef.current = [];
     rowsSeenRef.current = 0;
     if (flushIntervalRef.current !== null) {
@@ -1145,6 +1251,13 @@ export default function AnalysisPage() {
           onDone: (totalRows) => {
             setMatchTotalRows(totalRows);
             setMatchStatus("ok");
+            if (req.comparisonGroups && req.comparisonGroups.length > 0) {
+              fetchComparisonSummary(req)
+                .then(setComparisonSummary)
+                .catch((err: unknown) =>
+                  setComparisonSummaryError(err instanceof Error ? err.message : String(err)),
+                );
+            }
           },
           onError: (message) => {
             setMatchError(message);
@@ -1678,6 +1791,145 @@ export default function AnalysisPage() {
           " Multi-target runs one two-table join per target set; the NDJSON stream can include partial results if one set fails — CSV export is all-or-nothing."}
       </p>
 
+      {!multiMatchMode && (
+        <section className="srse-card" style={{ width: "100%", marginTop: "1rem" }}>
+          <h2 className="srse-card-title">Compare columns (after join)</h2>
+          <p className="srse-text-muted" style={{ marginTop: 0, lineHeight: 1.5 }}>
+            Match criteria above decide <strong>which rows pair up</strong>. These pairs compare values on
+            already-joined rows — they never affect the join. Prefilled with column names that exist on
+            both sides; add or remove as needed.
+          </p>
+          <label className="srse-checkbox-label" htmlFor="mismatch-only" style={{ display: "inline-flex", marginBottom: "0.75rem" }}>
+            <input
+              id="mismatch-only"
+              type="checkbox"
+              checked={mismatchOnly}
+              disabled={comparisonPairs.every((p) => !p.sourceColumn || !p.targetColumn)}
+              onChange={(e) => setMismatchOnly(e.target.checked)}
+            />
+            {" "}
+            Show mismatches and unmatched records (server-side filter)
+          </label>
+          <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {comparisonPairs.map((pair) => {
+              const src = sourceRows.find(isRowFilled);
+              const tgt = targetRows.find(isRowFilled);
+              const srcCols = src?.columns ?? [];
+              const tgtCols = tgt?.columns ?? [];
+              const srcRef = src && isCascadeComplete(src.ref) ? src.ref : undefined;
+              const tgtRef = tgt && isCascadeComplete(tgt.ref) ? tgt.ref : undefined;
+              const showFuzzyCompare = comparisonPairIsFuzzy(srcRef, tgtRef, pair, registeredFuzzyFor);
+              return (
+                <li
+                  key={pair.id}
+                  style={{
+                    display: "flex",
+                    gap: "0.5rem",
+                    flexWrap: "wrap",
+                    alignItems: "flex-end",
+                    marginBottom: "0.5rem",
+                  }}
+                >
+                  <div style={{ flex: "1 1 160px" }}>
+                    <span className="srse-text-muted" style={fieldLabelStyle}>
+                      Source column
+                    </span>
+                    <select
+                      className="srse-select"
+                      style={{ width: "100%" }}
+                      value={pair.sourceColumn}
+                      onChange={(e) =>
+                        setComparisonPairs((rows) =>
+                          rows.map((r) =>
+                            r.id === pair.id ? { ...r, sourceColumn: e.target.value } : r,
+                          ),
+                        )
+                      }
+                    >
+                      <option value="">—</option>
+                      {srcCols.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div style={{ flex: "1 1 160px" }}>
+                    <span className="srse-text-muted" style={fieldLabelStyle}>
+                      Target column
+                    </span>
+                    <select
+                      className="srse-select"
+                      style={{ width: "100%" }}
+                      value={pair.targetColumn}
+                      onChange={(e) =>
+                        setComparisonPairs((rows) =>
+                          rows.map((r) =>
+                            r.id === pair.id ? { ...r, targetColumn: e.target.value } : r,
+                          ),
+                        )
+                      }
+                    >
+                      <option value="">—</option>
+                      {tgtCols.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {showFuzzyCompare && (
+                    <div style={{ flex: "0 1 100px" }}>
+                      <span className="srse-text-muted" style={fieldLabelStyle}>
+                        Fuzzy match %
+                      </span>
+                      <input
+                        type="number"
+                        className="srse-input"
+                        style={{ width: "100%" }}
+                        min={0}
+                        max={100}
+                        value={pair.fuzzyThresholdPercent}
+                        onChange={(e) =>
+                          setComparisonPairs((rows) =>
+                            rows.map((r) =>
+                              r.id === pair.id
+                                ? { ...r, fuzzyThresholdPercent: Number(e.target.value) }
+                                : r,
+                            ),
+                          )
+                        }
+                        title="Similarity threshold for this comparison (not an exact equality check)"
+                      />
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className="srse-btn srse-btn-ghost srse-btn-sm"
+                    onClick={() => setComparisonPairs((rows) => rows.filter((r) => r.id !== pair.id))}
+                  >
+                    Remove
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <button
+            type="button"
+            className="srse-btn srse-btn-ghost srse-btn-sm"
+            disabled={comparisonPairs.length >= MAX_COMPARISON_GROUPS}
+            onClick={() =>
+              setComparisonPairs((rows) => [
+                ...rows,
+                createComparisonPairRow(sourceRows.find(isRowFilled)?.fuzzyThresholdPercent ?? 80),
+              ])
+            }
+          >
+            + Add comparison ({comparisonPairs.length}/{MAX_COMPARISON_GROUPS})
+          </button>
+        </section>
+      )}
+
       <section className="srse-card" style={{ width: "100%", marginTop: "1rem" }}>
         <h2 className="srse-card-title">Optional filters</h2>
         <div style={{ display: "flex", gap: "1.5rem", flexWrap: "wrap", marginTop: "0.75rem" }}>
@@ -1863,6 +2115,38 @@ export default function AnalysisPage() {
             </li>
           ))}
         </ul>
+      )}
+
+      {comparisonSummaryError && (
+        <p className="srse-text-danger" style={{ marginTop: "1rem" }}>
+          Comparison summary: {comparisonSummaryError}
+        </p>
+      )}
+      {comparisonSummary && comparisonSummary.columns.length > 0 && (
+        <section
+          className="srse-card"
+          style={{ marginTop: "1rem", display: "flex", flexWrap: "wrap", gap: "1rem" }}
+        >
+          <p className="srse-text-muted" style={{ margin: 0, width: "100%", fontSize: "0.85rem" }}>
+            {(comparisonSummary.matchedRows ?? comparisonSummary.totalRows).toLocaleString()} matched
+            {(comparisonSummary.noCounterpartRows ?? 0) > 0 && (
+              <>
+                , {(comparisonSummary.noCounterpartRows ?? 0).toLocaleString()} with no counterpart
+              </>
+            )}{" "}
+            ({comparisonSummary.totalRows.toLocaleString()} total rows — full result, not the on-screen
+            sample). Column rates are over matched rows only.
+          </p>
+          {comparisonSummary.columns.map((col) => (
+            <div key={col.index} style={{ minWidth: 180 }}>
+              <div style={{ fontWeight: 600, fontSize: "0.9rem" }}>{col.label}</div>
+              <div className="srse-text-muted" style={{ fontSize: "0.85rem" }}>
+                {col.matchRatePercent}% match ({col.matchCount.toLocaleString()} /{" "}
+                {(comparisonSummary.matchedRows ?? comparisonSummary.totalRows).toLocaleString()} matched)
+              </div>
+            </div>
+          ))}
+        </section>
       )}
 
       {matchColumns.length > 0 && (

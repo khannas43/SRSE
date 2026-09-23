@@ -312,7 +312,9 @@ public class MultiTargetRecordMatchService {
                 req.highlightDuplicates(),
                 req.dedup(),
                 req.ageFilter(),
-                target.joinType());
+                target.joinType(),
+                target.comparisonGroups(),
+                req.mismatchOnly());
     }
 
     private void writeLine(java.io.OutputStream out, Map<String, Object> payload) throws IOException {
@@ -432,6 +434,23 @@ public class MultiTargetRecordMatchService {
                     used.add(out);
                     columns.add(out);
                     peerBindings.add(new PeerColumnBinding(out, "target_" + matchedOn));
+                }
+                for (int ci = 0; ci < target.comparisonGroups().size(); ci++) {
+                    String cmpPrefix = sanitized + "_cmp_" + ci + "_";
+                    for (String suffix : List.of("source", "target", "match", "score_pct")) {
+                        String sqlCol = "cmp_" + ci + "_" + suffix;
+                        String out = RecordMatchService.allocateUniqueAlias(cmpPrefix + suffix, used);
+                        used.add(out);
+                        columns.add(out);
+                        peerBindings.add(new PeerColumnBinding(out, sqlCol));
+                    }
+                }
+                if (!target.comparisonGroups().isEmpty()
+                        && JoinType.effective(target.joinType()) != JoinType.INNER) {
+                    String out = RecordMatchService.allocateUniqueAlias(sanitized + "_match_status", used);
+                    used.add(out);
+                    columns.add(out);
+                    peerBindings.add(new PeerColumnBinding(out, "match_status"));
                 }
                 String scoreOut = null;
                 if (req.highlightDuplicates()) {

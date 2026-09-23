@@ -65,7 +65,7 @@ public class JoinKeySuggestService {
                                  AnalysisColumnMetadataRepository columnMetadata,
                                  AnalysisProperties analysisProperties,
                                  GuardrailProperties guardrails,
-                                 @Qualifier("analyticalJdbcTemplate") JdbcTemplate jdbc) {
+                                 @Qualifier("prestoJdbcTemplate") JdbcTemplate jdbc) {
         this.registry = registry;
         this.columnMetadata = columnMetadata;
         this.analysisProperties = analysisProperties;

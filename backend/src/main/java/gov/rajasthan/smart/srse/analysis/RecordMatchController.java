@@ -71,6 +71,12 @@ public class RecordMatchController {
         return matchService.renderQueryForDisplay(matchService.planMatch(req));
     }
 
+    /** Aggregate comparison match rates over the full join result (not a streamed sample). */
+    @PostMapping("/match/comparison-summary")
+    public ComparisonSummaryResponse comparisonSummary(@RequestBody RecordMatchRequest req) {
+        return matchService.comparisonSummary(req);
+    }
+
     /**
      * Join-key hints for two registered tables — metadata-only by default;
      * optional bounded overlap probe when {@code probe: true}.

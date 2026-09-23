@@ -218,6 +218,22 @@ This is enforced by construction today, not only by UI copy:
   one full-table `approx_distinct/count` on the source (not sampled — sampling
   inflates mid-cardinality ratios). That floors attributes (e.g. district)
   below join keys (e.g. id).
+- **Post-join column comparison** (`comparisonGroups` on `RecordMatchRequest` /
+  `TargetMatchSpec`): {@link ComparisonGroup} is separate from {@link MatchGroup}
+  so pairs cannot reach the ON emitter. Values are projected in SELECT only
+  (`cmp_<n>_source`, `cmp_<n>_target`, `cmp_<n>_match`, optional
+  `cmp_<n>_score_pct` for fuzzy); exact compares use
+  `NOT (a IS DISTINCT FROM b)` (both-null = match). On **outer** joins (not
+  INNER), also emits `match_status` (`MATCHED` / `NO_TARGET` / `NO_SOURCE`) from
+  join-key NULLability; no-counterpart rows get **NULL** verdicts (not false).
+  `mismatchOnly` filters with `match_status <> 'MATCHED' OR NOT (all verdicts)` so
+  unmatched rows are not dropped by three-valued logic. **`match_status` is omitted
+  for INNER** (including INNER + comparisons) so no-comparison requests stay
+  byte-identical. Aggregate rates:
+  `POST /api/analysis/match/comparison-summary` — per-column rates over **matched**
+  rows only; `noCounterpartRows` reported separately. Comparisons do not affect
+  fan-out estimate, dedup, match score, or age filter. Cap: 8 groups, same per-side
+  column cap as join groups.
 - The Analysis match is deliberately **uncapped server-side** (an earlier top-500
   pre-sample made matches unfindable at crore scale). Large results are handled
   where they actually hurt — the browser: past **10,000 rows** the grid, its
@@ -338,6 +354,16 @@ This is enforced by construction today, not only by UI copy:
     target joinType LEFT, fuzzy name pair):** hub rows with no match in that target
     appear in the merged grid with hub columns populated and that target's
     prefixed columns empty (not dropped, not the string "null").
+    **Post-join comparison (Package 12, manual):** key join on `m_id` with three
+    `comparisonGroups` where one joined row differs in exactly one column — row
+    appears with that column's `cmp_*_match` false and others true; a both-null
+    compared pair reads as match. **LEFT + one source row with no target:** that
+    row shows `match_status = NO_TARGET` and NULL (not false) on every verdict.
+    Re-run when `planComparisons`, `match_status`, or NULL semantics change
+    (confirm `IS DISTINCT FROM` on PrestoDB 0.297).
+    **Analyzer validate (optional, catches parse-green / analyze-red defects):**
+    {@code SRSE_PRESTO_INTEGRATION=true mvn -pl backend test -Dtest=AnalysisEmittedSqlPrestoValidateIT}
+    runs {@code EXPLAIN (TYPE VALIDATE)} on documented shapes — not in the default build.
     **Fan-out pre-check (2026-09, same tables):** `m_id` join estimate
     ~19,382 vs **20,001** actual rows (allowed). `district` join estimate
     ~245,726,571 vs **245,675,819** actual (refused above 50M ceiling).

@@ -16,10 +16,23 @@ public record MultiTargetRecordMatchRequest(
         List<TargetMatchSpec> targets,
         boolean highlightDuplicates,
         DedupSpec dedup,
-        AgeFilterSpec ageFilter) {
+        AgeFilterSpec ageFilter,
+        boolean mismatchOnly) {
 
     public MultiTargetRecordMatchRequest {
         hubDisplayColumns = hubDisplayColumns == null ? List.of() : hubDisplayColumns;
         hubSide = hubSide == null ? HubSide.SOURCE : hubSide;
+    }
+
+    /** Legacy requests without {@code mismatchOnly}. */
+    public MultiTargetRecordMatchRequest(
+            List<MatchCriterion> hubCriteria,
+            List<DisplayColumn> hubDisplayColumns,
+            HubSide hubSide,
+            List<TargetMatchSpec> targets,
+            boolean highlightDuplicates,
+            DedupSpec dedup,
+            AgeFilterSpec ageFilter) {
+        this(hubCriteria, hubDisplayColumns, hubSide, targets, highlightDuplicates, dedup, ageFilter, false);
     }
 }
