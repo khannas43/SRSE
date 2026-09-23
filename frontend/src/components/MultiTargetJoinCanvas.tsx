@@ -17,12 +17,14 @@ import {
   type TableRef,
 } from "@/lib/analysisApi";
 import {
+  type ComparisonPairRow,
   isCriterionRowFilled,
   pairIsFuzzy,
   rowColumns,
   rowFolds,
   type CriterionRowModel,
 } from "@/lib/analysisCriterionModel";
+import { ComparisonPairsEditor } from "@/components/ComparisonPairsEditor";
 import type { GroupMode } from "@/lib/analysisApi";
 import {
   buildMultiTargetRequestFromCanvas,
@@ -252,6 +254,13 @@ export function MultiTargetJoinCanvas({
   const builtRequest: MultiTargetRecordMatchRequest | null = useMemo(() => {
     return buildMultiTargetRequestFromCanvas(canvas, buildExtras, maxTargetSets);
   }, [canvas, buildExtras, maxTargetSets]);
+
+  function updateTargetComparisons(nodeId: string, next: ComparisonPairRow[]) {
+    onCanvasChange({
+      ...canvas,
+      nodes: canvas.nodes.map((n) => (n.id === nodeId ? { ...n, comparisonPairs: next } : n)),
+    });
+  }
 
   function syncHubSide(side: HubSide) {
     onHubSideChange(side);
@@ -605,6 +614,27 @@ export function MultiTargetJoinCanvas({
                     {streamSql ?? edgeSql[node.label.trim()]}
                   </pre>
                 )}
+                <div
+                  style={{
+                    marginTop: "0.6rem",
+                    paddingTop: "0.6rem",
+                    borderTop: "1px solid var(--srse-border)",
+                  }}
+                >
+                  <div className="srse-text-muted" style={{ fontSize: "0.75rem", marginBottom: "0.35rem" }}>
+                    Compare columns (after join) — hub ↔ {node.label.trim() || `Target ${targetIndex + 1}`}
+                  </div>
+                  <ComparisonPairsEditor
+                    pairs={node.comparisonPairs ?? []}
+                    onChange={(next) => updateTargetComparisons(node.id, next)}
+                    sourceRef={hub && isCascadeComplete(hub.tableRef) ? hub.tableRef : undefined}
+                    targetRef={isCascadeComplete(node.tableRef) ? node.tableRef : undefined}
+                    sourceColumns={canvas.slots[0]?.hub.columns ?? []}
+                    targetColumns={canvas.slots[0]?.targetByNodeId[node.id]?.columns ?? []}
+                    registeredFuzzyFor={registeredFuzzyFor}
+                    defaultThreshold={canvas.slots[0]?.hub.fuzzyThresholdPercent ?? 80}
+                  />
+                </div>
               </section>
             );
           })}
