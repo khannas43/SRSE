@@ -49,7 +49,9 @@ docker compose up             # brings up the full local stack
 
 Older seed runs inserted **1,000 rows per Iceberg file**, which slows planning and
 can leave a partial table if the seed hit Presto’s optimizer timeout. The seed now
-writes **50,000 rows per batch** (override with `SEED_BATCH_SIZE`). Existing
+writes **3,500 rows per batch** (override with `SEED_BATCH_SIZE`; Presto’s 1MB
+query limit prevents fewer, larger files without server-side `INSERT … SELECT`).
+Existing
 fragmentation is **not** compacted in place — drop and re-seed:
 
 ```bash
