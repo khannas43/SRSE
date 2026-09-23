@@ -72,7 +72,7 @@ class RecordMatchServiceTest {
 
     /** queryTimeoutSeconds=30. */
     private final GuardrailProperties guardrails = new GuardrailProperties(1000, 30, 50);
-    private static final AnalysisProperties DEFAULT_ANALYSIS = new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L);
+    private static final AnalysisProperties DEFAULT_ANALYSIS = new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L, 10);
 
     private AnalysisProperties analysisProperties = DEFAULT_ANALYSIS;
 
@@ -1437,7 +1437,7 @@ class RecordMatchServiceTest {
 
     @Test
     void blockingPrefixLenComesFromAnalysisProperties() {
-        analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10, 6, 50_000_000L);
+        analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10, 6, 50_000_000L, 10);
         service = new RecordMatchService(jdbc, registry, guardrails, fieldResolver, columnMetadata, analysisProperties, objectMapper);
         RecordMatchRequest req = new RecordMatchRequest(
                 List.of(fuzzy("beneficiary", "father_name", 75.0)),
@@ -1506,7 +1506,7 @@ class RecordMatchServiceTest {
 
     @Test
     void estimatedFanOutLowCardinalityKeyIsRefusedWithMessage() {
-        analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L);
+        analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L, 10);
         service = new RecordMatchService(jdbc, registry, guardrails, fieldResolver, columnMetadata, analysisProperties, objectMapper);
         stubReconciliationCardinalities(7L, 7L);
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> service.planMatch(districtCrossTableMatch()));
@@ -1631,7 +1631,7 @@ class RecordMatchServiceTest {
 
     @Test
     void comparisonGroupsDoNotChangeFanOutEstimate() {
-        analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L);
+        analysisProperties = new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L, 10);
         service = new RecordMatchService(jdbc, registry, guardrails, fieldResolver, columnMetadata, analysisProperties, objectMapper);
         stubReconciliationCardinalities(7L, 7L);
 

@@ -50,7 +50,7 @@ class JoinKeySuggestServiceTest {
         service = new JoinKeySuggestService(
                 registry,
                 columnMetadata,
-                new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L),
+                new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L, 10),
                 new GuardrailProperties(1000, 30, 50),
                 jdbc);
     }
@@ -202,6 +202,28 @@ class JoinKeySuggestServiceTest {
         List<JoinKeySuggestion> suggestions = service.suggest(request(true));
         assertEquals(1, suggestions.size());
         assertTrue(suggestions.get(0).reason().contains("Same column name"));
+    }
+
+    @Test
+    void distinctnessFailureDegradesToMetadataOnly() {
+        when(registry.listColumns(CATALOG, SCHEMA, SRC)).thenReturn(List.of(
+                new RegisteredColumn("id", "bigint", null, false, true),
+                new RegisteredColumn("district", "varchar", null, false, true)));
+        when(registry.listColumns(CATALOG, SCHEMA, TGT)).thenReturn(List.of(
+                new RegisteredColumn("m_id", "bigint", null, false, true),
+                new RegisteredColumn("district", "varchar", null, false, true)));
+        when(jdbc.query(anyString(), any(RowMapper.class)))
+                .thenThrow(new RuntimeException("Query exceeded maximum time limit of 30.00s"));
+        when(jdbc.queryForObject(anyString(), eq(Double.class))).thenReturn(0.23);
+
+        List<JoinKeySuggestion> suggestions = service.suggest(request(true));
+        assertFalse(suggestions.isEmpty());
+        assertTrue(suggestions.stream().anyMatch(s ->
+                        s.reason().contains("Same column name")
+                                || s.reason().contains("Identifier column match")
+                                || s.reason().contains("Compatible types")
+                                || s.reason().contains("sampled source values")),
+                "Distinctness timeout must degrade (metadata ranking ± probe), not abort the request");
     }
 
     @Test

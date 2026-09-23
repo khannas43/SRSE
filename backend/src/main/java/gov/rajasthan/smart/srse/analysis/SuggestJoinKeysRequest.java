@@ -3,8 +3,9 @@ package gov.rajasthan.smart.srse.analysis;
 /**
  * Officer request for join-key hints between two registered tables.
  *
- * @param probe when {@code true}, run a bounded TABLESAMPLE overlap probe on the
- *              top metadata-ranked pairs; failures degrade to metadata-only hints
+ * @param probe when {@code true}, measure source key-likeness and run a bounded
+ *              TABLESAMPLE overlap probe on the top pairs; Presto failures on
+ *              either step degrade to metadata-only hints (never a 500)
  */
 public record SuggestJoinKeysRequest(
         String sourceCatalog,

@@ -92,10 +92,15 @@ public class JoinKeySuggestService {
         ranked.sort(metadataComparator());
 
         if (req.probeRequested() && !ranked.isEmpty()) {
-            List<String> distinctnessColumns = shortlistSourceColumnsForDistinctness(ranked);
-            Map<String, Double> sourceDistinctness = loadSourceDistinctnessRatios(source, distinctnessColumns);
-            reapplyDistinctnessScores(ranked, sourceDistinctness);
-            ranked.sort(metadataComparator());
+            try {
+                List<String> distinctnessColumns = shortlistSourceColumnsForDistinctness(ranked);
+                Map<String, Double> sourceDistinctness = loadSourceDistinctnessRatios(source, distinctnessColumns);
+                reapplyDistinctnessScores(ranked, sourceDistinctness);
+                ranked.sort(metadataComparator());
+            } catch (RuntimeException ex) {
+                log.warn("Join-key source distinctness failed — continuing with metadata-only ranking: {}",
+                        ex.getMessage());
+            }
         }
 
         if (req.probeRequested() && !ranked.isEmpty()) {
@@ -336,7 +341,7 @@ public class JoinKeySuggestService {
             return Map.of();
         }
         String sql = buildSourceDistinctnessSql(source, columnNames);
-        jdbc.setQueryTimeout(guardrails.queryTimeoutSeconds());
+        jdbc.setQueryTimeout(analysisProperties.joinKeyDistinctnessTimeoutSeconds());
         List<Map<String, Double>> rows = jdbc.query(sql, (rs, rowNum) -> readDistinctnessRow(rs, columnNames));
         return rows.isEmpty() ? Map.of() : rows.get(0);
     }

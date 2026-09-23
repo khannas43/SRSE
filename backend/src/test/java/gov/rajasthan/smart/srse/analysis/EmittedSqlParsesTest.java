@@ -105,7 +105,7 @@ class EmittedSqlParsesTest {
         };
         service = new RecordMatchService(
                 jdbc, registry, new GuardrailProperties(1000, 30, 50), fields, columnMetadata,
-                new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L), new ObjectMapper());
+                new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L, 10), new ObjectMapper());
         lenient().when(columnMetadata.findByCatalogNameAndSchemaNameAndTableNameAndColumnName(
                 any(), any(), any(), any())).thenReturn(Optional.empty());
         lenient().when(registry.hasColumns(any(), any())).thenReturn(true);

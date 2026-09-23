@@ -54,6 +54,7 @@ srse:
     max-probed-pairs: ${SRSE_ANALYSIS_MAX_PROBED_PAIRS:10}
     blocking-prefix-len: ${SRSE_ANALYSIS_BLOCKING_PREFIX_LEN:3}
     max-estimated-rows: ${SRSE_ANALYSIS_MAX_ESTIMATED_ROWS:50000000}
+    join-key-distinctness-timeout-seconds: ${SRSE_ANALYSIS_JOIN_KEY_DISTINCTNESS_TIMEOUT_SECONDS:10}
   breakdown:
     # age_band has no field-catalogue entry (never officer-selectable as a
     # rule filter, only a fixed breakdown dimension per ExecutionService's

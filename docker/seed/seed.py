@@ -12,7 +12,10 @@ import prestodb
 
 PRESTO_URL = os.environ.get("PRESTO_URL", "jdbc:presto://presto:8080/iceberg/srse")
 ROWS = int(os.environ.get("ROWS", "200000"))
-BATCH_SIZE = 1000
+# Iceberg commits one data file per INSERT; tiny batches (e.g. 1k rows) fragment
+# the table and slow every later scan/plan. Keep batches large so local seed
+# lands in a handful of files (200k rows @ 50k → 4 files).
+BATCH_SIZE = int(os.environ.get("SEED_BATCH_SIZE", "50000"))
 
 DISTRICTS = ["Jaipur", "Jodhpur", "Udaipur", "Kota", "Ajmer", "Bikaner", "Alwar"]
 COMMUNITIES = ["GENERAL", "SAHARIYA", "KATHODI", "KHAIRWA"]

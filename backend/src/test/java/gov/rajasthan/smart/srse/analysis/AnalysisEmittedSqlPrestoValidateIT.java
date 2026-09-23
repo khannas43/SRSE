@@ -96,7 +96,7 @@ class AnalysisEmittedSqlPrestoValidateIT {
         };
         service = new RecordMatchService(
                 presto, registry, new GuardrailProperties(1000, 120, 50), fields, columnMetadata,
-                new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L), new ObjectMapper());
+                new AnalysisProperties(5, 120, 4, 2, 10, 3, 50_000_000L, 10), new ObjectMapper());
     }
 
     /** Live {@code data_type} strings as Presto reports them — drives coercion in {@link RecordMatchService}. */

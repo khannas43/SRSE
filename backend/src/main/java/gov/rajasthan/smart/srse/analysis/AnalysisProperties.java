@@ -21,6 +21,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * {@link RecordMatchService}. {@code maxEstimatedRows} is the ceiling on the
  * equi-join fan-out estimate ({@code count(*) × count(*) / ∏ max(distinct)})
  * before a match runs.
+ *
+ * <p>{@code joinKeyDistinctnessTimeoutSeconds} caps the optional full-table
+ * {@code approx_distinct} aggregate used only to rank join-key hints — separate
+ * from {@code srse.guardrails.query-timeout-seconds}, which governs officer queries.
  */
 @ConfigurationProperties(prefix = "srse.analysis")
 public record AnalysisProperties(
@@ -30,7 +34,8 @@ public record AnalysisProperties(
         int maxAnyOfGroupsPerSide,
         int maxProbedPairs,
         int blockingPrefixLen,
-        long maxEstimatedRows) {
+        long maxEstimatedRows,
+        int joinKeyDistinctnessTimeoutSeconds) {
 
     public AnalysisLimitsResponse toLimitsResponse() {
         return new AnalysisLimitsResponse(
