@@ -1423,7 +1423,10 @@ export default function AnalysisPage() {
                   <button
                     type="button"
                     className="srse-btn srse-btn-ghost srse-btn-sm"
-                    style={{ textAlign: "left", width: "100%" }}
+                    // .srse-btn is an inline-flex with justify-content:center, which wins over
+                    // textAlign — without flex-start these rows render centred in a wide card
+                    // and stop reading as a pickable list.
+                    style={{ textAlign: "left", justifyContent: "flex-start", width: "100%" }}
                     onClick={() => applyKeySuggestion(s)}
                   >
                     <strong>{s.sourceColumn}</strong> ({s.sourceType}) ↔{" "}

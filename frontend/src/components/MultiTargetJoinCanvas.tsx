@@ -590,7 +590,7 @@ export function MultiTargetJoinCanvas({
                   disabled={edgeSqlLoading === node.label || !builtRequest}
                   onClick={() => previewTargetSql(targetIndex, node.label.trim())}
                 >
-                  {edgeSqlLoading === node.label ? "Planning…" : "Preview SQL (match.sql)"}
+                  {edgeSqlLoading === node.label ? "Planning…" : "Preview SQL"}
                 </button>
                 {(edgeSql[node.label.trim()] || streamSql) && (
                   <pre
@@ -621,7 +621,7 @@ export function MultiTargetJoinCanvas({
       </button>
 
       <h3 className="srse-card-title" style={{ marginTop: "1.25rem" }}>
-        Join edges (ordered — index aligns hubCriteria with each target&apos;s joinCriteria)
+        Join edges (ordered — the first hub column pairs with each target&apos;s first column, the second with the second, and so on)
       </h3>
       <p className="srse-text-muted" style={{ fontSize: "0.78rem" }}>
         Max {ANALYSIS_MAX_GROUP_COLUMNS} columns per side per group; max {ANALYSIS_MAX_ANYOF_GROUPS_PER_SIDE} ANY_OF
