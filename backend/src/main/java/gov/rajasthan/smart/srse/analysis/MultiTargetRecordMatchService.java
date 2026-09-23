@@ -79,7 +79,7 @@ public class MultiTargetRecordMatchService {
 
     public StreamingResponseBody matchMulti(MultiTargetRecordMatchRequest req) {
         QualifiedTable hubTable = validateBeforeStream(req);
-        MergedLayout layout = MergedLayout.build(req);
+        MergedLayout layout = MergedLayout.build(req, recordMatchService::isComparisonGroupFuzzy);
         return outputStream -> {
             // No per-target SQL here: `meta` is serialised and flushed before a
             // single target has been planned, so anything this line promised
@@ -168,7 +168,7 @@ public class MultiTargetRecordMatchService {
      */
     public ResponseEntity<StreamingResponseBody> matchMultiCsv(MultiTargetRecordMatchRequest req) {
         validateBeforeStream(req);
-        MergedLayout layout = MergedLayout.build(req);
+        MergedLayout layout = MergedLayout.build(req, recordMatchService::isComparisonGroupFuzzy);
         StreamingResponseBody body = outputStream -> {
             Writer writer = new BufferedWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8));
             writer.write('\uFEFF');
@@ -356,7 +356,8 @@ public class MultiTargetRecordMatchService {
      */
     private record MergedLayout(List<String> supersetColumns, List<TargetRowMapper> targetMappers) {
 
-        static MergedLayout build(MultiTargetRecordMatchRequest req) {
+        static MergedLayout build(MultiTargetRecordMatchRequest req,
+                                  java.util.function.Predicate<ComparisonGroup> comparisonIsFuzzy) {
             Set<String> used = new LinkedHashSet<>();
             List<String> columns = new ArrayList<>();
             columns.add("match_set_label");
@@ -437,7 +438,13 @@ public class MultiTargetRecordMatchService {
                 }
                 for (int ci = 0; ci < target.comparisonGroups().size(); ci++) {
                     String cmpPrefix = sanitized + "_cmp_" + ci + "_";
-                    for (String suffix : List.of("source", "target", "match", "score_pct")) {
+                    // score_pct exists only for a fuzzy comparison — an exact one
+                    // emits no score, so declaring the column would put a
+                    // permanently empty column in the grid and the CSV.
+                    List<String> suffixes = comparisonIsFuzzy.test(target.comparisonGroups().get(ci))
+                            ? List.of("source", "target", "match", "score_pct")
+                            : List.of("source", "target", "match");
+                    for (String suffix : suffixes) {
                         String sqlCol = "cmp_" + ci + "_" + suffix;
                         String out = RecordMatchService.allocateUniqueAlias(cmpPrefix + suffix, used);
                         used.add(out);

@@ -408,6 +408,37 @@ class MultiTargetRecordMatchServiceTest {
         assertTrue(cap.getAllValues().stream().allMatch(r -> r.joinType() == null));
     }
 
+    /**
+     * The merged layout must allocate cmp_N_score_pct on exactly the condition
+     * the SQL emits it. Allocating it unconditionally put a permanently empty
+     * score column in the grid and the CSV for every exact comparison.
+     */
+    @Test
+    void scoreColumnDeclaredOnlyForFuzzyComparisons() throws Exception {
+        stubHubValidation();
+        ComparisonGroup exact = new ComparisonGroup(
+                List.of(hub("golden", "district")), List.of(tgt("bank_txn", "district")),
+                GroupMode.COMBINE, null, null);
+        ComparisonGroup fuzzy = new ComparisonGroup(
+                List.of(hub("golden", "father_name")), List.of(tgt("bank_txn", "father_name")),
+                GroupMode.COMBINE, 80.0, null);
+        TargetMatchSpec spec = new TargetMatchSpec(
+                "Bank", CATALOG, SCHEMA, "bank_txn",
+                List.of(tgt("bank_txn", "ja_id")), List.of(), List.of(), null,
+                List.of(exact, fuzzy));
+        MultiTargetRecordMatchRequest req = new MultiTargetRecordMatchRequest(
+                List.of(hub("golden", "jan_aadhaar")), List.of(), HubSide.SOURCE,
+                List.of(spec), false, null, null, false);
+        when(recordMatchService.isComparisonGroupFuzzy(exact)).thenReturn(false);
+        when(recordMatchService.isComparisonGroupFuzzy(fuzzy)).thenReturn(true);
+        when(recordMatchService.planMatch(any())).thenReturn(queryWithSql("JOIN"));
+        stubJdbcRow(Map.of("source_jan_aadhaar", "x", "target_ja_id", "y"));
+
+        String meta = streamOutput(req).lines().findFirst().orElseThrow();
+        assertFalse(meta.contains("Bank_cmp_0_score_pct"), meta);
+        assertTrue(meta.contains("Bank_cmp_1_score_pct"), meta);
+    }
+
     @Test
     void dedupWithRightJoinTargetRejectedBeforeStream() {
         stubHubValidation();

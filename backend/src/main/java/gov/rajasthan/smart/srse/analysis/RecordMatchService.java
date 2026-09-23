@@ -519,7 +519,14 @@ public class RecordMatchService {
         return CompareAs.resolve(sideCompareAs(group.source()), sideCompareAs(group.target()));
     }
 
-    private boolean isComparisonGroupFuzzy(ComparisonGroup group) {
+    /**
+     * Whether this comparison emits a similarity score rather than an equality
+     * verdict. Package-private because {@code MultiTargetRecordMatchService}'s
+     * merged layout must allocate the score column on exactly the same
+     * condition the SQL emits it — deciding that twice is how a column that is
+     * always null ends up in the grid.
+     */
+    boolean isComparisonGroupFuzzy(ComparisonGroup group) {
         List<MatchCriterion> columns = new ArrayList<>(group.source());
         columns.addAll(group.target());
         boolean anyRegistered = false;
