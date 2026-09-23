@@ -42,6 +42,9 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.ArgumentMatchers.startsWith;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.mock;
@@ -1603,6 +1606,65 @@ class RecordMatchServiceTest {
         assertEquals(2, query.params().size());
         assertEquals(0.85, query.params().get(0));
         assertEquals(0.85, query.params().get(1));
+    }
+
+    /** Feeds SHOW STATS one column row plus the summary row that carries row_count. */
+    private void stubCatalogStats(String column, long distinctValues, long rowCount) throws Exception {
+        lenient().doAnswer(inv -> {
+            RowCallbackHandler h = inv.getArgument(1);
+            ResultSet colRow = mock(ResultSet.class);
+            lenient().when(colRow.getString("column_name")).thenReturn(column);
+            lenient().when(colRow.getDouble("distinct_values_count")).thenReturn((double) distinctValues);
+            lenient().when(colRow.getDouble("row_count")).thenReturn(0.0);
+            lenient().when(colRow.wasNull()).thenReturn(false, true);
+            h.processRow(colRow);
+            ResultSet summary = mock(ResultSet.class);
+            lenient().when(summary.getString("column_name")).thenReturn(null);
+            lenient().when(summary.getDouble("distinct_values_count")).thenReturn(0.0);
+            lenient().when(summary.getDouble("row_count")).thenReturn((double) rowCount);
+            lenient().when(summary.wasNull()).thenReturn(true, false);
+            h.processRow(summary);
+            return null;
+        }).when(jdbc).query(startsWith("SHOW STATS"), any(RowCallbackHandler.class));
+    }
+
+    @Test
+    void exactGroupUsesCatalogStatsInsteadOfLiveAggregates() throws Exception {
+        stubCatalogStats("m_id", 20_000L, 200_000L);
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "m_id")),
+                List.of(exact("bank_txn", "m_id")),
+                null, null, List.of(), false, null, null, JoinType.INNER);
+        assertDoesNotThrow(() -> service.planMatch(req));
+        // stats supplied both inputs, so neither aggregate had to run
+        verify(jdbc, never()).queryForObject(contains("approx_distinct"), eq(Long.class));
+        verify(jdbc, never()).queryForObject(contains("count(*)"), eq(Long.class));
+    }
+
+    @Test
+    void fuzzyGroupStillComputesBlockingKeyDistinctDespiteStats() throws Exception {
+        stubCatalogStats("full_name", 20_000L, 200_000L);
+        // Fuzziness is decided per GROUP, so BOTH sides join on the blocking key
+        // and neither can use the column statistic — give the computed distinct a
+        // realistic value so the estimate stays under the ceiling.
+        lenient().when(jdbc.queryForObject(contains("approx_distinct"), eq(Long.class))).thenReturn(100_000L);
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(fuzzy("beneficiary", "full_name", 85)),
+                List.of(exact("bank_txn", "full_name")),
+                null, null, List.of(), false, null, null, JoinType.INNER);
+        assertDoesNotThrow(() -> service.planMatch(req));
+        // no catalog statistic describes substr(lower(col), 1, n)
+        verify(jdbc, atLeastOnce()).queryForObject(contains("approx_distinct"), eq(Long.class));
+    }
+
+    @Test
+    void missingCatalogStatsFallsBackToLiveAggregates() {
+        RecordMatchRequest req = new RecordMatchRequest(
+                List.of(exact("beneficiary", "m_id")),
+                List.of(exact("bank_txn", "m_id")),
+                null, null, List.of(), false, null, null, JoinType.INNER);
+        assertDoesNotThrow(() -> service.planMatch(req));
+        verify(jdbc, atLeastOnce()).queryForObject(contains("count(*)"), eq(Long.class));
     }
 
     @Test
