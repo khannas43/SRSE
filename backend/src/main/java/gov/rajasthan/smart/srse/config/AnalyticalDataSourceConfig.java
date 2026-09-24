@@ -84,10 +84,16 @@ public class AnalyticalDataSourceConfig {
     }
 
     @Bean(name = "prestoJdbcTemplate")
-    public JdbcTemplate prestoJdbcTemplate(SwappableDataSource analyticalDataSource) {
+    public JdbcTemplate prestoJdbcTemplate(
+            SwappableDataSource analyticalDataSource,
+            @Value("${srse.guardrails.query-timeout-seconds:180}") int queryTimeoutSeconds) {
         JdbcTemplate t = new JdbcTemplate(analyticalDataSource);
-        // Query timeout (seconds) — guardrail; overridden from config in execution service.
-        t.setQueryTimeout(30);
+        // Seed value only. Every service overwrites this on the SHARED template
+        // before its own query, so what matters here is that a caller which
+        // forgets to gets the CONFIGURED limit rather than a magic number. It
+        // used to be a hardcoded 30, which is what silently cut off the admin
+        // lakehouse browse while SRSE_QUERY_TIMEOUT_SECONDS said 180.
+        t.setQueryTimeout(queryTimeoutSeconds);
         return t;
     }
 

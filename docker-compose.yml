@@ -59,7 +59,7 @@ services:
       - SRSE_FRONTEND_ORIGINS=${SRSE_FRONTEND_ORIGINS:-http://localhost:3000}
       # Guardrails
       - SRSE_COHORT_CAP=1000
-      - SRSE_QUERY_TIMEOUT_SECONDS=30
+      - SRSE_QUERY_TIMEOUT_SECONDS=180
       - SRSE_ANALYSIS_ROW_CAP=1000
       # Breakdown's age-band dimension has no field-catalogue entry (never an
       # officer-selectable rule filter) — physical column name set here instead.

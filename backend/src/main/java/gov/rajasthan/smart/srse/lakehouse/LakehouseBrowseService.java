@@ -1,5 +1,6 @@
 package gov.rajasthan.smart.srse.lakehouse;
 
+import gov.rajasthan.smart.srse.execution.GuardrailProperties;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -56,13 +57,32 @@ public class LakehouseBrowseService {
     private static final Set<String> SYSTEM_CATALOGS = Set.of("system", "jmx");
 
     private final JdbcTemplate jdbc;
+    private final GuardrailProperties guardrails;
 
-    public LakehouseBrowseService(@Qualifier("prestoJdbcTemplate") JdbcTemplate jdbc) {
+    public LakehouseBrowseService(@Qualifier("prestoJdbcTemplate") JdbcTemplate jdbc,
+                                  GuardrailProperties guardrails) {
         this.jdbc = jdbc;
+        this.guardrails = guardrails;
+    }
+
+    /**
+     * Applies the configured query timeout before every browse query.
+     *
+     * <p>Not inherited, and not optional: {@code prestoJdbcTemplate} is a shared
+     * singleton whose {@code queryTimeout} each service overwrites for its own
+     * queries. Browsing set nothing, so it ran on whatever the last caller left
+     * behind — the bean's hardcoded default, or a multi-target sub-match's
+     * per-target slice. An admin listing tables in a large catalog was cut off
+     * at 30s with "Query exceeded time limit", with nothing in the Admin UI's
+     * own configuration to explain the number.
+     */
+    private void applyTimeout() {
+        jdbc.setQueryTimeout(guardrails.queryTimeoutSeconds());
     }
 
     /** Every data catalog the current Presto connection can see, e.g. {@code iceberg_data}. */
     public List<String> listCatalogs() {
+        applyTimeout();
         return jdbc.queryForList("SHOW CATALOGS", String.class).stream()
                 // A catalog whose name isn't a bare identifier can't be
                 // addressed by the rest of this service, so it's dropped here
@@ -75,6 +95,7 @@ public class LakehouseBrowseService {
 
     /** Schemas inside {@code catalog}, e.g. {@code jan_aadhar_data_txn}. */
     public List<String> listSchemas(String catalog) {
+        applyTimeout();
         validateCatalog(catalog);
         return jdbc.queryForList(
                         "SELECT schema_name FROM " + catalog + ".information_schema.schemata "
@@ -87,6 +108,7 @@ public class LakehouseBrowseService {
 
     /** Tables inside {@code catalog.schema}, e.g. {@code tbl_txn_bankdtl}. */
     public List<String> listTables(String catalog, String schema) {
+        applyTimeout();
         validateSchema(catalog, schema);
         return jdbc.queryForList(
                         // catalog is an interpolated identifier (validated above);
@@ -100,6 +122,7 @@ public class LakehouseBrowseService {
 
     /** Columns of {@code catalog.schema.table}, in ordinal order, e.g. {@code bank_id}, {@code account_no}. */
     public List<ColumnInfo> listColumns(String catalog, String schema, String table) {
+        applyTimeout();
         validateTable(catalog, schema, table);
         return jdbc.query(
                 "SELECT column_name, data_type FROM " + catalog + ".information_schema.columns "

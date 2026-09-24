@@ -1,6 +1,7 @@
 package gov.rajasthan.smart.srse.lakehouse;
 
 import org.junit.jupiter.api.BeforeEach;
+import gov.rajasthan.smart.srse.execution.GuardrailProperties;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -10,6 +11,9 @@ import org.springframework.jdbc.core.RowMapper;
 
 import java.util.List;
 
+import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -33,7 +37,7 @@ class LakehouseBrowseServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new LakehouseBrowseService(jdbc);
+        service = new LakehouseBrowseService(jdbc, new GuardrailProperties(1000, 180, 50));
     }
 
     private void stubCatalogs(String... catalogs) {
@@ -165,5 +169,22 @@ class LakehouseBrowseServiceTest {
         stubCatalogs(CATALOG, "weird-catalog name");
 
         assertEquals(List.of(CATALOG), service.listCatalogs());
+    }
+
+    /**
+     * The browse path shares prestoJdbcTemplate with every other service, each
+     * of which overwrites queryTimeout for its own queries. Browsing set none,
+     * so it ran on whatever was left behind — a hardcoded 30 on the bean, which
+     * cut off admin table listings while SRSE_QUERY_TIMEOUT_SECONDS said 180.
+     */
+    @Test
+    void browseAppliesTheConfiguredQueryTimeout() {
+        when(jdbc.queryForList(eq("SHOW CATALOGS"), eq(String.class))).thenReturn(List.of("iceberg"));
+        when(jdbc.queryForList(contains("information_schema.schemata"), eq(String.class)))
+                .thenReturn(List.of("srse"));
+        when(jdbc.queryForList(contains("information_schema.tables"), eq(String.class), any(Object[].class)))
+                .thenReturn(List.of("beneficiary"));
+        service.listTables("iceberg", "srse");
+        verify(jdbc, atLeastOnce()).setQueryTimeout(180);
     }
 }

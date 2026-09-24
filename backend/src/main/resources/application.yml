@@ -44,7 +44,7 @@ srse:
   frontend-origins: ${SRSE_FRONTEND_ORIGINS:http://localhost:3000}
   guardrails:
     cohort-cap: ${SRSE_COHORT_CAP:1000}
-    query-timeout-seconds: ${SRSE_QUERY_TIMEOUT_SECONDS:30}
+    query-timeout-seconds: ${SRSE_QUERY_TIMEOUT_SECONDS:180}
     preview-sample-size: ${SRSE_PREVIEW_SAMPLE_SIZE:50}
   analysis:
     max-target-sets: ${SRSE_ANALYSIS_MAX_TARGET_SETS:5}
